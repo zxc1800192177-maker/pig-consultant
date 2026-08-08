@@ -1,31 +1,32 @@
-/* Apple 風格:大量留白、系統字體、克制的單一強調色、細緻分隔線。
-   中文用蘋方(PingFang TC),Windows 退回微軟正黑體。 */
+/* Apple 的結構語言(留白、系統字體、藥丸按鈕、分段控制器、髮絲線)
+   配上取自小豬插畫本身的暖色調色盤 —— 強調色就是豬的描邊咖啡色,
+   不是隨便挑一個橘色。中文用蘋方(PingFang TC),Windows 退回微軟正黑體。 */
 
 :root {
-  --bg: #fbfbfd;
-  --surface: #ffffff;
-  --surface-2: #f5f5f7;
-  --ink: #1d1d1f;
-  --ink-soft: #6e6e73;
-  --ink-faint: #86868b;
-  --accent: #0071e3;
-  --accent-hover: #0077ed;
-  --border: #d2d2d7;
-  --border-light: #e8e8ed;
+  --bg: #fdf3ec;
+  --surface: #fffaf6;
+  --surface-2: #f7e5d8;
+  --ink: #3d2b22;
+  --ink-soft: #7d6355;
+  --ink-faint: #a68a7a;
+  --accent: #b9714f;
+  --accent-hover: #c67f5c;
+  --border: #e8d2c0;
+  --border-light: #f3e6d9;
 
-  --good: #1d8a4a;
-  --good-bg: #e8f7ee;
-  --neutral: #6e6e73;
-  --neutral-bg: #f0f0f2;
-  --warn: #a35a00;
-  --warn-bg: #fff4e5;
-  --critical: #c9251c;
-  --critical-bg: #ffeceb;
+  --good: #4b8f52;
+  --good-bg: #e9f4e7;
+  --neutral: #8a7566;
+  --neutral-bg: #f2e6da;
+  --warn: #b5720c;
+  --warn-bg: #fbead0;
+  --critical: #c9432c;
+  --critical-bg: #fbe3db;
 
-  --pink: #ff8fa3;
+  --pink: #f4a0a8;
 
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, .04), 0 1px 2px rgba(0, 0, 0, .03);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, .06), 0 1px 3px rgba(0, 0, 0, .04);
+  --shadow-sm: 0 1px 3px rgba(120, 72, 40, .05), 0 1px 2px rgba(120, 72, 40, .04);
+  --shadow-md: 0 4px 16px rgba(120, 72, 40, .08), 0 1px 3px rgba(120, 72, 40, .05);
 
   --radius: 18px;
   --radius-sm: 12px;
@@ -37,24 +38,26 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #000000;
-    --surface: #1d1d1f;
-    --surface-2: #2c2c2e;
-    --ink: #f5f5f7;
-    --ink-soft: #a1a1a6;
-    --ink-faint: #86868b;
-    --accent: #2997ff;
-    --accent-hover: #47a5ff;
-    --border: #38383a;
-    --border-light: #2c2c2e;
+    --bg: #1c1512;
+    --surface: #2a201b;
+    --surface-2: #382c25;
+    --ink: #f5e9e0;
+    --ink-soft: #c2ab9c;
+    --ink-faint: #9c8574;
+    --accent: #e08f68;
+    --accent-hover: #ec9c76;
+    --border: #4a3b32;
+    --border-light: #362a23;
 
-    --good: #4ad06a; --good-bg: #102a18;
-    --neutral: #98989d; --neutral-bg: #2c2c2e;
-    --warn: #ffa93d; --warn-bg: #2e2110;
-    --critical: #ff6961; --critical-bg: #2e1412;
+    --good: #7fc285; --good-bg: #1e2b1c;
+    --neutral: #b3a08f; --neutral-bg: #362c24;
+    --warn: #f0ad4e; --warn-bg: #3a2a13;
+    --critical: #ef7862; --critical-bg: #3a201a;
+
+    --pink: #f0aab0;
 
     --shadow-sm: none;
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, .5);
+    --shadow-md: 0 4px 20px rgba(0, 0, 0, .45);
   }
 }
 
@@ -83,7 +86,7 @@ body {
   gap: 12px;
   padding: 56px 0 36px;
 }
-.masthead .pig { width: 76px; height: 76px; }
+.masthead .pig { width: 96px; height: auto; }
 .masthead h1 {
   font-size: 38px;
   font-weight: 700;
@@ -249,7 +252,7 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   color: var(--ink-faint);
 }
 .empty-state p { margin: 0; font-size: 14.5px; max-width: 34ch; margin-inline: auto; }
-.pig-empty { width: 54px; height: 54px; opacity: .38; margin-bottom: 12px; }
+.pig-empty { width: 64px; height: auto; opacity: .55; margin-bottom: 12px; }
 
 /* ── 提示條 ── */
 .notice {
@@ -375,4 +378,4 @@ footer {
   padding-top: 26px; border-top: 1px solid var(--border-light);
 }
 footer p { margin: 4px 0; }
-footer .pig-mini { width: 26px; height: 26px; opacity: .55; margin-bottom: 6px; }
+footer .pig-mini { width: 30px; height: auto; opacity: .7; margin-bottom: 6px; }
