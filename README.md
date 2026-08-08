@@ -37,10 +37,12 @@ python -m pytest tests/ -q -m ""
 | 輸入驗證 | `core/metrics.py` | 完成 |
 | 弱項排序 | `core/diagnosis.py` | 完成(權重待覆核) |
 | 架構守衛 | `tests/test_core_purity.py` | 完成 |
-| **核心層小計** | | **300 測試通過** |
-| AI 層 | `ai/consultant.py` | 未開始 |
-| HTTP 層 | `server.py` | 未開始 |
-| 前端 + 前端測試 | `web/`、`tests/js/` | 未開始 |
+| **測試總計** | | **574 Python + 45 JS 通過** |
+| AI 層 | `ai/consultant.py` | 完成(CLI / API 雙傳輸層) |
+| HTTP 層 | `server.py` | 完成 |
+| 前端 + 前端測試 | `web/`、`tests/js/` | 完成 |
+| 濫用防護 | 每 IP 每小時 20 次、單題 2000 字、請求體 64KB | 完成 |
+| 資安稽核 | 見下方「稽核修正」 | 完成 |
 
 ### 已達成的規格成功條件
 
