@@ -38,7 +38,13 @@ MAX_AI_REQUESTS_PER_DAY = int(os.environ.get("MAX_AI_REQUESTS_PER_DAY", "500"))
 # --- AI 呼叫 ---
 MODEL = "sonnet"                          # CLI 傳輸層用的別名
 API_MODEL = "claude-sonnet-5"              # Anthropic API 傳輸層用的完整型號名稱
-API_MAX_TOKENS = 1500
+
+# 實測發現:這個模型有時會自行進行大量內部思考(thinking token),
+# 曾在 1500 上限下把整個額度耗在思考、完全沒剩空間輸出真正答案
+# (stop_reason: max_tokens,thinking_tokens 就吃掉全部 1500)。
+# 思考過程是否觸發不可預期,拉高上限確保思考+正式回答都有空間。
+# 只影響「允許多長」,實際計費仍按模型真正產生的 token 數,不會白花錢。
+API_MAX_TOKENS = 8000
 
 # 網頁表單的內容會送進 CLI。不關閉工具等於讓任何能開啟網頁的人
 # 在這台電腦上執行指令(憲法第四條)。這份清單是安全邊界,有測試把關。

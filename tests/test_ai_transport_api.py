@@ -46,6 +46,19 @@ def _event(delta_text=None, done=False, error=None):
     return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def _message_delta(stop_reason):
+    payload = {"type": "message_delta", "delta": {"stop_reason": stop_reason}}
+    return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _non_text_delta(kind):
+    """thinking_delta / signature_delta 等非文字事件 —— 曾實際觀測到:
+    模型把整個 token 額度用在這類事件上,content_block_delta 從未帶 text_delta。
+    """
+    payload = {"type": "content_block_delta", "delta": {"type": kind}}
+    return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+
 class TestRequestConstruction:
     """驗證送給 Anthropic API 的請求內容,不實際發送。"""
 
@@ -120,7 +133,10 @@ class TestStreamParsing:
         result = list(transport.stream("問題", "系統提示"))
         assert result == ["第一", "第二"]
 
-    def test_ignores_non_delta_events(self, transport, monkeypatch):
+    def test_ignores_non_delta_events_but_still_needs_real_text(self, transport, monkeypatch):
+        """非文字事件本身會被忽略,但若整段串流完全沒有文字,
+        現在視為錯誤而非成功的空清單(見 TestNoTextProduced)。
+        """
         response = FakeHttpResponse(200, [
             (b'data: {"type":"message_start"}\n'),
             b'\n',
@@ -128,7 +144,58 @@ class TestStreamParsing:
             b'\n',
         ])
         monkeypatch.setattr(transport, "_open", lambda req: response)
-        assert list(transport.stream("問題", "系統提示")) == []
+        with pytest.raises(TransportError):
+            list(transport.stream("問題", "系統提示"))
+
+
+class TestNoTextProduced:
+    """實際發生過的 bug:模型把整個 token 額度耗在內部思考上,
+    stop_reason 變成 max_tokens,一個字的正式回答都沒輸出。
+
+    原本這種情況會被當成「成功但空白」靜默結束,呼叫端顯示空白內容、
+    使用者以為系統壞了卻看不到任何錯誤訊息。串流結束時必須明確檢查:
+    完全沒有文字產出就是錯誤,不是成功的空結果。
+    """
+
+    @pytest.fixture
+    def transport(self):
+        return AnthropicApiTransport(api_key="sk-test-key")
+
+    def test_raises_when_only_thinking_events_and_max_tokens(self, transport, monkeypatch):
+        response = FakeHttpResponse(200, [
+            _non_text_delta("thinking_delta"),
+            _non_text_delta("signature_delta"),
+            _message_delta("max_tokens"),
+        ])
+        monkeypatch.setattr(transport, "_open", lambda req: response)
+        with pytest.raises(TransportError, match="思考"):
+            list(transport.stream("問題", "系統提示"))
+
+    def test_raises_generic_error_when_empty_without_max_tokens(self, transport, monkeypatch):
+        """沒文字但也不是因為撞到 max_tokens,仍要報錯,不能悄悄回傳空字串。"""
+        response = FakeHttpResponse(200, [_message_delta("end_turn")])
+        monkeypatch.setattr(transport, "_open", lambda req: response)
+        with pytest.raises(TransportError):
+            list(transport.stream("問題", "系統提示"))
+
+    def test_does_not_raise_when_text_is_produced(self, transport, monkeypatch):
+        """正常情況(哪怕只有一個字)不該被這道新檢查誤傷。"""
+        response = FakeHttpResponse(200, [
+            _event(delta_text="好"),
+            _message_delta("end_turn"),
+        ])
+        monkeypatch.setattr(transport, "_open", lambda req: response)
+        assert list(transport.stream("問題", "系統提示")) == ["好"]
+
+    def test_thinking_before_real_text_is_fine(self, transport, monkeypatch):
+        """思考過程之後只要有輸出正式文字,就不算「沒有回覆內容」。"""
+        response = FakeHttpResponse(200, [
+            _non_text_delta("thinking_delta"),
+            _event(delta_text="這是真正的回答"),
+            _message_delta("end_turn"),
+        ])
+        monkeypatch.setattr(transport, "_open", lambda req: response)
+        assert list(transport.stream("問題", "系統提示")) == ["這是真正的回答"]
 
 
 class TestErrorMapping:

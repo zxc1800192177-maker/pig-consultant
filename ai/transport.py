@@ -199,12 +199,22 @@ class AnthropicApiTransport:
         return urllib.request.urlopen(req, timeout=config.AI_TIMEOUT_SEC)
 
     def stream(self, prompt: str, system: str) -> Iterator[str]:
+        """串流回應文字。
+
+        這個模型有時會把大量 token 花在內部思考(thinking block)上,
+        極端情況下可能耗盡 max_tokens 而完全沒有輸出正式回答文字
+        (stop_reason: max_tokens,但一個字都沒吐)。若靜默結束,
+        呼叫端會顯示空白內容,使用者以為是系統壞了卻看不到任何錯誤。
+        因此在串流結束時明確檢查:完全沒有文字產出就視為錯誤,而非成功。
+        """
         req = self.build_request(prompt, system)
         try:
             response = self._open(req)
         except urllib.error.HTTPError as e:
             raise self._map_http_error(e)
 
+        produced = False
+        stop_reason = None
         with response:
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="replace").strip()
@@ -219,10 +229,23 @@ class AnthropicApiTransport:
                     raise TransportError(
                         event.get("error", {}).get("message", "API 回報錯誤")
                     )
+                if event.get("type") == "message_delta":
+                    stop_reason = event.get("delta", {}).get("stop_reason")
                 if event.get("type") == "content_block_delta":
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
-                        yield delta.get("text", "")
+                        text = delta.get("text", "")
+                        if text:
+                            produced = True
+                        yield text
+
+        if not produced:
+            if stop_reason == "max_tokens":
+                raise TransportError(
+                    "顧問沒有回覆內容(模型把 token 額度耗在內部思考上,"
+                    "尚未開始輸出正式回答)。請再試一次。"
+                )
+            raise TransportError("顧問沒有回覆內容,請再試一次。")
 
     @staticmethod
     def _map_http_error(e: urllib.error.HTTPError) -> TransportError:
