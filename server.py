@@ -160,13 +160,15 @@ class Application:
 
     # --- GET ---
 
-    def handle_get(self, path: str, client: str = "") -> Tuple[int, dict]:
+    def handle_get(self, path: str, client: str = "",
+                   forwarded_chain: str = "") -> Tuple[int, dict]:
         if path == "/api/health":
             return 200, {
                 # 回報伺服器判定的來源身分。限流是依這個值分群的,
                 # 若它每次請求都不同,限流就形同虛設 —— 這在本機測不出來,
                 # 只有在真實代理環境下才會顯現。回報使用者自己的 IP 不涉及隱私。
                 "clientId": client,
+                "forwardedChain": forwarded_chain,
                 "aiAvailable": self.transport.is_logged_in(),
                 # 健檢是純計算,不依賴 AI 或網路,永遠可用(規格 6.5)
                 "gradingAvailable": True,
@@ -421,7 +423,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/"):
             self._send(*APP.handle_get(
-                self.path, client_ip(self.headers, self.client_address[0])
+                self.path,
+                client_ip(self.headers, self.client_address[0]),
+                self.headers.get("X-Forwarded-For", ""),
             ))
             return
         super().do_GET()
