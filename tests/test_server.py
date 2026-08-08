@@ -9,7 +9,7 @@ import json
 import pytest
 
 import config
-from ai.transport import FakeTransport, NotLoggedIn, QuotaExceeded
+from ai.transport import AnthropicApiTransport, FakeTransport, NotLoggedIn, QuotaExceeded
 from server import Application
 
 # monkeypatch.setattr 已在每個測試結束後自動還原 config 的修改,不需額外處理。
@@ -180,7 +180,12 @@ class TestRateLimit:
 
 
 class TestErrorMessages:
-    """規格 6.5:AI 不可用時要說清楚原因,不能只丟通用錯誤。"""
+    """規格 6.5:AI 不可用時要說清楚原因,不能只丟通用錯誤。
+
+    曾實際發生的 bug:伺服器不論哪個傳輸層丟出 NotLoggedIn,一律顯示寫死的
+    「Claude CLI 尚未登入」文字。API 傳輸層的 401(金鑰無效)因此被蓋成
+    CLI 未登入的訊息,診斷方向整個被帶偏——這正是這裡的測試在防的事。
+    """
 
     def test_quota_error_is_identifiable(self):
         app = Application(transport=FakeTransport(error=QuotaExceeded("額度用盡")))
@@ -188,12 +193,57 @@ class TestErrorMessages:
         assert status == 503
         assert body["reason"] == "quota"
 
-    def test_login_error_is_identifiable(self):
+    def test_error_message_is_not_overwritten_by_server(self):
+        """伺服器不得覆蓋傳輸層自己產生的錯誤文字,只能分類、不能改寫內容。"""
         app = Application(transport=FakeTransport(error=NotLoggedIn("尚未登入")))
         status, body = _post(app, "/api/consult", {"question": "小豬下痢"})
         assert status == 503
         assert body["reason"] == "not_logged_in"
-        assert "claude auth login" in body["error"]
+        assert body["error"] == "尚未登入"
+
+    def test_cli_and_api_not_logged_in_produce_different_messages(self):
+        """同樣是 NotLoggedIn,兩個傳輸層的措辭必須各自準確,不能共用一句文字。
+
+        CLI 沒登入該講「請執行 claude auth login」,
+        API 金鑰無效該講「請確認 ANTHROPIC_API_KEY」——兩者對應到完全不同的
+        修復動作,講錯了會讓人去改錯地方。
+        """
+        cli_app = Application(transport=FakeTransport(
+            error=NotLoggedIn("Claude CLI 尚未登入,請執行 claude auth login --claudeai")
+        ))
+        api_app = Application(transport=FakeTransport(
+            error=NotLoggedIn("API key 無效或未授權,請確認 ANTHROPIC_API_KEY")
+        ))
+
+        _, cli_body = _post(cli_app, "/api/consult", {"question": "小豬下痢"})
+        _, api_body = _post(api_app, "/api/consult", {"question": "小豬下痢"})
+
+        assert cli_body["error"] != api_body["error"]
+        assert "claude auth login" in cli_body["error"]
+        assert "ANTHROPIC_API_KEY" in api_body["error"]
+        assert "ANTHROPIC_API_KEY" not in cli_body["error"]
+        assert "claude auth login" not in api_body["error"]
+
+    def test_real_api_transport_401_message_reaches_the_response_unaltered(self):
+        """整條路徑串起來測(非 fake):真的 401 錯誤要原封不動送到回應裡。"""
+        import io
+        import urllib.error
+
+        transport = AnthropicApiTransport(api_key="sk-invalid-for-test")
+
+        def raise_401(req):
+            raise urllib.error.HTTPError(
+                req.full_url, 401, "Unauthorized", {}, fp=io.BytesIO(b"{}")
+            )
+
+        transport._open = raise_401
+        app = Application(transport=transport)
+
+        status, body = _post(app, "/api/consult", {"question": "小豬下痢"})
+        assert status == 503
+        assert body["reason"] == "not_logged_in"
+        assert "ANTHROPIC_API_KEY" in body["error"]
+        assert "claude" not in body["error"].lower()
 
 
 class TestReportableAlwaysDelivered:

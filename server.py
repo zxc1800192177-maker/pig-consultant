@@ -277,17 +277,19 @@ class Application:
 
     @staticmethod
     def _transport_error(error: TransportError) -> dict:
-        """把錯誤分類,讓前端能做出正確的降級提示(規格 6.5)。"""
+        """把錯誤分類,讓前端能做出正確的降級提示(規格 6.5)。
+
+        訊息一律用傳輸層自己產生的文字(str(error)),不在這裡覆蓋。
+        兩個傳輸層(CLI/API)對同一種錯誤類型會給出不同、各自準確的說明——
+        例如同樣是 NotLoggedIn,CLI 傳輸層講的是「請執行 claude auth login」,
+        API 傳輸層講的是「請確認 ANTHROPIC_API_KEY」。這裡若寫死其中一種文字,
+        另一條路徑出錯時會顯示不相關甚至誤導的訊息(曾實際發生:API key 401
+        被錯誤顯示成「CLI 尚未登入」,診斷方向整個被帶偏)。
+        """
         if isinstance(error, NotLoggedIn):
-            return {
-                "reason": "not_logged_in",
-                "error": "Claude CLI 尚未登入,請執行 claude auth login --claudeai",
-            }
+            return {"reason": "not_logged_in", "error": str(error)}
         if isinstance(error, QuotaExceeded):
-            return {
-                "reason": "quota",
-                "error": "訂閱額度可能已用盡。生產健檢不受影響,仍可正常使用。",
-            }
+            return {"reason": "quota", "error": str(error)}
         return {"reason": "error", "error": str(error)}
 
 
