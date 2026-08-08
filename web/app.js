@@ -186,6 +186,7 @@ function renderHealthResult(data) {
 
     <div class="card" id="adviceCard">
       <div class="section-label tag-ai">AI 改善建議</div>
+      <div class="notice notice-caution">${escapeHtml(data.medicalDisclaimer)}</div>
       <div id="adviceBody" class="md"></div>
     </div>`;
 }
@@ -300,6 +301,12 @@ function handleConsultEvent(event, getAnswer, setAnswer) {
       parts.push(`<div class="notice notice-alert">${escapeHtml(event.escalation.notice)}</div>`);
     }
     parts.push(`<div class="notice notice-info">${escapeHtml(event.baselineNotice)}</div>`);
+    // 醫療免責緊貼在回答上方,使用者不用捲到頁尾才看得到
+    if (event.medicalDisclaimer) {
+      parts.push(
+        `<div class="notice notice-caution">${escapeHtml(event.medicalDisclaimer)}</div>`
+      );
+    }
     $("consultResult").insertAdjacentHTML("afterbegin", parts.join(""));
     return;
   }

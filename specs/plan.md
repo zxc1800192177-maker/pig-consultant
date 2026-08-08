@@ -97,7 +97,7 @@ AI 的輸出**不得**回流進 `core/`。
 
 ## 5. 核心演算法
 
-已用合億畜牧場 18 項實際評級驗證通過(見 `reference/benchmark-2025.md`)。
+已用範例牧場 18 項實際評級驗證通過(見 `reference/benchmark-2025.md`)。
 
 ```python
 def grade(value, percentiles, bands):

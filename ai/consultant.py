@@ -71,6 +71,12 @@ class Consultant:
         通報判斷先做完再呼叫 AI —— 使用者可能在 AI 回完前就關掉頁面,
         防疫提示不能等到最後才出現。
         """
+        # 型別必須先檢查:非字串直接呼叫 .strip() 會拋 AttributeError,
+        # 一路往上炸掉整個請求處理,使用者只會看到畫面永遠卡在載入中。
+        # 網頁介面不會送出這種資料,但任何人直接呼叫 API 就會觸發。
+        if question is not None and not isinstance(question, str):
+            raise ValueError("問題必須是文字")
+
         question = (question or "").strip()
         if not question:
             raise ValueError("問題不可為空")

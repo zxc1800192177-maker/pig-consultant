@@ -93,7 +93,7 @@ class TestCrossFieldWarnings:
         assert not report.warnings
 
     def test_real_farm_data_produces_no_warning(self):
-        """迴歸測試:合億畜牧場的真實數據不得被誤判為矛盾。
+        """迴歸測試:範例牧場的真實數據不得被誤判為矛盾。
 
         年報公式為 (365.25 − 非生產天數) / (哺乳 + 懷孕),漏掉非生產天數那段
         會讓每份填寫正確的表單都跳出假警告。

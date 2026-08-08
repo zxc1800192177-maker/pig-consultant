@@ -297,6 +297,81 @@ class TestQuestionLength:
         assert transport.last_prompt is None
 
 
+class TestMalformedFieldTypes:
+    """欄位型別錯誤必須回明確錯誤,不可讓執行緒崩潰。
+
+    資安稽核實測發現:送出 {"question": {"a":"b"}} 時,伺服器回 HTTP 200
+    但串流裡「零個事件」—— 連線被切斷,使用者畫面永遠卡在「顧問思考中…」,
+    沒有任何說明。原因是 (question or "").strip() 對非字串會拋 AttributeError。
+    網頁介面不會送出這種資料,但任何人直接呼叫 API 就會觸發。
+    """
+
+    @pytest.fixture
+    def app(self, monkeypatch):
+        monkeypatch.setattr(config, "MIN_REQUEST_INTERVAL_SEC", 0)
+        return Application(transport=FakeTransport(chunks=["ok"]))
+
+    @pytest.mark.parametrize("bad", [
+        {"a": "b"}, 12345, ["a", "b"], True, 3.14,
+    ])
+    def test_non_string_question_returns_clear_error(self, app, bad):
+        status, body = _post(app, "/api/consult", {"question": bad})
+        assert status == 400, f"question={bad!r} 應回 400,實際 {status}"
+        assert "文字" in body["error"]
+
+    @pytest.mark.parametrize("bad", [{"a": "b"}, 12345, ["a", "b"]])
+    def test_malformed_question_never_reaches_ai(self, bad):
+        """壞掉的輸入不該花錢呼叫 AI。"""
+        transport = FakeTransport(chunks=["不該被呼叫"])
+        app = Application(transport=transport)
+        _post(app, "/api/consult", {"question": bad})
+        assert transport.last_prompt is None
+
+    def test_stream_still_emits_an_error_event(self, app):
+        """串流路徑也要吐出錯誤事件,不能靜默斷線。"""
+        events = list(app.consult_events({"question": {"a": "b"}}, "1.1.1.1"))
+        assert events, "不可零事件 —— 前端會永遠卡在載入中"
+        assert events[-1]["type"] == "error"
+
+
+class TestRequestSizeLimit:
+    """請求體大小上限。
+
+    資安稽核實測:送出 19.7 MB 請求體,伺服器照單全收並正常處理。
+    更關鍵的是順序 —— do_POST 先把整包讀進記憶體,之後才輪到限流,
+    所以「每小時 20 次」完全擋不住這件事。Render 免費方案只有 512MB 記憶體。
+    """
+
+    def test_limit_is_configured(self):
+        assert config.MAX_REQUEST_BYTES > 0
+        # 正常請求:2000 字問題 + 20 則歷史 × 500 字 ≈ 30KB,64KB 綽綽有餘
+        assert config.MAX_REQUEST_BYTES <= 128 * 1024
+
+    def test_oversized_body_is_rejected(self):
+        from server import too_large
+        assert too_large(config.MAX_REQUEST_BYTES + 1) is True
+
+    def test_normal_body_is_allowed(self):
+        from server import too_large
+        assert too_large(30 * 1024) is False
+
+    def test_missing_length_is_allowed(self):
+        from server import too_large
+        assert too_large(0) is False
+
+    def test_real_payload_fits_comfortably(self):
+        """實際最大合法請求要能通過,不能把正常使用者擋掉。"""
+        from server import too_large
+        payload = json.dumps({
+            "question": "痢" * config.MAX_QUESTION_CHARS,
+            "history": [{"role": "user", "content": "痢" * config.MAX_HISTORY_CHARS}]
+                       * config.MAX_HISTORY_TURNS,
+        }, ensure_ascii=False).encode("utf-8")
+        assert too_large(len(payload)) is False, (
+            f"合法請求 {len(payload)} bytes 被擋,上限設太小"
+        )
+
+
 class TestHistoryLimit:
     """對話歷史上限。歷史由前端帶上來,伺服器不能照單全收。"""
 

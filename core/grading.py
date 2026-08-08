@@ -1,6 +1,6 @@
 """生產指標分級 —— 對照全國常模,判定 A~F 級距。
 
-演算法驗證基準:合億畜牧場 2025 年報 18 項實際評級(tests/test_grading.py)。
+演算法驗證基準:範例牧場 2025 年報 18 項實際評級(tests/test_grading.py)。
 規則來源:specs/reference/benchmark-2025.md
 """
 
@@ -50,7 +50,7 @@ def grade(value: float, percentiles: Sequence[float]) -> str:
     """回傳 A~F 級距。
 
     邊界採嚴格不等式:值恰等於切點時歸入較差的一級。
-    依據:合億畜牧場離乳前死亡率 20.21 恰等於 75% 切點,官方判 E 而非 D。
+    依據:範例牧場離乳前死亡率 20.21 恰等於 75% 切點,官方判 E 而非 D。
     """
     _validate(value, percentiles)
     higher_better = is_higher_better(percentiles)

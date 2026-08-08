@@ -30,6 +30,7 @@ from core.grading import grade_all
 from core.labels import (
     ai_unavailable_note,
     grade_label,
+    medical_disclaimer,
     reportable_disclaimer,
     sample_size_note,
     shortfall_note,
@@ -41,6 +42,16 @@ from core.metrics import validate
 BASE_DIR = pathlib.Path(__file__).parent
 WEB_DIR = BASE_DIR / "web"
 EXAMPLE_PATH = BASE_DIR / "data" / "example_farm.json"
+
+
+def too_large(content_length: int) -> bool:
+    """請求體是否超過上限。
+
+    必須在 read() 之前依 Content-Length 判斷 —— 伺服器原本會先把整包
+    讀進記憶體,之後才輪到限流,所以每小時 20 次的限制完全擋不住大包灌流
+    (實測 19.7MB 照單全收)。免費方案只有 512MB 記憶體。
+    """
+    return content_length > config.MAX_REQUEST_BYTES
 
 
 def client_ip(headers, peer_address: str) -> str:
@@ -171,15 +182,9 @@ class Application:
 
     # --- GET ---
 
-    def handle_get(self, path: str, client: str = "",
-                   forwarded_chain: str = "") -> Tuple[int, dict]:
+    def handle_get(self, path: str) -> Tuple[int, dict]:
         if path == "/api/health":
             return 200, {
-                # 回報伺服器判定的來源身分。限流是依這個值分群的,
-                # 若它每次請求都不同,限流就形同虛設 —— 這在本機測不出來,
-                # 只有在真實代理環境下才會顯現。回報使用者自己的 IP 不涉及隱私。
-                "clientId": client,
-                "forwardedChain": forwarded_chain,
                 "aiAvailable": self.transport.is_logged_in(),
                 # 健檢是純計算,不依賴 AI 或網路,永遠可用(規格 6.5)
                 "gradingAvailable": True,
@@ -257,6 +262,7 @@ class Application:
             "source": source_label(),
             "shortfallNote": shortfall_note(),
             "upstreamNote": upstream_note(),
+            "medicalDisclaimer": medical_disclaimer(),
         }
 
     def consult_events(self, payload: dict, client: str):
@@ -287,6 +293,8 @@ class Application:
         yield {
             "type": "meta",
             "baselineNotice": consultation.baseline_notice,
+            # 醫療免責在回答正上方,由程式強制加,不依賴 AI 自己寫
+            "medicalDisclaimer": medical_disclaimer(),
             "disclaimer": reportable_disclaimer(),
             "escalation": (
                 {
@@ -433,11 +441,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/api/"):
-            self._send(*APP.handle_get(
-                self.path,
-                client_ip(self.headers, self.client_address[0]),
-                self.headers.get("X-Forwarded-For", ""),
-            ))
+            self._send(*APP.handle_get(self.path))
             return
         super().do_GET()
 
@@ -447,7 +451,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.flush()
 
     def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            length = 0
+
+        # 在讀進記憶體之前就擋掉,否則限流形同虛設
+        if too_large(length):
+            self._send(413, {
+                "error": f"請求過大,上限 {config.MAX_REQUEST_BYTES // 1024} KB",
+            })
+            return
+
         raw = self.rfile.read(length) if length else b"{}"
         client = client_ip(self.headers, self.client_address[0])
 

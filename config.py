@@ -34,6 +34,11 @@ AI_TIMEOUT_SEC = 180
 MAX_QUESTIONS_PER_HOUR = int(os.environ.get("MAX_QUESTIONS_PER_HOUR", "20"))
 RATE_WINDOW_SEC = 3600
 
+# 請求體大小上限。必須在讀取前就依 Content-Length 拒絕 ——
+# 伺服器會先把整包讀進記憶體才輪到限流,所以「每小時 20 次」擋不住大包攻擊。
+# 最大合法請求約 30KB(2000 字問題 + 20 則 × 500 字歷史),64KB 已很寬裕。
+MAX_REQUEST_BYTES = int(os.environ.get("MAX_REQUEST_BYTES", str(64 * 1024)))
+
 # 對話歷史上限。歷史由瀏覽器帶上來(伺服器不保存任何人的問題內容),
 # 因此伺服器必須自己設限 —— 前端送什麼過來都不可信。
 MAX_HISTORY_TURNS = 20

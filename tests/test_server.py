@@ -340,6 +340,46 @@ class TestStreamingEvents:
         assert events[0]["status"] == 400
 
 
+class TestMedicalDisclaimer:
+    """醫療免責必須由程式強制附加,且在回答之前送達。
+
+    這個系統會給出藥品劑量與休藥期。休藥期講錯 -> 藥物殘留的豬肉進入
+    食物鏈 -> 受害的是第三方消費者。免責只放頁尾不夠:使用者拿到用藥
+    建議時看的是畫面中間,不一定會捲到底部。
+    """
+
+    def test_consult_carries_disclaimer(self, app):
+        _, body = _post(app, "/api/consult", {"question": "小豬下痢"})
+        assert "獸醫師確認" in body["medicalDisclaimer"]
+        assert "休藥期" in body["medicalDisclaimer"]
+
+    def test_disclaimer_arrives_before_any_answer_text(self, app):
+        events = list(app.consult_events({"question": "小豬下痢"}, "test"))
+        kinds = [e["type"] for e in events]
+        assert events[0]["medicalDisclaimer"]
+        assert kinds.index("meta") < kinds.index("delta")
+
+    def test_disclaimer_survives_ai_failure(self):
+        """AI 掛掉時免責仍要送達 —— 使用者可能只看到前面那段。"""
+        app = Application(transport=FakeTransport(error=QuotaExceeded("用盡")))
+        _, body = _post(app, "/api/consult", {"question": "小豬下痢"})
+        assert body["medicalDisclaimer"]
+
+    def test_grade_result_carries_disclaimer(self, app):
+        """健檢的 AI 改善建議同樣涉及用藥,也要帶免責。"""
+        _, body = _post(app, "/api/grade", {"values": {"psy": 20.63}})
+        assert body["medicalDisclaimer"]
+
+    def test_not_generated_by_ai(self):
+        """同樣的請求必須得到逐字相同的免責條 —— 若交給 AI 寫就做不到。"""
+        app = Application(transport=FakeTransport(chunks=["甲"]))
+        texts = set()
+        for i in range(3):
+            _, body = _post(app, "/api/grade", {"values": {"psy": 20.63}})
+            texts.add(body["medicalDisclaimer"])
+        assert len(texts) == 1
+
+
 class TestIsWeakComesFromBackend:
     """弱項判斷規則只存在後端(DRY)。
 
@@ -426,7 +466,7 @@ class TestGradeToAdviseRoundTrip:
 
 
 class TestExampleEndpoint:
-    """demo 用的範例資料(合億畜牧場,已取得授權)。"""
+    """demo 用的範例資料(範例牧場,已取得授權)。"""
 
     def test_returns_full_farm_values(self, app):
         status, body = app.handle_get("/api/example")

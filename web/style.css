@@ -269,6 +269,13 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   background: var(--critical-bg); color: var(--critical); font-weight: 500;
 }
 .notice-warn { background: var(--warn-bg); color: var(--warn); }
+/* 醫療免責:比一般提示醒目,但不搶過法定傳染病警示的紅色 */
+.notice-caution {
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 13px;
+  margin-bottom: 14px;
+}
 
 /* ── 級距 ── */
 .grade-pill {

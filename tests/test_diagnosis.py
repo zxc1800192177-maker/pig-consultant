@@ -121,7 +121,7 @@ class TestWhatCounts:
 
         這種項目不該進改善清單 —— 否則畫面會出現
         「改善優先順序:優於全國平均」這種自相矛盾的內容。
-        合億的離乳到第一次配種間隔 7.05 天(全國均 7.38)就是這種情況。
+        範例牧場的離乳到第一次配種間隔 7.05 天(全國均 7.38)就是這種情況。
         """
         result = rank_weaknesses(_graded(wean_to_service=(7.05, "D")))
         assert result == []
@@ -192,7 +192,7 @@ class TestDeterminism:
 
 
 class TestRealFarm:
-    """合億畜牧場真實數據:排序結果必須說得出道理。"""
+    """範例牧場真實數據:排序結果必須說得出道理。"""
 
     VALUES = {
         "psy": 20.63, "litters_per_sow_year": 2.25, "npd": 59.99,

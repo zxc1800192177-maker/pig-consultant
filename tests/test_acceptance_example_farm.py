@@ -1,12 +1,12 @@
 """驗收測試 —— 規格第 8 節成功條件 1。
 
-「用合億畜牧場 2025 年報的實際數據輸入,系統產出的 18 項評級與官方報告完全一致。」
+「用範例牧場 2025 年報的實際數據輸入,系統產出的 18 項評級與官方報告完全一致。」
 
 前面的 test_grading.py 用的是寫在測試裡的百分位;這裡走的是完整路徑:
 真實資料檔 -> benchmark 載入 -> grade_all 批次評級 -> 比對官方報表。
 資料檔抄錯、key 對錯、評級邏輯改壞,都會在這裡被抓到。
 
-來源:豬豬顧問專案/豬豬牧場-2025.pdf
+來源:實際牧場年報(已去識別化)
 """
 
 import pytest
@@ -15,8 +15,8 @@ from core.benchmark import metrics_index
 from core.grading import grade_all
 from core.labels import source_label
 
-# 合億畜牧場 2025 年實際數據 -> 官方報表印出的級距
-HOLDING_FARM_VALUES = {
+# 範例牧場 2025 年實際數據 -> 官方報表印出的級距
+EXAMPLE_FARM_VALUES = {
     "psy": 20.63,
     "litters_per_sow_year": 2.25,
     "npd": 59.99,
@@ -61,7 +61,7 @@ OFFICIAL_GRADES = {
 
 @pytest.fixture(scope="module")
 def graded():
-    return grade_all(HOLDING_FARM_VALUES, metrics_index())
+    return grade_all(EXAMPLE_FARM_VALUES, metrics_index())
 
 
 def test_all_eighteen_metrics_graded(graded):
@@ -72,14 +72,14 @@ def test_all_eighteen_metrics_graded(graded):
 def test_grade_matches_official_report(graded, key, expected):
     actual = graded[key].grade
     assert actual == expected, (
-        f"{key}: 本場值 {HOLDING_FARM_VALUES[key]} "
+        f"{key}: 本場值 {EXAMPLE_FARM_VALUES[key]} "
         f"官方判 {expected},程式判 {actual}"
     )
 
 
 def test_no_metric_missing_from_official_comparison():
     """兩份對照表必須涵蓋同一組指標,避免漏測。"""
-    assert set(HOLDING_FARM_VALUES) == set(OFFICIAL_GRADES)
+    assert set(EXAMPLE_FARM_VALUES) == set(OFFICIAL_GRADES)
 
 
 def test_source_is_disclosed():
@@ -90,7 +90,7 @@ def test_source_is_disclosed():
 
 def test_scale_metrics_are_not_graded():
     """規格 US-3 驗收條件 3:規模型數值不評級,即使有填也一樣。"""
-    with_scale = dict(HOLDING_FARM_VALUES)
+    with_scale = dict(EXAMPLE_FARM_VALUES)
     with_scale.update({
         "total_services": 1181.00,
         "total_born": 11617.00,
