@@ -35,19 +35,63 @@ class TestClientIdentification:
         headers = {"X-Forwarded-For": "203.0.113.9"}
         assert client_ip(headers, "127.0.0.1") == "203.0.113.9"
 
-    def test_takes_last_entry_not_first(self):
-        """關鍵:取最後一個,不是第一個。
+    def test_skips_infrastructure_hops_from_the_end(self, monkeypatch):
+        """從尾端往回跳過基礎設施層,取第一個非基礎設施的位址。
 
-        X-Forwarded-For 可被使用者偽造。攻擊者送出
-        'X-Forwarded-For: 1.2.3.4' 後,可信代理會把真實 IP 附加在後面,
-        變成 '1.2.3.4, <真實IP>'。取第一個等於讓攻擊者自己指定身分,
-        每次換一個假 IP 就能無限重置額度。
+        正式環境實測的轉發鏈:
+            203.204.236.67, 172.71.146.124, 10.28.196.132
+              真實使用者        Cloudflare      Render 內部
+
+        最後一段是 Render 的內部負載平衡器,而且**每次請求都不同**
+        (10.25.32.132 / 10.28.196.132 / 10.28.128.130),
+        導致每次都被當成新使用者,限流完全失效。
+
+        也不能單純取第一個 —— 那段是使用者送什麼就是什麼,
+        等於讓攻擊者自行指定身分、無限重置額度。
         """
-        headers = {"X-Forwarded-For": "1.2.3.4, 203.0.113.9"}
-        assert client_ip(headers, "127.0.0.1") == "203.0.113.9"
+        monkeypatch.setattr(config, "TRUSTED_PROXY_HOPS", 2)
+        headers = {
+            "X-Forwarded-For": "203.204.236.67, 172.71.146.124, 10.28.196.132"
+        }
+        assert client_ip(headers, "127.0.0.1") == "203.204.236.67"
 
-    def test_handles_spaces_and_multiple_hops(self):
-        headers = {"X-Forwarded-For": "1.2.3.4,  5.6.7.8 , 203.0.113.9"}
+    def test_same_user_gets_same_id_despite_changing_infra_hops(self, monkeypatch):
+        """同一個使用者的身分不得因為內部節點輪替而改變。
+
+        這正是限流失效的直接原因。
+        """
+        monkeypatch.setattr(config, "TRUSTED_PROXY_HOPS", 2)
+        ids = {
+            client_ip(
+                {"X-Forwarded-For": f"203.204.236.67, 172.71.146.124, {infra}"},
+                "127.0.0.1",
+            )
+            for infra in ("10.25.32.132", "10.28.196.132", "10.28.128.130")
+        }
+        assert ids == {"203.204.236.67"}
+
+    def test_forged_leading_entries_do_not_win(self, monkeypatch):
+        """偽造前導項換不到新身分。
+
+        攻擊者送出 'X-Forwarded-For: 9.9.9.9' 時,代理會把真實來源接在後面,
+        偽造值被推到最前面。砍掉尾端的基礎設施層後,取到的仍是攻擊者的
+        真實 IP —— 他還是受同一份額度約束,偽造沒有好處。
+        """
+        monkeypatch.setattr(config, "TRUSTED_PROXY_HOPS", 2)
+        headers = {
+            "X-Forwarded-For": "9.9.9.9, 203.204.236.67, 172.71.146.124, 10.28.196.132"
+        }
+        assert client_ip(headers, "127.0.0.1") == "203.204.236.67"
+        assert client_ip(headers, "127.0.0.1") != "9.9.9.9"
+
+    def test_short_chain_falls_back_to_first_available(self, monkeypatch):
+        """鏈比預期短時取最前面的,不可回傳空值或爆掉。"""
+        monkeypatch.setattr(config, "TRUSTED_PROXY_HOPS", 2)
+        assert client_ip({"X-Forwarded-For": "203.0.113.9"}, "127.0.0.1") == "203.0.113.9"
+
+    def test_handles_spaces(self, monkeypatch):
+        monkeypatch.setattr(config, "TRUSTED_PROXY_HOPS", 2)
+        headers = {"X-Forwarded-For": "203.0.113.9,  5.6.7.8 , 10.0.0.1"}
         assert client_ip(headers, "127.0.0.1") == "203.0.113.9"
 
     def test_ignores_empty_header(self):

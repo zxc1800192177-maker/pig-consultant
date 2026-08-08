@@ -50,10 +50,19 @@ def client_ip(headers, peer_address: str) -> str:
     (實測為 127.0.0.1)。若直接用它當識別,所有使用者會共用同一份額度 ——
     一個人送出請求就擋住全世界。
 
-    X-Forwarded-For 的格式是「客戶端, 代理1, 代理2」,而且**前段可由使用者偽造**:
-    攻擊者送出 'X-Forwarded-For: 1.2.3.4',可信代理會把真實 IP 附加在最後面。
-    因此要取倒數第 TRUSTED_PROXY_HOPS 個,而不是第一個 ——
-    取第一個等於讓攻擊者自行指定身分,換個假 IP 就能重置額度。
+    X-Forwarded-For 的格式是「客戶端, 代理1, 代理2」。正式環境實測的鏈:
+
+        203.204.236.67 , 172.71.146.124 , 10.28.196.132
+          真實使用者         Cloudflare       Render 內部
+
+    尾端是平台自己的基礎設施,而且 **Render 那層每次請求都不同**
+    (實測 10.25.32.132 / 10.28.196.132 / 10.28.128.130),
+    直接取最後一段會讓同一個人每次都被當成新使用者,限流完全失效。
+
+    但也不能取第一段 —— 那是使用者送什麼就是什麼,等於讓攻擊者自行指定身分。
+
+    正確做法:從尾端往回跳過固定層數的基礎設施(TRUSTED_PROXY_HOPS),
+    取剩下的最後一段。攻擊者在前面塞再多假資料,都會被推到更前面而取不到。
     """
     forwarded = ""
     if headers:
@@ -67,8 +76,10 @@ def client_ip(headers, peer_address: str) -> str:
     if not hops:
         return peer_address
 
-    index = max(0, len(hops) - config.TRUSTED_PROXY_HOPS)
-    return hops[index]
+    # 砍掉尾端的基礎設施層,取剩下的最後一段。
+    # 鏈比預期短時保留至少一段,不回傳空值。
+    remaining = hops[:-config.TRUSTED_PROXY_HOPS] if config.TRUSTED_PROXY_HOPS else hops
+    return (remaining or hops)[-1]
 
 
 class Application:

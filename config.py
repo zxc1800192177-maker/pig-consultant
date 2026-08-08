@@ -39,9 +39,15 @@ RATE_WINDOW_SEC = 3600
 MAX_HISTORY_TURNS = 20
 MAX_HISTORY_CHARS = 500          # 單則歷史保留的字數;超過即截斷
 
-# 信任的代理層數。Render 等平台會在 X-Forwarded-For 後面附加真實 IP,
-# 因此取倒數第 N 個才是可信的來源;取第一個會讓攻擊者自行偽造身分。
-TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "1"))
+# 要從 X-Forwarded-For 尾端砍掉幾層基礎設施位址。
+#
+# 正式環境實測的鏈:真實IP, Cloudflare, Render內部 —— 尾端兩層是平台的,
+# 且 Render 那層每次請求都換一個位址。砍掉這 2 層才拿得到穩定的使用者身分。
+# 本機開發沒有代理,這個值不影響(沒有 X-Forwarded-For 就直接用連線來源)。
+#
+# 換平台時要重新確認層數:設太少會抓到每次都變的內部位址(限流失效),
+# 設太多會抓到使用者可偽造的前段(限流可被繞過)。
+TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "2"))
 
 # 對外上線走 API 計費,失控會直接扣款,不像訂閱額度頂多是用完。
 # 這是製程內的安全氣囊,不是計費上限本身 —— 真正的花費上限要在
