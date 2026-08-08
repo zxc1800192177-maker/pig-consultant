@@ -21,6 +21,16 @@ BENCHMARK = _load()
 _BY_KEY: Dict[str, dict] = {m["key"]: m for m in BENCHMARK["metrics"]}
 
 
+def bands() -> List[tuple]:
+    """分級切點,如 [(10, "A"), (25, "B"), ...],由最佳排到最差。
+
+    唯一的定義來源是 data/benchmark_2025.json。程式碼不得再寫一份 ——
+    兩份定義只要有一份被改到,行為就會安靜地不一致。
+    JSON 存的是巢狀陣列,這裡轉成 tuple 供比對與解構使用。
+    """
+    return [tuple(band) for band in BENCHMARK["bands"]]
+
+
 def get_metric(key: str) -> dict:
     """取得指標定義。未知的 key 直接拋錯,不回 None ——
     靜默的 None 會一路傳到畫面上變成空白,比炸掉難查。"""

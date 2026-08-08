@@ -24,9 +24,10 @@ from ai.transport import (
 )
 from ai.transport_selection import select_transport
 from core.benchmark import get_metric, gradable_metrics, metrics_index
-from core.diagnosis import rank_weaknesses
+from core.diagnosis import is_weak, rank_weaknesses
 from core.grading import grade_all
 from core.labels import (
+    ai_unavailable_note,
     grade_label,
     reportable_disclaimer,
     sample_size_note,
@@ -101,6 +102,8 @@ class Application:
                 # 健檢是純計算,不依賴 AI 或網路,永遠可用(規格 6.5)
                 "gradingAvailable": True,
                 "source": source_label(),
+                # 文字由後端提供,前端不自己寫一份(措辭改動只需改一處)
+                "aiUnavailableNote": ai_unavailable_note(),
             }
         if path == "/api/metrics":
             return 200, {
@@ -161,6 +164,9 @@ class Application:
                     "unit": get_metric(key).get("unit", ""),
                     "mean": get_metric(key)["mean"],
                     "sampleNote": sample_size_note(key),
+                    # 弱項判斷規則只存在後端(core/diagnosis.py),
+                    # 前端不自行判斷,直接讀這個欄位,避免同一條規則有兩份定義。
+                    "isWeak": is_weak(key, result),
                 }
                 for key, result in graded.items()
             },
@@ -289,7 +295,7 @@ class Application:
         if self._over_daily_budget():
             return 503, {
                 "reason": "daily_limit",
-                "error": "今日 AI 諮詢已達上限,健檢的評級與排序結果不受影響。",
+                "error": f"今日 AI 諮詢已達上限。{ai_unavailable_note()}",
             }
 
         try:
@@ -390,7 +396,7 @@ def main():
     )
 
     if not transport.is_available():
-        print("警告: AI 傳輸層無法使用,疾病諮詢將無法使用(生產健檢不受影響)")
+        print(f"警告: {ai_unavailable_note()}")
     elif not transport.is_logged_in():
         print("警告: 尚未登入/設定金鑰,請確認 claude auth login 或 ANTHROPIC_API_KEY")
     else:

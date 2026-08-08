@@ -73,9 +73,10 @@ def test_at_least_one_core_module_scanned():
 # 那正是我們拆開它們要避免的事。
 ALLOWED_DEPENDENCIES = {
     "coercion": set(),                        # 最底層,不依賴任何 core 模組
-    "grading": set(),                         # 純演算法
     "benchmark": set(),                       # 資料存取,不得依賴 labels
     "reportable": set(),                      # 法定傳染病偵測,自帶資料來源
+    # 演算法本身純粹,但分級切點取自資料檔(單一事實來源),故依賴 benchmark
+    "grading": {"benchmark"},
     "metrics": {"coercion", "benchmark"},     # 驗證規則
     "diagnosis": {"benchmark", "grading"},    # 排序邏輯
     "labels": {"benchmark", "grading"},       # 呈現層,可依賴下層

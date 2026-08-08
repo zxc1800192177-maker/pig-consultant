@@ -50,7 +50,7 @@ def shortfall_sd(value: float, metric: dict) -> float:
     return (value - mean) / sd
 
 
-def _is_weak(key: str, result: GradeResult) -> bool:
+def is_weak(key: str, result: GradeResult) -> bool:
     """弱項需同時滿足兩個條件:低於中位數,且低於平均。
 
     兩個條件在偏態分布下可能不一致 —— 有指標的級距落在中位數以下,
@@ -74,7 +74,7 @@ def rank_weaknesses(graded: Dict[str, GradeResult]) -> List[Weakness]:
     """
     weak_keys = {
         key for key, result in graded.items()
-        if _is_weak(key, result)
+        if is_weak(key, result)
     }
 
     items: List[Weakness] = []

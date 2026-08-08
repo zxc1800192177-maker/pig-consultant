@@ -340,6 +340,49 @@ class TestStreamingEvents:
         assert events[0]["status"] == 400
 
 
+class TestIsWeakComesFromBackend:
+    """弱項判斷規則只存在後端(DRY)。
+
+    前端原本自己維護一份「D 級以下算弱項」的清單,跟 core/diagnosis.py 重複。
+    兩份規則改一邊漏一邊不會報錯,只會讓畫面標示與實際排序不一致。
+    改由 API 直接告訴前端每一項是不是弱項。
+    """
+
+    VALUES = {
+        "psy": 20.63,            # D 級且低於平均 -> 是弱項
+        "wean_to_service": 7.05,  # D 級但優於平均 -> 不是弱項
+        "farrowing_index": 2.42,  # B 級 -> 不是弱項
+    }
+
+    def test_grades_carry_is_weak_flag(self, app):
+        _, body = _post(app, "/api/grade", {"values": self.VALUES})
+        for key, grade in body["grades"].items():
+            assert "isWeak" in grade, f"{key} 缺少 isWeak 欄位"
+
+    def test_is_weak_matches_the_ranking(self, app):
+        """isWeak 為 true 的項目,必須恰好等於出現在改善清單裡的項目。
+
+        這是最重要的一條:兩者若不一致,畫面標示會跟排序自相矛盾。
+        """
+        _, body = _post(app, "/api/grade", {"values": self.VALUES})
+        flagged = {k for k, g in body["grades"].items() if g["isWeak"]}
+        ranked = {w["key"] for w in body["weaknesses"]}
+        assert flagged == ranked
+
+    def test_below_median_but_above_mean_is_not_weak(self, app):
+        """離乳到第一次配種間隔 7.05 天雖為 D 級,但優於全國平均 7.38,不算弱項。"""
+        _, body = _post(app, "/api/grade", {"values": self.VALUES})
+        assert body["grades"]["wean_to_service"]["isWeak"] is False
+
+    def test_good_grade_is_not_weak(self, app):
+        _, body = _post(app, "/api/grade", {"values": self.VALUES})
+        assert body["grades"]["farrowing_index"]["isWeak"] is False
+
+    def test_genuinely_behind_metric_is_weak(self, app):
+        _, body = _post(app, "/api/grade", {"values": self.VALUES})
+        assert body["grades"]["psy"]["isWeak"] is True
+
+
 class TestGradeToAdviseRoundTrip:
     """實際踩過的 bug:/api/grade 回給瀏覽器的是駝峰式鍵名(shortfallSd),
     瀏覽器原封不動把它送回 /api/advise,但 ai/prompts.py 期待底線式

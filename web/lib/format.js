@@ -3,10 +3,12 @@
 // 這些函式決定牧場主看到什麼。措辭要精確 ——
 // 把「優於平均」講成「落後」會讓人做出錯誤的經營決策。
 
-// 與後端 core/diagnosis.py 的 WEAKNESS_THRESHOLD 對應:
-// 弱項 = 低於全國中位數,也就是 D 級以下。C 級是前 25~50%,不是弱項。
-const WEAK_GRADES = new Set(["D", "E", "F"]);
+// 弱項判斷規則不在這裡 —— 由後端 core/diagnosis.py 決定,
+// 經 /api/grade 的 isWeak 欄位告知前端。前端若自己再判斷一次,
+// 規則就有兩份定義,改一邊漏一邊會讓畫面標示與實際排序不一致。
 
+// 這是「視覺嚴重度」對應,屬於呈現層自己的事,與弱項判斷是不同概念:
+// 弱項要同時看級距與標準差距離,這裡只依級距決定顏色深淺。
 const TONES = {
   A: "good",
   B: "good",
@@ -22,10 +24,6 @@ const NEGLIGIBLE_SD = 0.1;
 export function gradeTone(grade) {
   // 未知級距回中性 —— 寧可不表態,也不要誤標成良好。
   return TONES[grade] || "neutral";
-}
-
-export function isWeak(grade) {
-  return WEAK_GRADES.has(grade);
 }
 
 export function formatShortfall(sd) {

@@ -55,6 +55,16 @@ def upstream_note() -> str:
     return "連鎖影響關係整理自 2025 年報的因果敘述,建議由領域專家覆核"
 
 
+def ai_unavailable_note() -> str:
+    """AI 不可用時對使用者的說明。
+
+    同一句話原本散落在 server.py 的錯誤回應、啟動訊息與 app.js 三處,
+    措辭一改就會不同步。集中在這裡,前端也改由 /api/health 取得,
+    不再自己寫一份(規格 6.5:AI 停擺時健檢仍完全可用)。
+    """
+    return "AI 諮詢目前無法使用。生產健檢為純計算,不受影響,仍可正常使用。"
+
+
 def reportable_disclaimer() -> str:
     """法定傳染病提醒的完整度聲明。
 

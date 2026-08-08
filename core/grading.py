@@ -6,9 +6,11 @@
 
 from typing import Dict, List, NamedTuple, Optional, Sequence
 
+from core.benchmark import bands
+
 # 官方年報定義:A級 <10%, B級 10~25%, C級 25~50%, D級 50~75%, E級 75~90%, F級 >90%
-# 這裡列出五個切點,落在全部切點之外者為 F。
-BANDS = [(10, "A"), (25, "B"), (50, "C"), (75, "D"), (90, "E")]
+# 切點的唯一來源是 data/benchmark_2025.json,這裡只是取用,不再自訂一份。
+BANDS = bands()
 
 WORST_GRADE = "F"
 

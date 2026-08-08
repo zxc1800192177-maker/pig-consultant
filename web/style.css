@@ -167,6 +167,12 @@ textarea:focus-visible, input:focus-visible {
 .tone-warn { background: var(--warn-bg); color: var(--warn); }
 .tone-critical { background: var(--critical-bg); color: var(--critical); }
 
+/* 列入改善清單的項目。是否為弱項由後端 isWeak 欄位決定,前端不自行判斷。 */
+.row-weak { background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.weak-mark {
+  color: var(--warn); font-size: 10px; margin-left: 6px; vertical-align: middle;
+}
+
 .rank-list { list-style: none; padding: 0; margin: 0; }
 .rank-item {
   display: grid; grid-template-columns: 28px 1fr auto; gap: 12px;

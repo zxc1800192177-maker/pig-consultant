@@ -29,10 +29,8 @@ async function init() {
     const health = await (await fetch("/api/health")).json();
     $("sourceLabel").textContent = health.source;
     if (!health.aiAvailable) {
-      showBanner(
-        "AI 諮詢目前無法使用(CLI 尚未登入或額度用盡)。生產健檢不受影響,仍可正常使用。",
-        "warn"
-      );
+      // 提示文字由後端提供(core/labels.py),前端不自己維護一份措辭
+      showBanner(health.aiUnavailableNote, "warn");
       $("askBtn").disabled = true;
     }
   } catch {
@@ -119,8 +117,8 @@ function renderHealthResult(data) {
   const rows = graded
     .map(
       ([key, g]) => `
-      <tr>
-        <td>${escapeHtml(g.name)}</td>
+      <tr${g.isWeak ? ' class="row-weak"' : ""}>
+        <td>${escapeHtml(g.name)}${g.isWeak ? '<span class="weak-mark" title="列入改善清單">●</span>' : ""}</td>
         <td><span class="grade-pill tone-${gradeTone(g.grade)}">${g.grade}</span></td>
         <td>${escapeHtml(formatValue(g.value, g.unit))}</td>
         <td>${escapeHtml(formatValue(g.mean, g.unit))}</td>

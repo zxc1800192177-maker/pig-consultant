@@ -6,12 +6,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  gradeTone,
-  formatShortfall,
-  formatValue,
-  isWeak,
-} from "../../web/lib/format.js";
+import { gradeTone, formatShortfall, formatValue } from "../../web/lib/format.js";
 
 describe("級距語意色", () => {
   it("A、B 為良好", () => {
@@ -38,15 +33,10 @@ describe("級距語意色", () => {
   });
 });
 
-describe("弱項判定", () => {
-  it("D 以下為弱項", () => {
-    ["D", "E", "F"].forEach((g) => assert.equal(isWeak(g), true));
-  });
-
-  it("C 以上不是弱項", () => {
-    ["A", "B", "C"].forEach((g) => assert.equal(isWeak(g), false));
-  });
-});
+// 弱項判定的測試已移除:該規則只存在後端(core/diagnosis.py),
+// 由 /api/grade 的 isWeak 欄位告知前端。對應的測試在
+// tests/test_server.py::TestIsWeakComesFromBackend。
+// 前端若再寫一份判斷,tests/test_single_source.py 會擋下來。
 
 describe("落後程度的說法", () => {
   it("正值說「落後」", () => {
