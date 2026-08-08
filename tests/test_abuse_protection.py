@@ -10,6 +10,7 @@
 """
 
 import json
+import threading
 import time
 
 import pytest
@@ -122,6 +123,87 @@ class TestHourlyLimit:
         assert len(app._hourly_hits["1.1.1.1"]) == 3, (
             "只有實際放行的 3 次該被記錄"
         )
+
+
+class TestConcurrency:
+    """同時湧入的請求不得繞過限制。
+
+    實測發現的漏洞:對正式環境同時送出兩個請求,兩個都通過了。
+    原因是「檢查」與「記錄」之間有空隙 —— 兩個執行緒同時讀到舊值,
+    都判定可放行,才各自寫入。攻擊者只要同時灌請求就能突破上限,
+    而伺服器是多執行緒的,這在正式環境隨時會發生。
+    """
+
+    @staticmethod
+    def _widen_race_window(app):
+        """撐開「判定放行」與「寫入紀錄」之間的空隙,讓競爭條件穩定重現。
+
+        這個空隙在真實環境中極窄,本機照常跑幾乎撞不到 —— 但它確實存在:
+        延遲寫入後,10 個併發請求會全部通過(正確行為是只有 1 個)。
+        攻擊者同時灌請求就能突破上限,而伺服器本來就是多執行緒的。
+
+        延遲「寫入」而非「讀取」很重要:讀取延遲只是讓所有執行緒一起等,
+        撐不開真正的空窗,測不出問題。
+        """
+        class SlowWriteDict(dict):
+            def __setitem__(self, key, value):
+                time.sleep(0.05)
+                super().__setitem__(key, value)
+
+        app._last_ai_request = SlowWriteDict(app._last_ai_request)
+        app._hourly_hits = SlowWriteDict(app._hourly_hits)
+
+    def _hammer(self, app, count, client="1.1.1.1"):
+        """同時送出 count 個請求,回傳成功的次數。
+
+        用 Barrier 讓所有執行緒在同一瞬間進入,模擬攻擊者的併發灌流。
+        """
+        results = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(count)
+
+        def worker(i):
+            barrier.wait()
+            status, _ = _post(app, "/api/consult", {"question": f"併發{i}"}, client=client)
+            with lock:
+                results.append(status)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(count)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return sum(1 for s in results if s == 200)
+
+    def test_interval_limit_holds_under_concurrency(self, monkeypatch):
+        """3 秒間隔:同時送出 10 個,只該有 1 個通過。"""
+        monkeypatch.setattr(config, "MIN_REQUEST_INTERVAL_SEC", 3)
+        monkeypatch.setattr(config, "MAX_QUESTIONS_PER_HOUR", 1000)
+        app = Application(transport=FakeTransport(chunks=["ok"]))
+        self._widen_race_window(app)
+
+        passed = self._hammer(app, 10)
+        assert passed == 1, f"應只有 1 個通過,實際 {passed} 個"
+
+    def test_hourly_limit_holds_under_concurrency(self, monkeypatch):
+        """每小時上限:同時送出 30 個,通過數不得超過上限。"""
+        monkeypatch.setattr(config, "MIN_REQUEST_INTERVAL_SEC", 0)
+        monkeypatch.setattr(config, "MAX_QUESTIONS_PER_HOUR", 5)
+        app = Application(transport=FakeTransport(chunks=["ok"]))
+        self._widen_race_window(app)
+
+        passed = self._hammer(app, 30)
+        assert passed <= 5, f"上限 5 次,併發下卻放行了 {passed} 次"
+
+    def test_recorded_hits_match_what_was_allowed(self, monkeypatch):
+        """記錄的次數不能超過上限,否則額度恢復時間會被算錯。"""
+        monkeypatch.setattr(config, "MIN_REQUEST_INTERVAL_SEC", 0)
+        monkeypatch.setattr(config, "MAX_QUESTIONS_PER_HOUR", 5)
+        app = Application(transport=FakeTransport(chunks=["ok"]))
+        self._widen_race_window(app)
+
+        self._hammer(app, 30)
+        assert len(app._hourly_hits["1.1.1.1"]) <= 5
 
 
 class TestMemoryBounded:

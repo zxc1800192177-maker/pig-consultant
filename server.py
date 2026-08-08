@@ -10,6 +10,7 @@ import http.server
 import json
 import pathlib
 import socketserver
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -81,18 +82,28 @@ class Application:
         self._ai_request_count = 0
         self._count_day = time.strftime("%Y-%m-%d")
 
+        # 伺服器是多執行緒的,限流的「檢查」與「記錄」之間若可被插隊,
+        # 攻擊者同時灌請求就能突破上限(實測:上限 5 次會放行 30 次)。
+        # 這兩個動作必須是不可分割的整體。
+        self._limit_lock = threading.Lock()
+
     # --- 輔助 ---
 
     def _throttled(self, client: str) -> Optional[float]:
-        """回傳還需等待幾秒;None 表示可以放行。只套用在會花額度的端點。"""
-        now = time.monotonic()
-        last = self._last_ai_request.get(client)
-        if last is not None:
-            elapsed = now - last
-            if elapsed < config.MIN_REQUEST_INTERVAL_SEC:
-                return round(config.MIN_REQUEST_INTERVAL_SEC - elapsed, 1)
-        self._last_ai_request[client] = now
-        return None
+        """回傳還需等待幾秒;None 表示可以放行。只套用在會花額度的端點。
+
+        整段在鎖內完成 —— 檢查與記錄之間若可被其他請求插隊,同時送達的
+        請求會各自讀到舊值而全部放行。
+        """
+        with self._limit_lock:
+            now = time.monotonic()
+            last = self._last_ai_request.get(client)
+            if last is not None:
+                elapsed = now - last
+                if elapsed < config.MIN_REQUEST_INTERVAL_SEC:
+                    return round(config.MIN_REQUEST_INTERVAL_SEC - elapsed, 1)
+            self._last_ai_request[client] = now
+            return None
 
     def _over_hourly_limit(self, client: str) -> bool:
         """每個 IP 每小時的提問上限,滑動視窗。
@@ -100,22 +111,23 @@ class Application:
         只在實際放行時記錄 —— 被擋下的嘗試不計入,否則使用者越重試,
         額度恢復時間被推得越晚,等於因為被擋而受到額外懲罰。
         """
-        now = time.monotonic()
-        cutoff = now - config.RATE_WINDOW_SEC
+        with self._limit_lock:
+            now = time.monotonic()
+            cutoff = now - config.RATE_WINDOW_SEC
 
-        # 順手清掉已經完全過期的來源,避免這份紀錄無限成長成攻擊面
-        for ip in [ip for ip, hits in self._hourly_hits.items()
-                   if not hits or hits[-1] <= cutoff]:
-            del self._hourly_hits[ip]
+            # 順手清掉已經完全過期的來源,避免這份紀錄無限成長成攻擊面
+            for ip in [ip for ip, hits in self._hourly_hits.items()
+                       if not hits or hits[-1] <= cutoff]:
+                del self._hourly_hits[ip]
 
-        hits = [t for t in self._hourly_hits.get(client, []) if t > cutoff]
-        if len(hits) >= config.MAX_QUESTIONS_PER_HOUR:
+            hits = [t for t in self._hourly_hits.get(client, []) if t > cutoff]
+            if len(hits) >= config.MAX_QUESTIONS_PER_HOUR:
+                self._hourly_hits[client] = hits
+                return True
+
+            hits.append(now)
             self._hourly_hits[client] = hits
-            return True
-
-        hits.append(now)
-        self._hourly_hits[client] = hits
-        return False
+            return False
 
     def _over_daily_budget(self) -> bool:
         """對外上線走 API 計費,失控會直接扣款,不像訂閱額度頂多是用完。
@@ -124,12 +136,13 @@ class Application:
         以行程記憶體計數,重啟即重置;真正的花費上限要在
         console.anthropic.com 另外設定,這裡只是製程內的安全氣囊。
         """
-        today = time.strftime("%Y-%m-%d")
-        if today != self._count_day:
-            self._count_day = today
-            self._ai_request_count = 0
-        self._ai_request_count += 1
-        return self._ai_request_count > config.MAX_AI_REQUESTS_PER_DAY
+        with self._limit_lock:
+            today = time.strftime("%Y-%m-%d")
+            if today != self._count_day:
+                self._count_day = today
+                self._ai_request_count = 0
+            self._ai_request_count += 1
+            return self._ai_request_count > config.MAX_AI_REQUESTS_PER_DAY
 
     @staticmethod
     def _weakness_payload(weakness) -> dict:
