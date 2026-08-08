@@ -9,6 +9,19 @@ const $ = (id) => document.getElementById(id);
 let metricDefs = [];
 let lastWeaknesses = [];   // 供疾病諮詢當背景資訊(US-1 驗收條件 7)
 
+// 對話歷史只存在使用者自己的瀏覽器裡,不上傳保存。
+// 若改由伺服器依 IP 保存,同一間辦公室(共用對外 IP)的兩個人會看到彼此的
+// 對話內容,是隱私外洩。伺服器端仍會自行裁切則數與長度,不信任這份資料。
+const MAX_HISTORY_TURNS = 20;
+let history = [];
+
+function rememberTurn(role, content) {
+  history.push({ role, content });
+  if (history.length > MAX_HISTORY_TURNS) {
+    history = history.slice(-MAX_HISTORY_TURNS);
+  }
+}
+
 // ── 頁籤 ──
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {
@@ -245,7 +258,11 @@ async function ask(question) {
     const res = await fetch("/api/consult", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, weaknesses: lastWeaknesses }),
+      body: JSON.stringify({
+        question,
+        weaknesses: lastWeaknesses,
+        history,   // 送出前的歷史,不含這一題本身
+      }),
     });
 
     const reader = res.body.getReader();
@@ -264,7 +281,13 @@ async function ask(question) {
       `<div class="notice notice-warn">連線失敗:${escapeHtml(String(e))}</div>`;
   } finally {
     $("consultLoading")?.remove();
-    if (answer) $("consultBody").innerHTML = renderMarkdown(answer);
+    if (answer) {
+      $("consultBody").innerHTML = renderMarkdown(answer);
+      // 成功拿到回答才記錄。失敗的請求不進歷史,否則之後的追問會
+      // 帶著一段沒有答案的殘缺對話,反而干擾 AI 判斷。
+      rememberTurn("user", question);
+      rememberTurn("assistant", answer);
+    }
     setConsultBusy(false);
   }
 }

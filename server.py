@@ -11,7 +11,7 @@ import json
 import pathlib
 import socketserver
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import config
 from ai.consultant import Consultant
@@ -42,6 +42,34 @@ WEB_DIR = BASE_DIR / "web"
 EXAMPLE_PATH = BASE_DIR / "data" / "example_farm.json"
 
 
+def client_ip(headers, peer_address: str) -> str:
+    """判定真實使用者 IP。
+
+    部署在 Render 這類平台時,伺服器看到的連線來源永遠是代理的位址
+    (實測為 127.0.0.1)。若直接用它當識別,所有使用者會共用同一份額度 ——
+    一個人送出請求就擋住全世界。
+
+    X-Forwarded-For 的格式是「客戶端, 代理1, 代理2」,而且**前段可由使用者偽造**:
+    攻擊者送出 'X-Forwarded-For: 1.2.3.4',可信代理會把真實 IP 附加在最後面。
+    因此要取倒數第 TRUSTED_PROXY_HOPS 個,而不是第一個 ——
+    取第一個等於讓攻擊者自行指定身分,換個假 IP 就能重置額度。
+    """
+    forwarded = ""
+    if headers:
+        for name in ("X-Forwarded-For", "x-forwarded-for"):
+            value = headers.get(name)
+            if value:
+                forwarded = value
+                break
+
+    hops = [part.strip() for part in forwarded.split(",") if part.strip()]
+    if not hops:
+        return peer_address
+
+    index = max(0, len(hops) - config.TRUSTED_PROXY_HOPS)
+    return hops[index]
+
+
 class Application:
     """路由與請求處理。不綁定 HTTP 傳輸,方便測試。"""
 
@@ -49,6 +77,7 @@ class Application:
         self.transport = transport or ClaudeCliTransport()
         self.consultant = Consultant(self.transport)
         self._last_ai_request: Dict[str, float] = {}
+        self._hourly_hits: Dict[str, List[float]] = {}
         self._ai_request_count = 0
         self._count_day = time.strftime("%Y-%m-%d")
 
@@ -64,6 +93,29 @@ class Application:
                 return round(config.MIN_REQUEST_INTERVAL_SEC - elapsed, 1)
         self._last_ai_request[client] = now
         return None
+
+    def _over_hourly_limit(self, client: str) -> bool:
+        """每個 IP 每小時的提問上限,滑動視窗。
+
+        只在實際放行時記錄 —— 被擋下的嘗試不計入,否則使用者越重試,
+        額度恢復時間被推得越晚,等於因為被擋而受到額外懲罰。
+        """
+        now = time.monotonic()
+        cutoff = now - config.RATE_WINDOW_SEC
+
+        # 順手清掉已經完全過期的來源,避免這份紀錄無限成長成攻擊面
+        for ip in [ip for ip, hits in self._hourly_hits.items()
+                   if not hits or hits[-1] <= cutoff]:
+            del self._hourly_hits[ip]
+
+        hits = [t for t in self._hourly_hits.get(client, []) if t > cutoff]
+        if len(hits) >= config.MAX_QUESTIONS_PER_HOUR:
+            self._hourly_hits[client] = hits
+            return True
+
+        hits.append(now)
+        self._hourly_hits[client] = hits
+        return False
 
     def _over_daily_budget(self) -> bool:
         """對外上線走 API 計費,失控會直接扣款,不像訂閱額度頂多是用完。
@@ -196,6 +248,7 @@ class Application:
             consultation = self.consultant.consult(
                 payload.get("question", ""),
                 weaknesses=weaknesses,
+                history=payload.get("history"),
             )
         except ValueError as e:
             yield {"type": "error", "status": 400, "error": str(e)}
@@ -220,6 +273,16 @@ class Application:
             yield {
                 "type": "error", "status": 429,
                 "error": f"請稍候 {wait} 秒再送出下一題",
+            }
+            return
+
+        if self._over_hourly_limit(client):
+            yield {
+                "type": "error", "status": 429, "reason": "hourly_limit",
+                "error": (
+                    f"每小時最多提問 {config.MAX_QUESTIONS_PER_HOUR} 次,"
+                    "已達上限,請稍後再試。生產健檢不受影響。"
+                ),
             }
             return
 
@@ -352,7 +415,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
-        client = self.client_address[0]
+        client = client_ip(self.headers, self.client_address[0])
 
         if self.path == "/api/consult":
             self._stream_consult(raw, client)

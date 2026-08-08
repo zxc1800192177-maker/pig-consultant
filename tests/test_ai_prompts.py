@@ -8,7 +8,45 @@
 
 import pytest
 
-from ai.prompts import DISEASE_SYSTEM_PROMPT, ADVICE_SYSTEM_PROMPT, build_farm_context
+from ai.prompts import (
+    ADVICE_SYSTEM_PROMPT,
+    DISEASE_SYSTEM_PROMPT,
+    build_farm_context,
+    build_history_context,
+)
+
+
+class TestHistoryContext:
+    """對話歷史的呈現方式。歷史來自瀏覽器,格式不可信。"""
+
+    HISTORY = [
+        {"role": "user", "content": "保育豬咳嗽怎麼辦"},
+        {"role": "assistant", "content": "可能是黴漿菌肺炎"},
+    ]
+
+    def test_empty_when_no_history(self):
+        assert build_history_context([]) == ""
+        assert build_history_context(None) == ""
+
+    def test_includes_both_sides(self):
+        context = build_history_context(self.HISTORY)
+        assert "保育豬咳嗽怎麼辦" in context
+        assert "黴漿菌肺炎" in context
+
+    def test_labels_who_said_what(self):
+        """沒有標明角色,模型會分不清哪句是自己說的。"""
+        context = build_history_context(self.HISTORY)
+        assert "使用者" in context
+        assert "顧問" in context
+
+    def test_marks_where_history_ends(self):
+        """必須清楚區隔歷史與本次提問,否則模型會把舊問題當成新問題回答。"""
+        context = build_history_context(self.HISTORY)
+        assert "以上為歷史紀錄" in context
+
+    def test_skips_blank_entries(self):
+        context = build_history_context([{"role": "user", "content": "   "}])
+        assert context == ""
 
 
 class TestDiseasePrompt:
@@ -28,9 +66,12 @@ class TestDiseasePrompt:
     def test_specifies_traditional_chinese(self):
         assert "繁體中文" in DISEASE_SYSTEM_PROMPT
 
-    def test_no_multi_turn_promise(self):
-        """一問一答,不留對話歷史,提示詞不該邀請使用者追問。"""
-        assert "追問" not in DISEASE_SYSTEM_PROMPT
+    def test_each_answer_stands_alone(self):
+        """支援追問後,每則回答仍必須自成完整內容。
+
+        使用者可能只看最後一則就去用藥,不能出現「詳見上一則」這種回答。
+        """
+        assert "獨立看懂" in DISEASE_SYSTEM_PROMPT
 
 
 class TestAdvicePrompt:

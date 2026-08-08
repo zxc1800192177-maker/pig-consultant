@@ -14,6 +14,7 @@ from ai.prompts import (
     DISEASE_SYSTEM_PROMPT,
     build_advice_prompt,
     build_farm_context,
+    build_history_context,
 )
 from core.reportable import ReportableMatch, baseline_notice, detect_reportable
 
@@ -34,10 +35,36 @@ class Consultant:
     def __init__(self, transport):
         self.transport = transport
 
+    @staticmethod
+    def _trim_history(history: Optional[List[dict]]) -> List[dict]:
+        """裁切前端送來的對話歷史。
+
+        歷史來自瀏覽器,內容不可信:20 則各塞 10 萬字一樣能灌爆 token 成本,
+        所以「則數」與「每則長度」都要在伺服器端強制設限。
+        格式壞掉的資料直接忽略,不讓它導致例外。
+        """
+        if not isinstance(history, list):
+            return []
+
+        cleaned = []
+        for turn in history[-config.MAX_HISTORY_TURNS:]:
+            if not isinstance(turn, dict):
+                continue
+            content = turn.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            role = "user" if turn.get("role") == "user" else "assistant"
+            cleaned.append({
+                "role": role,
+                "content": content.strip()[:config.MAX_HISTORY_CHARS],
+            })
+        return cleaned
+
     def consult(
         self,
         question: str,
         weaknesses: Optional[List[dict]] = None,
+        history: Optional[List[dict]] = None,
     ) -> Consultation:
         """疾病諮詢。
 
@@ -50,11 +77,17 @@ class Consultant:
         if len(question) > config.MAX_QUESTION_CHARS:
             raise ValueError(f"問題請控制在 {config.MAX_QUESTION_CHARS} 字以內")
 
-        context = build_farm_context(weaknesses)
-        prompt = f"{context}\n{question}" if context else question
+        parts = [
+            build_history_context(self._trim_history(history)),
+            build_farm_context(weaknesses),
+            question,
+        ]
+        prompt = "\n".join(part for part in parts if part)
 
         return Consultation(
             baseline_notice=baseline_notice(),
+            # 通報偵測只看這次的提問,不看歷史 —— 否則使用者一旦提過
+            # 非洲豬瘟,之後每一題都會跳出警示,很快就會被忽略。
             escalation=detect_reportable(question),
             stream=self.transport.stream(prompt, DISEASE_SYSTEM_PROMPT),
         )

@@ -30,6 +30,19 @@ MAX_QUESTION_CHARS = 2000        # 單題字數上限
 MIN_REQUEST_INTERVAL_SEC = 3     # 同一來源連續請求的最短間隔
 AI_TIMEOUT_SEC = 180
 
+# 每個 IP 每小時的提問上限。滑動視窗,不是整點重置。
+MAX_QUESTIONS_PER_HOUR = int(os.environ.get("MAX_QUESTIONS_PER_HOUR", "20"))
+RATE_WINDOW_SEC = 3600
+
+# 對話歷史上限。歷史由瀏覽器帶上來(伺服器不保存任何人的問題內容),
+# 因此伺服器必須自己設限 —— 前端送什麼過來都不可信。
+MAX_HISTORY_TURNS = 20
+MAX_HISTORY_CHARS = 500          # 單則歷史保留的字數;超過即截斷
+
+# 信任的代理層數。Render 等平台會在 X-Forwarded-For 後面附加真實 IP,
+# 因此取倒數第 N 個才是可信的來源;取第一個會讓攻擊者自行偽造身分。
+TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "1"))
+
 # 對外上線走 API 計費,失控會直接扣款,不像訂閱額度頂多是用完。
 # 這是製程內的安全氣囊,不是計費上限本身 —— 真正的花費上限要在
 # console.anthropic.com 另外設定。

@@ -22,7 +22,8 @@ DISEASE_SYSTEM_PROMPT = """你是「豬豬顧問」,協助台灣豬場的疾病�
 - 說「可能病因」「建議方向」,不要用確診語氣斷定豬隻得了什麼病
 - 每則回答都要提醒實際確診與用藥須由執業獸醫師判斷
 - 條列清楚,避免冗長
-- 這是單次問答,回答要完整,不要請使用者提供更多資訊後再說
+- 每則回答都要能獨立看懂,不要只丟一句話等使用者追問;
+  但若使用者確實在追問先前的問題,就順著脈絡回答,不必從頭重述
 
 若問題與豬隻健康無關,禮貌說明你的專長範圍即可。"""
 
@@ -57,6 +58,36 @@ def build_farm_context(weaknesses: Optional[List[dict]]) -> str:
         "【背景參考:本場生產指標健檢的落後項目】\n"
         + "\n".join(lines)
         + "\n以上僅供你判斷時參考,使用者的提問在下方。若與提問無關就不必提及。\n"
+    )
+
+
+def build_history_context(history: Optional[List[dict]]) -> str:
+    """把先前的對話整理成可追問的上下文。
+
+    歷史存在使用者自己的瀏覽器,每次提問時帶上來 —— 伺服器不保存任何人的
+    問題內容。若改成由伺服器依 IP 保存,同一間辦公室(共用對外 IP)的兩個人
+    會看到彼此的對話,是隱私外洩。
+
+    但也因為歷史來自前端,內容完全不可信:數量與長度的上限必須在
+    伺服器端強制執行(呼叫端負責裁切,見 config.MAX_HISTORY_*)。
+    """
+    if not history:
+        return ""
+
+    lines = []
+    for turn in history:
+        role = "使用者" if turn.get("role") == "user" else "顧問"
+        content = (turn.get("content") or "").strip()
+        if content:
+            lines.append(f"{role}:{content}")
+
+    if not lines:
+        return ""
+
+    return (
+        "【先前的對話,供你理解使用者這次在追問什麼】\n"
+        + "\n".join(lines)
+        + "\n【以上為歷史紀錄。使用者這次的問題在下方】\n"
     )
 
 
