@@ -187,16 +187,24 @@ async function requestAdvice(weaknesses) {
   const body = $("adviceBody");
   body.innerHTML = `<div class="loading"><span class="spinner"></span>顧問分析中…</div>`;
 
-  const res = await fetch("/api/advise", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ weaknesses }),
-  });
-  const data = await res.json();
+  // 曾經這裡沒有 try/catch:伺服器回傳非預期內容(如 502、逾時)時
+  // res.json() 會拋例外,畫面永遠卡在「顧問分析中…」,使用者看不到任何錯誤。
+  try {
+    const res = await fetch("/api/advise", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ weaknesses }),
+    });
+    const data = await res.json().catch(() => ({}));
 
-  body.innerHTML = res.ok
-    ? renderMarkdown(data.advice)
-    : `<div class="notice notice-warn">${escapeHtml(data.error)}</div>`;
+    body.innerHTML = res.ok
+      ? renderMarkdown(data.advice || "")
+      : `<div class="notice notice-warn">${escapeHtml(
+          data.error || `伺服器錯誤(HTTP ${res.status}),請稍後再試`
+        )}</div>`;
+  } catch (e) {
+    body.innerHTML = `<div class="notice notice-warn">連線失敗:${escapeHtml(String(e))}</div>`;
+  }
 }
 
 // ── 疾病諮詢 ──

@@ -183,10 +183,13 @@ class Application:
           error  含 status,後續不再產出
           done   正常結束
         """
+        raw_weaknesses = payload.get("weaknesses") or []
+        weaknesses = [self._from_wire_weakness(w) for w in raw_weaknesses]
+
         try:
             consultation = self.consultant.consult(
                 payload.get("question", ""),
-                weaknesses=payload.get("weaknesses"),
+                weaknesses=weaknesses,
             )
         except ValueError as e:
             yield {"type": "error", "status": 400, "error": str(e)}
@@ -254,11 +257,30 @@ class Application:
             return status, {**meta, **error}
         return 200, {**meta, "answer": "".join(answer)}
 
+    @staticmethod
+    def _from_wire_weakness(w: dict) -> dict:
+        """把瀏覽器送回來的弱項(駝峰式,如 /api/grade 回傳的格式)轉成
+        內部慣例的底線式,交給 ai/prompts.py 使用。
+
+        曾經在這裡漏掉轉換:/api/grade 用 shortfallSd/downstreamNames 回給瀏覽器,
+        瀏覽器原封不動送回 /api/advise,但 ai/prompts.py 用的是
+        shortfall_sd/downstream_names,兩者對不上導致 KeyError、伺服器 502。
+        駝峰↔底線的轉換只該在 HTTP 邊界做一次,不該要求呼叫端自己轉。
+        """
+        return {
+            "name": w.get("name"),
+            "grade": w.get("grade"),
+            "shortfall_sd": w.get("shortfallSd", w.get("shortfall_sd")),
+            "improvement": w.get("improvement", ""),
+            "downstream_names": w.get("downstreamNames", w.get("downstream_names", [])),
+        }
+
     def _advise(self, payload: dict, client: str) -> Tuple[int, dict]:
         """健檢的改善建議。AI 只解讀已算好的弱項(憲法第二條)。"""
-        weaknesses = payload.get("weaknesses") or []
-        if not weaknesses:
+        raw_weaknesses = payload.get("weaknesses") or []
+        if not raw_weaknesses:
             return 200, {"advice": ""}
+        weaknesses = [self._from_wire_weakness(w) for w in raw_weaknesses]
 
         wait = self._throttled(client)
         if wait is not None:

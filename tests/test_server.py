@@ -340,6 +340,48 @@ class TestStreamingEvents:
         assert events[0]["status"] == 400
 
 
+class TestGradeToAdviseRoundTrip:
+    """實際踩過的 bug:/api/grade 回給瀏覽器的是駝峰式鍵名(shortfallSd),
+    瀏覽器原封不動把它送回 /api/advise,但 ai/prompts.py 期待底線式
+    (shortfall_sd),兩邊對不上導致 KeyError,伺服器 502,前端又沒有錯誤處理,
+    卡在「顧問分析中…」不動。
+
+    之前的單元測試都是手工塞 snake_case 資料呼叫 Consultant.advise(),
+    從沒真正走過「/api/grade 的輸出 -> 直接餵給 /api/advise」這條完整路徑,
+    所以這個命名不一致的問題一路通過 501 個測試才在真實環境爆出來。
+    """
+
+    def test_grade_output_can_feed_advise_directly(self, app):
+        """這是最貼近瀏覽器實際行為的測試:不手工構造資料,
+        而是先呼叫 /api/grade,把它回傳的 weaknesses 原封不動送進 /api/advise。
+        """
+        example = {
+            "psy": 20.63, "weaning_age": 21.97, "preweaning_mortality": 20.21,
+        }
+        _, grade_body = _post(app, "/api/grade", {"values": example})
+        assert grade_body["weaknesses"], "前置條件:至少要有一項弱項才測得到"
+
+        status, advise_body = _post(app, "/api/advise", {
+            "weaknesses": grade_body["weaknesses"],
+        })
+
+        assert status == 200, f"應成功,實際回應:{advise_body}"
+        assert "advice" in advise_body
+
+    def test_advise_reads_camel_case_shortfall(self, app):
+        """明確鎖住欄位名稱協議:/api/advise 必須看得懂 /api/grade 實際送出的
+        shortfallSd(駝峰式),而不是要求呼叫端自己轉成 shortfall_sd。
+        """
+        status, body = _post(app, "/api/advise", {
+            "weaknesses": [{
+                "key": "weaning_age", "name": "平均仔豬離乳日齡", "grade": "F",
+                "gradeLabel": "F 級(後 10%)", "shortfallSd": 2.96, "unit": "天",
+                "improvement": "", "downstream": [], "downstreamNames": [],
+            }],
+        })
+        assert status == 200, f"應成功,實際回應:{body}"
+
+
 class TestExampleEndpoint:
     """demo 用的範例資料(合億畜牧場,已取得授權)。"""
 
