@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>豬豬顧問</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="page">
+
+  <header class="masthead">
+    <svg width="44" height="44" viewBox="0 0 46 46" aria-hidden="true">
+      <g transform="rotate(-8 23 23)">
+        <rect x="8" y="10" width="30" height="24" rx="5" fill="var(--accent)" stroke="var(--ink)" stroke-width="1.5"/>
+        <circle cx="16" cy="18" r="2.6" fill="var(--bg)" stroke="var(--ink)" stroke-width="1"/>
+        <text x="23" y="30" text-anchor="middle" font-size="8" fill="var(--surface)" font-weight="700">NO.01</text>
+      </g>
+    </svg>
+    <div>
+      <h1>豬豬顧問</h1>
+      <p id="sourceLabel">載入中…</p>
+    </div>
+  </header>
+
+  <div id="banner" role="status"></div>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" role="tab" aria-selected="true" data-tab="consult">疾病諮詢</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="health">生產健檢</button>
+  </nav>
+
+  <!-- ── 疾病諮詢 ── -->
+  <section id="panel-consult" class="panel" role="tabpanel">
+    <div class="card">
+      <label class="field-label" for="question">描述症狀或問題</label>
+      <textarea id="question" rows="3"
+        placeholder="例如:保育豬咳嗽喘氣、母豬產後不吃東西"></textarea>
+      <div class="chips" id="examples">
+        <button class="chip" data-q="小豬下痢要用甚麼藥">小豬下痢</button>
+        <button class="chip" data-q="保育豬咳嗽喘氣可能是什麼病">保育豬咳嗽</button>
+        <button class="chip" data-q="母豬產後不吃東西怎麼辦">母豬產後不吃</button>
+        <button class="chip" data-q="豬隻皮膚出現紅色斑點是什麼問題">皮膚紅斑</button>
+      </div>
+      <button class="btn-primary" id="askBtn">詢問顧問</button>
+      <p class="hint" id="askHint">單次問答,不會記住上一題。回答約需 20 秒,會逐段出現。</p>
+    </div>
+
+    <div id="consultResult"></div>
+  </section>
+
+  <!-- ── 生產健檢 ── -->
+  <section id="panel-health" class="panel is-hidden" role="tabpanel">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>輸入本場生產數字</h2>
+          <p class="hint">只填知道的項目即可,沒填的不會評級。</p>
+        </div>
+        <button class="btn-ghost" id="loadExample">載入範例資料</button>
+      </div>
+      <div id="metricFields" class="fields"></div>
+      <button class="btn-primary" id="gradeBtn">開始健檢</button>
+      <p class="hint">健檢為純計算,不需連線 AI,額度用盡時仍可使用。</p>
+    </div>
+
+    <div id="healthResult"></div>
+  </section>
+
+  <footer>
+    <p id="disclaimer"></p>
+    <p>本工具僅供參考,非執業獸醫處方。實際確診與用藥請諮詢當地執業獸醫師。</p>
+  </footer>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

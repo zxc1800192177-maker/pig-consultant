@@ -1,0 +1,24 @@
+{
+  "_comment": "demo 範例資料。合億畜牧場 2025 年實際數據,已取得使用授權。官方評級見 specs/reference/benchmark-2025.md,系統算出的結果必須與其一致。",
+  "label": "範例:合億畜牧場 2025 年報",
+  "values": {
+    "psy": 20.63,
+    "litters_per_sow_year": 2.25,
+    "npd": 59.99,
+    "farrowing_rate": 71.56,
+    "repeat_service_rate": 17.87,
+    "wean_to_service": 7.05,
+    "live_born_per_sow_year": 27.00,
+    "total_born_per_litter": 13.29,
+    "live_born_per_litter": 11.92,
+    "preweaning_mortality": 20.21,
+    "weaned_per_sow": 9.47,
+    "weaned_per_litter": 9.79,
+    "weaning_age": 21.97,
+    "lactation_days": 21.82,
+    "parity_sow_psy": 20.69,
+    "farrowing_index": 2.42,
+    "gestation_days": 114.08,
+    "boars_inventory": 11.00
+  }
+}

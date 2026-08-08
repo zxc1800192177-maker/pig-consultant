@@ -1,0 +1,17 @@
+# Render 部署設定。連結 GitHub 儲存庫後,Render 會自動讀取這份檔案建立服務。
+# 手動設定也可以,見 DEPLOY.md。
+services:
+  - type: web
+    name: pig-consultant
+    runtime: python
+    plan: free
+    buildCommand: "true"          # 無相依套件,不需安裝步驟
+    startCommand: "python server.py"
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: ANTHROPIC_API_KEY
+        sync: false               # 在 Render 後台手動填入,不寫進版本控制
+      - key: MAX_AI_REQUESTS_PER_DAY
+        value: "500"
+    healthCheckPath: /api/health

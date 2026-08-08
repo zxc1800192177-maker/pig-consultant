@@ -1,0 +1,240 @@
+{
+  "source": {
+    "name": "豬隻生產指標年報",
+    "year": 2025,
+    "region": "臺灣",
+    "farms": 110,
+    "publisher": "PigCHAMP × PMMT 生產醫學管理團隊",
+    "guidance": "行政院農業委員會",
+    "note": "統計模式以場為單位。percentiles 一律由最佳排到最差,指標方向由資料推導。"
+  },
+  "bands": [[10, "A"], [25, "B"], [50, "C"], [75, "D"], [90, "E"]],
+  "_domain_knowledge_notice": "upstream 為依 2025 年報因果敘述整理的關係表,屬文字解讀,建議由領域專家覆核。弱項排序本身不依賴此表,僅用於呈現連鎖影響脈絡。",
+  "upstream": {
+    "_comment": "指標的上游驅動關係,供「別頭痛醫頭」提示使用",
+    "psy": ["litters_per_sow_year", "weaned_per_sow"],
+    "weaned_per_sow": ["live_born_per_litter", "preweaning_mortality"],
+    "weaned_per_litter": ["live_born_per_litter", "preweaning_mortality"],
+    "live_born_per_sow_year": ["live_born_per_litter", "litters_per_sow_year"],
+    "litters_per_sow_year": ["npd", "lactation_days"],
+    "live_born_per_litter": ["total_born_per_litter"],
+    "npd": ["farrowing_rate", "wean_to_service"],
+    "farrowing_rate": ["repeat_service_rate"]
+  },
+  "metrics": [
+    {
+      "key": "psy", "name": "母豬年產離乳仔豬數", "short": "PSY", "unit": "隻",
+      "gradable": true, "sample_size": 110, "mean": 21.52, "sd": 2.770,
+      "percentiles": [25.65, 23.22, 21.11, 19.11, 18.24], "range": [5, 35],
+      "definition": "母豬每年離乳仔豬數,代表母豬畜群對豬場的實際貢獻,常用於產業成績比較",
+      "improvement": "改善母豬年產胎數與母豬平均離乳仔豬數"
+    },
+    {
+      "key": "litters_per_sow_year", "name": "母豬年產胎數", "unit": "胎",
+      "gradable": true, "sample_size": 110, "mean": 2.13, "sd": 0.130,
+      "percentiles": [2.29, 2.22, 2.15, 2.06, 1.97], "range": [1.5, 2.6],
+      "definition": "365.25 天扣除非生產天數後,除以母豬生產天數(懷孕+哺乳)",
+      "improvement": "減少非生產天數與平均哺乳天數"
+    },
+    {
+      "key": "npd", "name": "母豬非生產天數", "unit": "天",
+      "gradable": true, "sample_size": 110, "mean": 62.07, "sd": 18.460,
+      "percentiles": [39.89, 47.93, 60.68, 73.78, 83.65], "range": [0, 150],
+      "definition": "每頭母豬年度內未進行生產工作的日數,反映生產效率與經濟效益",
+      "improvement": "增加有效配種以提升分娩率,或盡速淘汰空胎母豬"
+    },
+    {
+      "key": "farrowing_rate", "name": "分娩率", "unit": "%",
+      "gradable": true, "sample_size": 110, "mean": 75.41, "sd": 9.050,
+      "percentiles": [87.47, 82.37, 75.19, 69.71, 63.42], "range": [30, 100],
+      "definition": "母豬配種後實際分娩的比率。台灣正常值應在 75%~85%",
+      "improvement": "運用公豬在前使發情母豬站立穩定配種,並標準化操作流程"
+    },
+    {
+      "key": "repeat_service_rate", "name": "重發情配種佔比", "unit": "%",
+      "gradable": true, "sample_size": 110, "mean": 13.27, "sd": 7.040,
+      "percentiles": [5.49, 8.63, 11.94, 16.91, 22.47], "range": [0, 60],
+      "definition": "重發情配種頭數佔全部配種的比率",
+      "improvement": "外購或增加指定配種培育更多女豬,盡速更替此族群母豬"
+    },
+    {
+      "key": "wean_to_service", "name": "離乳到第一次配種間隔", "unit": "天",
+      "gradable": true, "sample_size": 110, "mean": 7.38, "sd": 2.350,
+      "percentiles": [4.99, 5.58, 6.60, 8.99, 10.74], "range": [3, 30],
+      "definition": "母豬離乳後至第一次配種的天數",
+      "improvement": "接近或超過 7 天時,檢視哺乳期採食量與照護程序"
+    },
+    {
+      "key": "live_born_per_sow_year", "name": "母豬年產活仔數", "unit": "隻",
+      "gradable": true, "sample_size": 110, "mean": 25.87, "sd": 3.420,
+      "percentiles": [30.78, 27.84, 25.92, 23.18, 21.33], "range": [8, 40],
+      "definition": "綜合窩均活仔數、分娩率與分娩指數",
+      "improvement": "提升窩均活仔數與年產胎數"
+    },
+    {
+      "key": "total_born_per_litter", "name": "窩均總仔數", "unit": "隻",
+      "gradable": true, "sample_size": 110, "mean": 13.69, "sd": 1.480,
+      "percentiles": [15.77, 14.55, 13.50, 12.68, 11.98], "range": [5, 25],
+      "definition": "母豬懷孕仔豬胎數的最大值,代表繁殖潛能",
+      "improvement": "引入高繁殖品種"
+    },
+    {
+      "key": "live_born_per_litter", "name": "窩均活仔數", "unit": "隻",
+      "gradable": true, "sample_size": 110, "mean": 12.16, "sd": 1.180,
+      "percentiles": [13.75, 12.81, 12.04, 11.35, 10.67], "range": [3, 22],
+      "definition": "母豬分娩後存活仔豬數量,代表可飼育最高數值",
+      "improvement": "與總仔數及產程照護高度相關"
+    },
+    {
+      "key": "preweaning_mortality", "name": "離乳前死亡率", "unit": "%",
+      "gradable": true, "sample_size": 110, "mean": 16.54, "sd": 5.660,
+      "percentiles": [8.77, 12.75, 16.14, 20.21, 24.38], "range": [0, 60],
+      "definition": "哺乳期間損失的仔豬比例,隨畜舍型態、管理模式與母性表現而異",
+      "improvement": "提升母豬哺乳能力或母性篩選;短期可增加採食量、加強巡視以減少壓死"
+    },
+    {
+      "key": "weaned_per_sow", "name": "母豬平均離乳仔豬數", "unit": "隻",
+      "gradable": true, "sample_size": 110, "mean": 10.13, "sd": 0.970,
+      "percentiles": [11.32, 10.80, 10.09, 9.38, 8.92], "range": [3, 16],
+      "definition": "母豬平均每胎實際離乳仔豬數量",
+      "improvement": "與窩均活仔數及離乳前死亡率高度相關"
+    },
+    {
+      "key": "weaned_per_litter", "name": "每窩平均離乳仔豬數", "unit": "隻",
+      "gradable": true, "sample_size": 110, "mean": 10.41, "sd": 0.860,
+      "percentiles": [11.48, 10.96, 10.40, 9.79, 9.28], "range": [3, 16],
+      "definition": "離乳仔豬數 / 扣除離乳仔豬數為 0 的母豬數量",
+      "improvement": "與窩均活仔數及離乳前死亡率高度相關"
+    },
+    {
+      "key": "weaning_age", "name": "平均仔豬離乳日齡", "unit": "天",
+      "gradable": true, "sample_size": 110, "mean": 27.42, "sd": 1.840,
+      "percentiles": [29.12, 28.14, 27.23, 26.46, 25.79], "range": [14, 42],
+      "definition": "仔豬離乳時的平均日齡",
+      "improvement": "依原始報表排序,較長離乳日齡列為較佳"
+    },
+    {
+      "key": "lactation_days", "name": "平均母豬哺乳天數", "unit": "天",
+      "gradable": true, "sample_size": 110, "mean": 27.05, "sd": 2.060,
+      "percentiles": [29.11, 27.88, 26.74, 25.98, 25.05], "range": [14, 42],
+      "definition": "母豬平均哺乳天數",
+      "improvement": "與離乳日齡連動,調整時需同步考量年產胎數"
+    },
+    {
+      "key": "parity_sow_psy", "name": "經產母豬年產離乳仔豬數", "unit": "隻",
+      "gradable": true, "sample_size": 110, "mean": 21.82, "sd": 2.830,
+      "percentiles": [26.14, 23.61, 21.41, 19.28, 18.70], "range": [5, 35],
+      "definition": "僅計經產母豬的年產離乳仔豬數",
+      "improvement": "與 PSY 同,但排除新女豬影響"
+    },
+    {
+      "key": "farrowing_index", "name": "分娩指數", "unit": "",
+      "gradable": true, "sample_size": 110, "mean": 2.33, "sd": 0.090,
+      "percentiles": [2.44, 2.39, 2.35, 2.30, 2.23], "range": [1.5, 2.8],
+      "definition": "365.25 / 經產母豬平均分娩間隔期",
+      "improvement": "縮短分娩間隔"
+    },
+    {
+      "key": "gestation_days", "name": "懷孕天數", "unit": "天",
+      "gradable": true, "sample_size": 110, "mean": 115.12, "sd": 0.820,
+      "percentiles": [114.01, 114.52, 115.12, 115.65, 116.26], "range": [108, 120],
+      "definition": "母豬平均懷孕天數",
+      "improvement": "原始報表將較短懷孕天數列為較佳,非本專案判斷"
+    },
+    {
+      "key": "boars_inventory", "name": "公豬在養頭數", "unit": "頭",
+      "gradable": true, "sample_size": 104, "mean": 8.63, "sd": 11.100,
+      "percentiles": [27.00, 10.00, 5.00, 2.00, 1.00], "range": [0, 200],
+      "definition": "場內在養公豬頭數",
+      "improvement": "與配種模式(本交/人工授精)有關,需併同判讀"
+    },
+
+    {
+      "key": "total_services", "name": "總配種數", "unit": "次",
+      "gradable": false, "sample_size": 110, "mean": 1537.45, "sd": 1985.581, "median": 814.50,
+      "definition": "年度總配種次數。規模型指標,不評級"
+    },
+    {
+      "key": "repeat_service_count", "name": "重發情配種頭數", "unit": "頭",
+      "gradable": false, "sample_size": 110, "mean": 187.47, "sd": 210.537, "median": 103.00,
+      "definition": "規模型指標,不評級"
+    },
+    {
+      "key": "farrowings", "name": "分娩窩數", "unit": "窩",
+      "gradable": false, "sample_size": 110, "mean": 1155.09, "sd": 1547.144, "median": 634.00,
+      "definition": "規模型指標,不評級"
+    },
+    {
+      "key": "total_born", "name": "總產仔數", "unit": "隻",
+      "gradable": false, "sample_size": 110, "mean": 15826.75, "sd": 21314.589, "median": 8723.50,
+      "definition": "規模型指標,不評級"
+    },
+    {
+      "key": "live_born", "name": "活仔數", "unit": "隻",
+      "gradable": false, "sample_size": 110, "mean": 14028.81, "sd": 19239.657, "median": 8032.00,
+      "definition": "規模型指標,不評級"
+    },
+    {
+      "key": "stillborn", "name": "死胎數", "unit": "隻",
+      "gradable": false, "sample_size": 108, "mean": 1574.33, "sd": 2105.153, "median": 702.50,
+      "definition": "規模型指標,不評級。樣本數 108,未達全體 110 場"
+    },
+    {
+      "key": "stillborn_per_litter", "name": "窩均死胎數", "unit": "隻",
+      "gradable": false, "sample_size": 108, "mean": 1.30, "sd": 0.564, "median": 1.24,
+      "definition": "樣本數 108,未達全體 110 場"
+    },
+    {
+      "key": "mummified", "name": "木乃伊數", "unit": "隻",
+      "gradable": false, "sample_size": 103, "mean": 269.37, "sd": 345.025, "median": 146.00,
+      "definition": "規模型指標,不評級。樣本數 103,未達全體 110 場"
+    },
+    {
+      "key": "mummified_per_litter", "name": "窩均木乃伊數", "unit": "隻",
+      "gradable": false, "sample_size": 103, "mean": 0.27, "sd": 0.216, "median": 0.25,
+      "definition": "樣本數 103,未達全體 110 場"
+    },
+    {
+      "key": "sows_weaned", "name": "完全離乳母豬數", "unit": "頭",
+      "gradable": false, "sample_size": 110, "mean": 1152.65, "sd": 1523.970, "median": 623.00,
+      "definition": "規模型指標,不評級"
+    },
+    {
+      "key": "piglets_weaned", "name": "離乳仔豬數", "unit": "隻",
+      "gradable": false, "sample_size": 110, "mean": 11657.38, "sd": 15802.348, "median": 6744.50,
+      "definition": "規模型指標,不評級"
+    },
+    {
+      "key": "gilts_entered", "name": "經產母豬入群/新女豬轉入", "unit": "頭",
+      "gradable": false, "sample_size": 110, "mean": 327.10, "sd": 514.901, "median": 155.50,
+      "definition": "規模型指標,不評級"
+    },
+    {
+      "key": "sow_deaths", "name": "母豬死亡頭數", "unit": "頭",
+      "gradable": false, "sample_size": 105, "mean": 30.64, "sd": 49.166, "median": 13.00,
+      "definition": "規模型指標,不評級。樣本數 105,未達全體 110 場"
+    },
+    {
+      "key": "sow_death_rate", "name": "母豬死亡百分比", "unit": "%",
+      "gradable": false, "sample_size": 105, "mean": 4.86, "sd": 2.86, "median": 4.50,
+      "range": [0, 30],
+      "definition": "樣本數 105,未達全體 110 場。原始報表未提供百分位,故不評級"
+    },
+    {
+      "key": "sows_culled", "name": "淘汰/出售母豬", "unit": "頭",
+      "gradable": false, "sample_size": 110, "mean": 284.85, "sd": 373.608, "median": 143.50,
+      "definition": "規模型指標,不評級"
+    },
+    {
+      "key": "sow_cull_rate", "name": "母豬出售百分比", "unit": "%",
+      "gradable": false, "sample_size": 110, "mean": 51.05, "sd": 18.70, "median": 49.90,
+      "range": [0, 100],
+      "definition": "原始報表未提供百分位,故不評級"
+    },
+    {
+      "key": "sows_inventory", "name": "母豬在養頭數", "unit": "頭",
+      "gradable": false, "sample_size": 110, "mean": 542.59, "sd": 705.146, "median": 283.00,
+      "definition": "規模型指標,不評級"
+    }
+  ]
+}

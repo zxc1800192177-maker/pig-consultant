@@ -1,0 +1,10 @@
+{
+  "name": "pig-consultant-v2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Frontend pure logic + tests. Uses Node's built-in test runner; no dependencies.",
+  "scripts": {
+    "test": "node --test \"tests/js/*.test.js\""
+  }
+}
