@@ -10,17 +10,9 @@
 <div class="page">
 
   <header class="masthead">
-    <svg width="44" height="44" viewBox="0 0 46 46" aria-hidden="true">
-      <g transform="rotate(-8 23 23)">
-        <rect x="8" y="10" width="30" height="24" rx="5" fill="var(--accent)" stroke="var(--ink)" stroke-width="1.5"/>
-        <circle cx="16" cy="18" r="2.6" fill="var(--bg)" stroke="var(--ink)" stroke-width="1"/>
-        <text x="23" y="30" text-anchor="middle" font-size="8" fill="var(--surface)" font-weight="700">NO.01</text>
-      </g>
-    </svg>
-    <div>
-      <h1>豬豬顧問</h1>
-      <p id="sourceLabel">載入中…</p>
-    </div>
+    <img class="pig" src="pig.svg" alt="">
+    <h1>豬豬顧問</h1>
+    <p id="sourceLabel">載入中…</p>
   </header>
 
   <div id="banner" role="status"></div>
@@ -49,7 +41,12 @@
       </p>
     </div>
 
-    <div id="consultResult"></div>
+    <div id="consultResult">
+      <div class="empty-state">
+        <img class="pig-empty" src="pig.svg" alt="">
+        <p>描述症狀後,顧問會給出可能病因、用藥方向與風險評估。</p>
+      </div>
+    </div>
   </section>
 
   <!-- ── 生產健檢 ── -->
@@ -67,10 +64,16 @@
       <p class="hint">健檢為純計算,不需連線 AI,額度用盡時仍可使用。</p>
     </div>
 
-    <div id="healthResult"></div>
+    <div id="healthResult">
+      <div class="empty-state">
+        <img class="pig-empty" src="pig.svg" alt="">
+        <p>填好數字按「開始健檢」,或先載入範例看看結果長什麼樣。</p>
+      </div>
+    </div>
   </section>
 
   <footer>
+    <img class="pig-mini" src="pig.svg" alt="">
     <p id="disclaimer"></p>
     <p>本工具僅供參考,非執業獸醫處方。實際確診與用藥請諮詢當地執業獸醫師。</p>
   </footer>

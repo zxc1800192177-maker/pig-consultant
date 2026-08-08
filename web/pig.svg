@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="小豬">
+  <defs>
+    <linearGradient id="skin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffc2cf"/>
+      <stop offset="1" stop-color="#ff9db1"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 耳朵 -->
+  <path d="M28 38 C22 20 34 16 44 26 Z" fill="#ff9db1"/>
+  <path d="M92 38 C98 20 86 16 76 26 Z" fill="#ff9db1"/>
+
+  <!-- 頭 -->
+  <circle cx="60" cy="64" r="38" fill="url(#skin)"/>
+
+  <!-- 腮紅 -->
+  <ellipse cx="32" cy="72" rx="8" ry="5.5" fill="#ff7a95" opacity=".45"/>
+  <ellipse cx="88" cy="72" rx="8" ry="5.5" fill="#ff7a95" opacity=".45"/>
+
+  <!-- 眼睛 -->
+  <circle cx="46" cy="56" r="4.6" fill="#3a2b30"/>
+  <circle cx="74" cy="56" r="4.6" fill="#3a2b30"/>
+  <circle cx="47.6" cy="54.4" r="1.6" fill="#fff"/>
+  <circle cx="75.6" cy="54.4" r="1.6" fill="#fff"/>
+
+  <!-- 鼻子 -->
+  <ellipse cx="60" cy="76" rx="16" ry="12" fill="#ff8aa5"/>
+  <ellipse cx="54.5" cy="76" rx="3" ry="4.4" fill="#e06b86"/>
+  <ellipse cx="65.5" cy="76" rx="3" ry="4.4" fill="#e06b86"/>
+</svg>
