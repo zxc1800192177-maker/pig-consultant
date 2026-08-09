@@ -31,6 +31,7 @@ let myDrugs = loadMyDrugs(localStorage);
 
 function renderDrugList() {
   const list = $("drugList");
+  if (!list) return;
   if (!myDrugs.length) {
     list.innerHTML = `<li class="drug-empty">還沒有加入任何藥品。</li>`;
     return;
@@ -62,29 +63,38 @@ function readOptionalNumber(el) {
   return Number.isFinite(n) ? n : undefined;
 }
 
-$("addDrugBtn").addEventListener("click", () => {
-  myDrugs = addDrug(myDrugs, {
-    name: $("drugName").value,
-    dosageNote: $("drugNote").value,
-    withdrawalDays: readOptionalNumber($("drugWithdrawal")),
+// 只在這個區塊真正需要的元素都存在時才接線 —— 瀏覽器快取(尤其是 PWA
+// 的 service worker)偶爾會讓 index.html 跟 app.js 版本對不上,若這裡
+// 對著不存在的元素呼叫 addEventListener 而不做防呆,拋出的例外會讓
+// 這個檔案後面所有按鈕(載入範例資料、詢問顧問、健檢)全部沒有反應 ——
+// 一個次要功能的元素缺失,不該連累完全無關的核心功能。
+const drugListEl = $("drugList");
+const addDrugBtnEl = $("addDrugBtn");
+if (drugListEl && addDrugBtnEl) {
+  addDrugBtnEl.addEventListener("click", () => {
+    myDrugs = addDrug(myDrugs, {
+      name: $("drugName").value,
+      dosageNote: $("drugNote").value,
+      withdrawalDays: readOptionalNumber($("drugWithdrawal")),
+    });
+    saveMyDrugs(localStorage, myDrugs);
+    renderDrugList();
+    $("drugName").value = "";
+    $("drugNote").value = "";
+    $("drugWithdrawal").value = "";
+    $("drugName").focus();
   });
-  saveMyDrugs(localStorage, myDrugs);
-  renderDrugList();
-  $("drugName").value = "";
-  $("drugNote").value = "";
-  $("drugWithdrawal").value = "";
-  $("drugName").focus();
-});
 
-$("drugList").addEventListener("click", (e) => {
-  const btn = e.target.closest(".drug-remove");
-  if (!btn) return;
-  myDrugs = removeDrug(myDrugs, btn.dataset.id);
-  saveMyDrugs(localStorage, myDrugs);
-  renderDrugList();
-});
+  drugListEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".drug-remove");
+    if (!btn) return;
+    myDrugs = removeDrug(myDrugs, btn.dataset.id);
+    saveMyDrugs(localStorage, myDrugs);
+    renderDrugList();
+  });
 
-renderDrugList();
+  renderDrugList();
+}
 
 // ── 頁籤 ──
 document.querySelectorAll(".tab").forEach((tab) => {
@@ -312,9 +322,13 @@ $("question").addEventListener("keydown", (e) => {
 // ── 語音輸入 ──
 // 桌面版 Firefox 完全不支援,其餘瀏覽器需要廠商前綴 —— 不支援就不顯示
 // 按鈕,漸進增強,不影響手動打字的既有流程。
+// 同時也要檢查 DOM 元素本身存在(而不是只檢查瀏覽器 API 支援)——
+// 快取造成 index.html 跟 app.js 版本對不上時,元素可能不存在,若沒防呆,
+// 拋出的例外會讓這個檔案後面所有東西(包含最下面的 init() 與 service
+// worker 註冊)全部沒有執行。
 const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-if (isSpeechRecognitionSupported(window)) {
+if (isSpeechRecognitionSupported(window) && $("micBtn") && $("micHint")) {
   const recognition = new SpeechRecognitionCtor();
   recognition.lang = "zh-TW";
   recognition.continuous = true;
