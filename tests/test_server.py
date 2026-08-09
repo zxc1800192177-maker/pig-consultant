@@ -5,12 +5,13 @@
 """
 
 import json
+import re
 
 import pytest
 
 import config
 from ai.transport import AnthropicApiTransport, FakeTransport, NotLoggedIn, QuotaExceeded
-from server import Application
+from server import WEB_DIR, Application
 
 # monkeypatch.setattr 已在每個測試結束後自動還原 config 的修改,不需額外處理。
 
@@ -481,3 +482,45 @@ class TestExampleEndpoint:
         assert body["grades"]["psy"]["grade"] == "D"
         assert body["grades"]["preweaning_mortality"]["grade"] == "E"
         assert body["grades"]["weaning_age"]["grade"] == "F"
+
+
+class TestPwaAssets:
+    """manifest / service worker 的檔案沒有動態產生,不會被一般測試碰到,
+    改版時很容易漏改而沒人發現(圖示改名、家目錄挪動)。這裡鎖住兩件事:
+    manifest 裡引用的每個檔案都真的存在,以及 service worker 的預快取清單
+    不會誤吞 /api/* —— 那會讓串流回應被快取攔截。
+    """
+
+    def test_manifest_is_valid_json_with_required_fields(self):
+        manifest = json.loads((WEB_DIR / "manifest.webmanifest").read_text("utf-8"))
+        assert manifest["start_url"] == "/"
+        assert manifest["display"] == "standalone"
+        assert len(manifest["icons"]) >= 2
+
+    def test_manifest_icons_exist_on_disk(self):
+        manifest = json.loads((WEB_DIR / "manifest.webmanifest").read_text("utf-8"))
+        for icon in manifest["icons"]:
+            assert (WEB_DIR / icon["src"]).is_file(), f"manifest 引用但不存在:{icon['src']}"
+
+    def test_apple_touch_icon_exists(self):
+        assert (WEB_DIR / "icons" / "apple-touch-icon.png").is_file()
+
+    def test_service_worker_precache_list_has_no_api_paths(self):
+        """一旦 /api/* 混進快取清單,SSE 串流會被 cache-first 攔截而整個斷掉。"""
+        sw = (WEB_DIR / "sw.js").read_text("utf-8")
+        urls = re.findall(r'"(/[^"]*)"', sw.split("PRECACHE_URLS = [")[1].split("]")[0])
+        assert urls, "沒解析到任何預快取路徑,測試本身可能失效"
+        assert not any(u.startswith("/api/") for u in urls)
+
+    def test_service_worker_precache_files_exist_on_disk(self):
+        sw = (WEB_DIR / "sw.js").read_text("utf-8")
+        urls = re.findall(r'"(/[^"]*)"', sw.split("PRECACHE_URLS = [")[1].split("]")[0])
+        for url in urls:
+            path = WEB_DIR / "index.html" if url == "/" else WEB_DIR / url.lstrip("/")
+            assert path.is_file(), f"sw.js 預快取但不存在:{url}"
+
+    def test_index_html_links_manifest_and_service_worker_registration(self):
+        html = (WEB_DIR / "index.html").read_text("utf-8")
+        assert 'rel="manifest"' in html
+        js = (WEB_DIR / "app.js").read_text("utf-8")
+        assert "serviceWorker" in js and "register(" in js

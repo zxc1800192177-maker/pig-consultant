@@ -328,3 +328,10 @@ function handleConsultEvent(event, getAnswer, setAnswer) {
 }
 
 init();
+
+// 註冊失敗(舊瀏覽器、非 HTTPS)不影響網站運作,純粹是漸進增強
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  });
+}
