@@ -195,6 +195,27 @@ class Application:
         """目前登入的使用者;未登入或帳號功能未啟用時回 None。"""
         return self.auth.resolve_session(token) if self.auth else None
 
+    def _login_required(self) -> bool:
+        """兩項核心功能是否需要先登入。
+
+        帳號功能不可用時一律回 False —— 沒設資料庫的環境(本機開發、
+        demo),或資料庫故障時,網站要降級成免帳號可用,而不是整個鎖死。
+        """
+        return bool(config.REQUIRE_LOGIN and self.auth)
+
+    def _gate(self, token):
+        """未登入時回傳給前端的錯誤內容;可以放行則回 None。
+
+        前端會自己擋一次(未登入就不顯示功能畫面),但那只是介面。
+        真正的限制必須在這裡 —— 不然任何人直接呼叫 API 就繞過去了,
+        而疾病諮詢每一次呼叫都在花錢。
+        """
+        if not self._login_required():
+            return None
+        if self._current_user(token) is not None:
+            return None
+        return {"reason": "login_required", "error": "請先登入或使用訪客試用"}
+
     @staticmethod
     def _user_payload(user) -> dict:
         if user is None:
@@ -261,6 +282,10 @@ class Application:
                 # 前端據此決定要不要顯示登入相關的介面。沒有資料庫時
                 # 整個帳號區塊不出現,而不是出現了按下去才報錯。
                 "accountsAvailable": self.auth is not None,
+                # 前端據此決定未登入時要不要把功能畫面藏起來。
+                # 真正的限制在後端(見 _gate),這個欄位只是為了讓畫面
+                # 一開始就顯示登入引導,而不是讓人填完表單才被拒絕。
+                "loginRequired": self._login_required(),
             }
         if path == "/api/auth/me":
             return 200, self._user_payload(self._current_user(token))
@@ -300,11 +325,13 @@ class Application:
             return 400, {"error": "請求格式錯誤,需為 UTF-8 編碼的 JSON"}
 
         if path == "/api/grade":
-            return self._grade(payload)
+            gate = self._gate(token)
+            return (401, gate) if gate else self._grade(payload)
         if path == "/api/consult":
             return self._consult(payload, client, token)
         if path == "/api/advise":
-            return self._advise(payload, client)
+            gate = self._gate(token)
+            return (401, gate) if gate else self._advise(payload, client)
         if path.startswith("/api/auth/"):
             return self._auth_post(path, payload, client, token)
         if path == "/api/health-checks":
@@ -531,6 +558,13 @@ class Application:
           error  含 status,後續不再產出
           done   正常結束
         """
+        # 登入檢查要在最前面 —— 排在通報須知之前。那些提示雖然不花錢,
+        # 但未登入者連功能畫面都看不到,送出去也只是浪費。
+        gate = self._gate(token)
+        if gate:
+            yield {"type": "error", "status": 401, **gate}
+            return
+
         raw_weaknesses = payload.get("weaknesses") or []
         weaknesses = [self._from_wire_weakness(w) for w in raw_weaknesses]
 

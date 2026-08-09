@@ -46,6 +46,31 @@
 
   <div id="banner" role="status"></div>
 
+  <!-- 未登入時取代功能畫面顯示。可用性由 JS 依 /api/health 的
+       loginRequired 決定,後端另有真正的限制(server.py 的 _gate)。 -->
+  <div class="card is-hidden" id="loginGate">
+    <div class="gate-body">
+      <img class="pig-empty" src="pig-sleeping.png" alt="">
+      <h2>先選一個身分,就可以開始用</h2>
+      <p class="hint">
+        健檢紀錄與藥品庫會存在你的身分下,下次回來還在。
+        不想設帳號密碼的話,「訪客試用」點一下就能進去。
+      </p>
+      <div class="gate-actions">
+        <button class="btn-primary" data-auth-open="guest">訪客試用(免帳號密碼)</button>
+        <div class="gate-secondary">
+          <button class="btn-ghost" data-auth-open="register">註冊帳號</button>
+          <span class="gate-divider">・</span>
+          <button class="btn-ghost" data-auth-open="login">我已經有帳號了</button>
+        </div>
+      </div>
+      <p class="hint gate-note">
+        訪客身分只能靠這台裝置的瀏覽器取回,清除瀏覽器資料就會失去存取權。
+        之後隨時可以設定帳號密碼,原有資料會完整保留。
+      </p>
+    </div>
+  </div>
+
   <nav class="tabs" role="tablist">
     <button class="tab is-active" role="tab" aria-selected="true" data-tab="consult">疾病諮詢</button>
     <button class="tab" role="tab" aria-selected="false" data-tab="health">生產健檢</button>

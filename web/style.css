@@ -340,6 +340,25 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 }
 .guest-warning .btn-ghost { color: var(--warn); font-weight: 600; }
 
+/* ── 登入引導 ── */
+.gate-body { text-align: center; padding: 12px 0 4px; }
+.gate-body h2 {
+  font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 8px;
+}
+.gate-body .hint { max-width: 40ch; margin-inline: auto; }
+.gate-actions { margin: 22px 0 18px; }
+.gate-actions .btn-primary { max-width: 320px; margin-inline: auto; }
+.gate-secondary {
+  display: flex; align-items: center; justify-content: center;
+  gap: 6px; margin-top: 12px; flex-wrap: wrap;
+}
+.gate-divider { color: var(--ink-faint); font-size: 13px; }
+/* 訪客的取捨要講在前面,不是等使用者踩到才知道 */
+.gate-note {
+  border-top: 1px solid var(--border-light); padding-top: 14px;
+  font-size: 12.5px; max-width: 44ch;
+}
+
 /* ── 歷史紀錄 ── */
 .history-list { list-style: none; padding: 0; margin: 0; }
 .history-item {

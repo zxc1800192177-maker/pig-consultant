@@ -58,6 +58,7 @@ function rememberTurn(role, content) {
 // 不是出現了按下去才報錯。
 let account = { loggedIn: false, username: null, isGuest: false };
 let accountsAvailable = false;
+let loginRequired = false;
 
 const LOGGED_OUT = { loggedIn: false, username: null, isGuest: false };
 
@@ -65,7 +66,32 @@ async function refreshAccount() {
   const { ok, data } = await api("/api/auth/me");
   account = ok && data.loggedIn ? data : LOGGED_OUT;
   renderAuthBar();
+  applyLoginGate();
   await Promise.all([reloadDrugs(), reloadHistory()]);
+}
+
+// 未登入時把功能畫面換成登入引導。
+//
+// 這只是介面 —— 真正的限制在後端(server.py 的 _gate)。前端隱藏擋不住
+// 直接呼叫 API 的人,而疾病諮詢每一次呼叫都在花錢。
+function applyLoginGate() {
+  const gate = $("loginGate");
+  if (!gate) return;
+
+  const blocked = loginRequired && !account.loggedIn;
+  gate.classList.toggle("is-hidden", !blocked);
+  document.querySelector(".tabs")?.classList.toggle("is-hidden", blocked);
+
+  document.querySelectorAll(".panel").forEach((panel) => {
+    if (blocked) {
+      panel.classList.add("is-hidden");
+      return;
+    }
+    // 解除封鎖時回到目前選取的頁籤,而不是把兩個面板都打開
+    const active = document.querySelector(".tab.is-active");
+    const wanted = active ? `panel-${active.dataset.tab}` : "panel-consult";
+    panel.classList.toggle("is-hidden", panel.id !== wanted);
+  });
 }
 
 function renderAuthBar() {
@@ -175,18 +201,17 @@ async function logout() {
   await refreshAccount();
 }
 
-const authBarEl = $("authBar");
-if (authBarEl) {
-  authBarEl.addEventListener("click", (e) => {
-    const opener = e.target.closest("[data-auth-open]");
-    if (opener) {
-      const mode = opener.dataset.authOpen;
-      // 訪客試用不需要表單,點下去就進入
-      return mode === "guest" ? startGuestSession() : openAuthPanel(mode);
-    }
-    if (e.target.closest('[data-auth-action="logout"]')) logout();
-  });
-}
+// 帳號相關的按鈕散落在三個地方(頁首狀態列、登入引導、訪客提醒),
+// 而且都會被重繪。用單一的事件委派接住全部,不必每次重繪重新綁定。
+document.addEventListener("click", (e) => {
+  const opener = e.target.closest("[data-auth-open]");
+  if (opener) {
+    const mode = opener.dataset.authOpen;
+    // 訪客試用不需要填表單,點下去就進入
+    return mode === "guest" ? startGuestSession() : openAuthPanel(mode);
+  }
+  if (e.target.closest('[data-auth-action="logout"]')) logout();
+});
 
 $("authSubmit")?.addEventListener("click", submitAuthForm);
 $("authClose")?.addEventListener("click", closeAuthPanel);
@@ -205,12 +230,6 @@ function guestWarningHtml() {
       <button class="btn-ghost" data-auth-open="claim">設定帳號密碼</button>
     </div>`;
 }
-
-// 訪客提醒裡的按鈕散落在不同區塊,用事件委派統一接,不必每次重繪都重新綁定
-document.addEventListener("click", (e) => {
-  const opener = e.target.closest(".guest-warning [data-auth-open]");
-  if (opener) openAuthPanel(opener.dataset.authOpen);
-});
 
 // ── 我的藥品庫 ──
 // 未登入:存在這台瀏覽器的 localStorage(行為與加入帳號功能前完全相同)。
@@ -428,26 +447,39 @@ document.querySelectorAll(".tab").forEach((tab) => {
 
 // ── 啟動 ──
 async function init() {
-  const { ok, data: health } = await api("/api/health");
-  if (!ok) {
+  // 三個請求一起發:登入狀態要盡早知道,否則畫面會先顯示完整功能
+  // 再被登入引導蓋掉(或反過來),使用者會看到明顯的閃動。
+  const [health, meta, me] = await Promise.all([
+    api("/api/health"),
+    api("/api/metrics"),
+    api("/api/auth/me"),
+  ]);
+
+  if (!health.ok) {
     showBanner("無法連線到伺服器,請稍後再試。", "warn");
   } else {
-    $("sourceLabel").textContent = health.source;
-    accountsAvailable = Boolean(health.accountsAvailable);
-    if (!health.aiAvailable) {
+    $("sourceLabel").textContent = health.data.source;
+    accountsAvailable = Boolean(health.data.accountsAvailable);
+    loginRequired = Boolean(health.data.loginRequired);
+    if (!health.data.aiAvailable) {
       // 提示文字由後端提供(core/labels.py),前端不自己維護一份措辭
-      showBanner(health.aiUnavailableNote, "warn");
+      showBanner(health.data.aiUnavailableNote, "warn");
       $("askBtn").disabled = true;
     }
   }
 
-  const meta = await (await fetch("/api/metrics")).json();
-  metricDefs = meta.metrics;
-  $("disclaimer").textContent = meta.disclaimer;
-  renderMetricFields();
+  if (meta.ok) {
+    metricDefs = meta.data.metrics;
+    $("disclaimer").textContent = meta.data.disclaimer;
+    renderMetricFields();   // 欄位要先畫出來,「載入某次紀錄」才有地方可填
+  }
 
-  // 指標欄位要先畫出來,「載入某次紀錄」才有地方可以填
-  if (accountsAvailable) await refreshAccount();
+  if (accountsAvailable) {
+    account = me.ok && me.data.loggedIn ? me.data : LOGGED_OUT;
+    renderAuthBar();
+    applyLoginGate();
+    await Promise.all([reloadDrugs(), reloadHistory()]);
+  }
 }
 
 function showBanner(text, tone) {

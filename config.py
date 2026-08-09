@@ -75,6 +75,15 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 SESSION_TTL_DAYS = int(os.environ.get("SESSION_TTL_DAYS", "30"))
 SESSION_COOKIE_NAME = "pig_session"
 
+# 是否要求先登入才能使用疾病諮詢與生產健檢。
+#
+# 只有在帳號功能真的可用時才會生效 —— 沒設 DATABASE_URL 的環境
+# (本機開發、demo)不會因為這個設定就把所有人擋在門外,那會讓網站
+# 在資料庫故障時完全不能用,而不是降級。
+#
+# 「訪客試用」仍然是入口之一,所以門檻是「點一下」而不是「先註冊」。
+REQUIRE_LOGIN = os.environ.get("REQUIRE_LOGIN", "1") not in ("0", "false", "False")
+
 MIN_PASSWORD_CHARS = 8
 MIN_USERNAME_CHARS = 2
 MAX_USERNAME_CHARS = 30

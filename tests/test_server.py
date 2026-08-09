@@ -950,6 +950,111 @@ class TestConsultUsesServerSideDrugs:
         assert "瀏覽器裡的藥" in transport.last_prompt
 
 
+class TestLoginGate:
+    """兩項核心功能要先登入(含訪客)才能用。
+
+    前端會把功能畫面藏起來,但那只是介面 —— 真正的限制必須在後端,
+    否則任何人直接呼叫 API 就繞過去了,而疾病諮詢每次呼叫都在花錢。
+    """
+
+    def test_consult_blocked_without_login(self):
+        app = _account_app()
+        status, body = _post(app, "/api/consult", {"question": "小豬下痢"})
+        assert status == 401
+        assert body.get("reason") == "login_required"
+
+    def test_grade_blocked_without_login(self):
+        app = _account_app()
+        status, body = _post(app, "/api/grade", {"values": {"psy": 20.63}})
+        assert status == 401
+        assert body.get("reason") == "login_required"
+
+    def test_advise_blocked_without_login(self):
+        app = _account_app()
+        status, _ = _post(app, "/api/advise", {"weaknesses": [
+            {"key": "psy", "name": "PSY", "grade": "F", "shortfallSd": 1.0,
+             "improvement": "", "downstreamNames": []},
+        ]})
+        assert status == 401
+
+    def test_no_ai_call_happens_when_blocked(self):
+        """擋下來的請求不能已經先花掉一次 API 額度。"""
+        from db import InMemoryStore
+        transport = FakeTransport(chunks=["不該被呼叫"])
+        app = Application(transport=transport, store=InMemoryStore())
+        _post(app, "/api/consult", {"question": "小豬下痢"})
+        assert transport.last_prompt is None
+
+    def test_error_arrives_as_a_stream_event_not_a_dead_connection(self):
+        """串流路徑要送出 error 事件。直接斷線的話畫面會永遠卡在載入中。"""
+        app = _account_app()
+        events = list(app.consult_events({"question": "小豬下痢"}, "test"))
+        assert events, "沒有送出任何事件,前端會一直等下去"
+        assert events[0]["type"] == "error"
+        assert events[0]["status"] == 401
+
+    def test_everything_works_after_guest_login(self):
+        """訪客也算登入 —— 門檻是「點一下」,不是「先註冊」。"""
+        app = _account_app()
+        token = _post(app, "/api/auth/guest", {})[1][SET_SESSION_KEY]
+
+        assert _post_as(app, "/api/consult", {"question": "小豬下痢"}, token)[0] == 200
+        assert _post_as(app, "/api/grade", {"values": {"psy": 20.63}}, token)[0] == 200
+
+    def test_works_after_registering(self):
+        app = _account_app()
+        token = _register(app)
+        assert _post_as(app, "/api/grade", {"values": {"psy": 20.63}}, token)[0] == 200
+
+    def test_expired_or_forged_token_is_still_blocked(self):
+        app = _account_app()
+        assert _post_as(app, "/api/grade", {"values": {"psy": 20.63}}, "forged")[0] == 401
+
+    def test_health_endpoint_announces_the_requirement(self):
+        _, body = _account_app().handle_get("/api/health")
+        assert body["loginRequired"] is True
+
+    def test_auth_endpoints_stay_open(self):
+        """登入相關的端點本身不能被門檻擋住,否則沒有人進得來。"""
+        app = _account_app()
+        assert app.handle_get("/api/auth/me")[0] == 200
+        assert _post(app, "/api/auth/guest", {})[0] == 200
+        assert app.handle_get("/api/health")[0] == 200
+
+
+class TestLoginGateDisabledWithoutDatabase:
+    """沒有資料庫時不得把所有人鎖在門外。
+
+    資料庫故障或本機開發沒設 DATABASE_URL 時,網站要降級成免帳號可用,
+    而不是整個不能用 —— 否則一個外部服務出問題就等於全站停擺。
+    """
+
+    def test_consult_still_open(self, app):
+        assert _post(app, "/api/consult", {"question": "小豬下痢"})[0] == 200
+
+    def test_grade_still_open(self, app):
+        assert _post(app, "/api/grade", {"values": {"psy": 20.63}})[0] == 200
+
+    def test_health_reports_no_requirement(self, app):
+        _, body = app.handle_get("/api/health")
+        assert body["loginRequired"] is False
+
+
+class TestLoginGateCanBeTurnedOff:
+    """REQUIRE_LOGIN=0 時退回「帳號是選填」的行為。"""
+
+    def test_features_open_when_requirement_disabled(self, monkeypatch):
+        monkeypatch.setattr(config, "REQUIRE_LOGIN", False)
+        app = _account_app()
+        assert _post(app, "/api/grade", {"values": {"psy": 20.63}})[0] == 200
+        assert _post(app, "/api/consult", {"question": "小豬下痢"})[0] == 200
+
+    def test_health_reflects_the_setting(self, monkeypatch):
+        monkeypatch.setattr(config, "REQUIRE_LOGIN", False)
+        _, body = _account_app().handle_get("/api/health")
+        assert body["loginRequired"] is False
+
+
 class TestLoginThrottle:
     """密碼可以被暴力猜,訪客建立會寫入資料庫 —— 兩者都要設限。"""
 
