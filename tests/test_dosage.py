@@ -76,23 +76,32 @@ class TestEntryShape:
         assert matches[0].source_note == "測試用途,非真實資料"
 
 
-class TestProductionDataFileStartsEmpty:
-    """正式資料檔的現況:還沒有查證過的資料,不得顯示任何劑量數字。
+class TestProductionDataFilePendingVerification:
+    """正式資料檔的現況:AI 從官方手冊轉錄了草稿資料,但還沒有人逐條核對過,
+    不得顯示任何劑量數字。
 
-    這條測試會在管理者填入真實資料後失敗 —— 屆時應該直接刪掉這條測試,
-    不是把它改成通過;它存在的目的只是防止有人在資料查證完成前不小心
-    把草稿資料當成正式資料上線。
+    這條測試會在有人把某筆資料的 verified 改成 true 後,對那一筆失敗 ——
+    屆時代表查證完成,應該把那個 id 從下面的清單移除,不是整條測試刪掉
+    (只要還有其他未查證的草稿留著,這條測試就還有事情要做)。
     """
 
-    def test_entries_still_empty_pending_verification(self):
+    def test_no_entry_is_verified_yet(self):
         with open(DATA_PATH, encoding="utf-8") as f:
             data = json.load(f)
-        assert data["entries"] == [], (
-            "dosage_table.json 已經有資料了 —— 如果這些資料已經過查證,"
-            "請直接刪除這條測試(它的任務到此結束);"
-            "如果還沒查證,請先移除或改成 verified:false。"
+        unverified_by_default = [e for e in data["entries"] if e.get("verified")]
+        assert unverified_by_default == [], (
+            f"以下項目已標記 verified:true,但這條測試假設全部草稿都還沒查證:"
+            f"{[e['id'] for e in unverified_by_default]}。"
+            "如果真的已經人工核對過手冊原文,這是預期之內的變化 —— "
+            "請直接刪除這條測試對應的斷言或整條測試,不是回頭改資料。"
         )
 
     def test_real_data_file_never_crashes_matcher(self):
-        """就算正式資料檔是空的,比對邏輯本身也不能壞掉。"""
+        """就算正式資料檔的項目都還沒查證,比對邏輯本身也不能壞掉。"""
         assert match_dosage_entries("小豬一直下痢已經兩天") == []
+
+    def test_real_data_file_has_no_match_until_verified(self):
+        """草稿資料再詳細,只要沒有人核對過,就不能顯示給使用者看。"""
+        assert match_dosage_entries("小豬下痢") == []
+        assert match_dosage_entries("保育豬咳嗽喘氣") == []
+        assert match_dosage_entries("豬隻皮膚出現紅色斑點") == []
