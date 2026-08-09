@@ -10,12 +10,34 @@ scrypt 是刻意設計成又慢又吃記憶體的金鑰衍生函式,同樣的硬
 """
 
 import hashlib
+import pathlib
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple, Optional
 
 import config
 from db import Store, new_token
+
+COMMON_PASSWORDS_PATH = (
+    pathlib.Path(__file__).parent / "data" / "common_passwords.txt"
+)
+
+
+def _load_common_passwords() -> frozenset:
+    """常見弱密碼清單。檔案不存在時回空集合而不是壞掉 ——
+    少了這道檢查仍有其他規則把關,但整個註冊功能不該因此癱瘓。
+    """
+    try:
+        lines = COMMON_PASSWORDS_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return frozenset()
+    return frozenset(
+        line.strip().lower() for line in lines
+        if line.strip() and not line.startswith("#")
+    )
+
+
+COMMON_PASSWORDS = _load_common_passwords()
 
 # scrypt 參數。n 是成本因子,調高會等比變慢(對攻擊者與對我們都是)。
 # 2**14 在一般伺服器上約數十毫秒,對登入來說感覺不到,對暴力破解已經
@@ -110,12 +132,72 @@ def normalize_username(raw) -> str:
     return name
 
 
-def validate_password(raw) -> str:
+def _is_sequential(text: str) -> bool:
+    """整串都是連續遞增或遞減的字元(12345678、abcdefgh、87654321)。"""
+    if len(text) < 3:
+        return False
+    deltas = {ord(b) - ord(a) for a, b in zip(text, text[1:])}
+    return deltas in ({1}, {-1})
+
+
+def password_strength_units(text: str) -> int:
+    """密碼長度的「有效強度」,非 ASCII 字元算兩個單位。
+
+    使用者是台灣豬農,中文密碼很自然。但用同一個字元數下限對中文並不
+    合理:英文字母只有 26 種可能,常用漢字有數千種 —— 4 個中文字的
+    猜測空間已經遠大於 8 個英文字母。硬性要求 8 個中文字,只會讓人
+    放棄改用「pig12345」這種更好猜的組合。
+
+    權重取 2 是刻意保守的(實際熵比大得多),寧可要求嚴一點。
+    """
+    return sum(2 if ord(ch) > 127 else 1 for ch in text)
+
+
+def validate_password(raw, username: Optional[str] = None) -> str:
+    """密碼強度檢查。
+
+    現實中帳號被盜,絕大多數不是因為雜湊被破解,而是因為密碼太弱或
+    與其他網站重複 —— 所以這裡的規則比雜湊演算法的選擇更能決定實際安全。
+
+    規則刻意只擋「結構性的弱」,不要求大小寫符號混用:那種規則會逼使用者
+    寫在紙上或用 Password1! 這種一樣好猜的組合,實務上反而更糟。
+    """
     if not isinstance(raw, str):
         raise ValidationError("密碼必須是文字")
-    if len(raw) < config.MIN_PASSWORD_CHARS:
-        raise ValidationError(f"密碼至少 {config.MIN_PASSWORD_CHARS} 個字元")
+    if password_strength_units(raw) < config.MIN_PASSWORD_CHARS:
+        raise ValidationError(
+            f"密碼太短,請用至少 {config.MIN_PASSWORD_CHARS} 個英數字元"
+            f"(中文字算兩個,所以 {config.MIN_PASSWORD_CHARS // 2} 個中文字也可以)"
+        )
+
+    lowered = raw.lower()
+
+    if lowered in COMMON_PASSWORDS:
+        raise ValidationError("這組密碼太常見了,很容易被猜中,請換一組")
+    if raw.isdigit():
+        raise ValidationError("密碼不能全部都是數字,請加入英文字母")
+    if len(set(raw)) == 1:
+        raise ValidationError("密碼不能只由同一個字元重複組成")
+    if _is_sequential(lowered):
+        raise ValidationError("密碼不能是連續的字元(例如 12345678),請換一組")
+    if username and lowered == str(username).strip().lower():
+        raise ValidationError("密碼不能與使用者名稱相同")
+
     return raw
+
+
+def hash_token(token: str) -> str:
+    """session token 存進資料庫前先雜湊。
+
+    密碼與 token 用不同的演算法,理由是威脅模型不同:
+    - 密碼是人選的,熵很低,可以用字典猜 —— 所以要用刻意很慢的 scrypt,
+      把每次嘗試的成本拉高。
+    - token 是 256 位元的密碼學亂數,猜不到,不需要防字典攻擊 ——
+      這裡要防的只是「資料庫外洩後,裡面的值可以直接拿來冒用身分」。
+      sha256 就足夠達成這件事,而且快到不會拖慢每一個請求。
+      若這裡也用 scrypt,每個已登入的請求都要多花數十毫秒。
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 class Auth:
@@ -125,16 +207,19 @@ class Auth:
     # --- session ---
 
     def _issue_session(self, user_id: int) -> str:
+        """回傳原始 token(要放進 cookie),資料庫只留雜湊值。"""
         token = new_token()
         expires = datetime.now(timezone.utc) + timedelta(days=config.SESSION_TTL_DAYS)
-        self.store.create_session(token, user_id, expires)
+        self.store.create_session(hash_token(token), user_id, expires)
         return token
 
     def resolve_session(self, token: Optional[str]) -> Optional[User]:
         """token 對應的使用者;無效或過期回 None。"""
         if not token:
             return None
-        user_id = self.store.get_session_user_id(token, datetime.now(timezone.utc))
+        user_id = self.store.get_session_user_id(
+            hash_token(token), datetime.now(timezone.utc)
+        )
         if user_id is None:
             return None
         row = self.store.get_user_by_id(user_id)
@@ -144,13 +229,13 @@ class Auth:
 
     def logout(self, token: Optional[str]) -> None:
         if token:
-            self.store.delete_session(token)
+            self.store.delete_session(hash_token(token))
 
     # --- 註冊與登入 ---
 
     def register(self, username, password) -> Authenticated:
         name = normalize_username(username)
-        pw = validate_password(password)
+        pw = validate_password(password, username=name)
         if self.store.get_user_by_username(name):
             raise UsernameTaken("這個使用者名稱已經有人用了")
         user_id = self.store.create_user(name, hash_password(pw), is_guest=False)
@@ -200,7 +285,7 @@ class Auth:
             raise NotGuest("這個帳號已經設定過帳號密碼了")
 
         name = normalize_username(username)
-        pw = validate_password(password)
+        pw = validate_password(password, username=name)
         if self.store.get_user_by_username(name):
             raise UsernameTaken("這個使用者名稱已經有人用了")
 

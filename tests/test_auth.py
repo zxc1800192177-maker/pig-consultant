@@ -17,7 +17,9 @@ from auth import (
     UsernameTaken,
     ValidationError,
     hash_password,
+    hash_token,
     normalize_username,
+    validate_password,
     verify_password,
 )
 from db import InMemoryStore
@@ -89,6 +91,131 @@ class TestUsernameNormalization:
     def test_rejects_non_string(self):
         with pytest.raises(ValidationError):
             normalize_username({"a": 1})
+
+
+class TestPasswordStrength:
+    """實測發現的真實弱點:原本只檢查長度,「password」與「12345678」
+    都能通過。現實中帳號被盜,絕大多數不是雜湊被破解,而是密碼太好猜。
+    """
+
+    def test_common_password_rejected(self):
+        for weak in ("password", "12345678", "qwertyui", "iloveyou", "abcd1234"):
+            with pytest.raises(ValidationError):
+                validate_password(weak)
+
+    def test_common_password_check_ignores_case(self):
+        with pytest.raises(ValidationError):
+            validate_password("PassWord")
+
+    def test_all_digits_rejected(self):
+        """生日、電話號碼是最常見的一類弱密碼。"""
+        for digits in ("19900101", "0912345678", "24681357"):
+            with pytest.raises(ValidationError):
+                validate_password(digits)
+
+    def test_single_repeated_character_rejected(self):
+        with pytest.raises(ValidationError):
+            validate_password("aaaaaaaa")
+
+    def test_sequential_characters_rejected(self):
+        for seq in ("abcdefgh", "87654321", "abcdefghij"):
+            with pytest.raises(ValidationError):
+                validate_password(seq)
+
+    def test_password_equal_to_username_rejected(self):
+        with pytest.raises(ValidationError):
+            validate_password("pigfarmer", username="pigfarmer")
+
+    def test_password_equal_to_username_ignores_case_and_space(self):
+        with pytest.raises(ValidationError):
+            validate_password("PigFarmer", username="  pigfarmer  ")
+
+    def test_reasonable_password_accepted(self):
+        """規則不能嚴到讓正常人選不出密碼 —— 那會逼人寫在紙上。"""
+        for good in ("pig-barn-2026", "muddyBoots7", "correct horse battery"):
+            assert validate_password(good) == good
+
+    def test_short_password_still_rejected(self):
+        with pytest.raises(ValidationError):
+            validate_password("pig7")
+
+
+class TestChinesePasswordLength:
+    """使用者是台灣豬農,中文密碼很自然。
+
+    英文字母只有 26 種可能,常用漢字有數千種 —— 用同一個字元數下限對
+    中文並不合理,只會逼人改用「pig12345」這種更好猜的組合。
+    """
+
+    def test_chinese_passphrase_accepted(self):
+        assert validate_password("我家的豬很健康") == "我家的豬很健康"
+
+    def test_four_chinese_characters_is_enough(self):
+        assert validate_password("健康的豬") == "健康的豬"
+
+    def test_too_few_chinese_characters_still_rejected(self):
+        with pytest.raises(ValidationError):
+            validate_password("小豬")
+
+    def test_repeated_chinese_character_still_rejected(self):
+        """放寬長度不代表放行結構性的弱密碼。"""
+        with pytest.raises(ValidationError):
+            validate_password("豬豬豬豬豬")
+
+    def test_mixed_chinese_and_ascii_counts_both(self):
+        assert validate_password("豬farm22") == "豬farm22"
+
+    def test_error_message_explains_the_chinese_allowance(self):
+        """使用者看到「至少 8 個字」卻打了 5 個中文被擋,會以為系統壞了。"""
+        with pytest.raises(ValidationError) as e:
+            validate_password("小豬")
+        assert "中文" in str(e.value)
+
+    def test_registration_enforces_strength(self, auth):
+        with pytest.raises(ValidationError):
+            auth.register("farmer", "password")
+
+    def test_claim_enforces_strength(self, auth):
+        guest = auth.guest_login()
+        with pytest.raises(ValidationError):
+            auth.claim(guest.token, "farmer", "12345678")
+
+
+class TestSessionTokenStorage:
+    """token 存進資料庫前要先雜湊。
+
+    密碼有雜湊保護,token 若沒有,資料庫外洩時攻擊者拿到的是**可以直接
+    使用的登入憑證** —— 不需要破解任何東西,在到期前都能冒用身分。
+    """
+
+    def test_raw_token_is_not_stored(self, auth, store):
+        result = auth.register("farmer", "hunter2hunter2")
+        assert result.token not in store.sessions
+        assert result.token not in str(store.sessions)
+
+    def test_hashed_token_is_what_gets_stored(self, auth, store):
+        result = auth.register("farmer", "hunter2hunter2")
+        assert hash_token(result.token) in store.sessions
+
+    def test_session_still_resolves_with_the_raw_token(self, auth):
+        """雜湊儲存不能影響正常使用 —— cookie 裡放的仍是原始 token。"""
+        result = auth.register("farmer", "hunter2hunter2")
+        assert auth.resolve_session(result.token).username == "farmer"
+
+    def test_stolen_database_value_cannot_be_used_as_a_token(self, auth, store):
+        """關鍵的一條:直接拿資料庫裡的值當 cookie 用,必須無效。"""
+        result = auth.register("farmer", "hunter2hunter2")
+        stored_value = next(iter(store.sessions))
+        assert auth.resolve_session(stored_value) is None
+
+    def test_logout_removes_the_hashed_entry(self, auth, store):
+        result = auth.register("farmer", "hunter2hunter2")
+        auth.logout(result.token)
+        assert store.sessions == {}
+
+    def test_hash_is_deterministic(self):
+        assert hash_token("abc") == hash_token("abc")
+        assert hash_token("abc") != hash_token("abd")
 
 
 class TestRegister:
@@ -175,7 +302,8 @@ class TestSession:
 
     def test_expired_session_rejected(self, auth, store):
         result = auth.register("farmer", "hunter2hunter2")
-        store.sessions[result.token]["expires_at"] = (
+        # 資料庫的鍵是雜湊後的值,不是原始 token
+        store.sessions[hash_token(result.token)]["expires_at"] = (
             datetime.now(timezone.utc) - timedelta(seconds=1)
         )
         assert auth.resolve_session(result.token) is None

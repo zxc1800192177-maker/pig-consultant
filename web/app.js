@@ -102,12 +102,15 @@ const AUTH_MODES = {
   },
   register: {
     title: "註冊", submit: "建立帳號", endpoint: "/api/auth/register",
-    hint: "密碼至少 8 個字元。健檢紀錄與藥品庫會存在你的帳號下,換裝置也看得到。",
+    hint: "密碼至少 8 個英數字元(中文字算兩個,4 個中文字也可以)。"
+        + "不要用生日、電話或「password」這類容易被猜到的組合。"
+        + "健檢紀錄與藥品庫會存在你的帳號下,換裝置也看得到。",
     autocomplete: "new-password",
   },
   claim: {
     title: "設定帳號密碼", submit: "設定並保留資料", endpoint: "/api/auth/claim",
-    hint: "目前訪客身分下的健檢紀錄與藥品庫都會完整保留,不會重新開始。",
+    hint: "密碼至少 8 個英數字元(中文字算兩個,4 個中文字也可以)。"
+        + "目前訪客身分下的健檢紀錄與藥品庫都會完整保留,不會重新開始。",
     autocomplete: "new-password",
   },
 };

@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique
   ON users (username) WHERE username IS NOT NULL;
 
+-- token 欄位存的是 sha256 雜湊,不是原始 token(見 auth.py 的 hash_token)。
+-- 資料庫外洩時,裡面的值不能直接拿來冒用身分。
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -99,13 +101,13 @@ class Store:
         raise NotImplementedError
 
     # --- session ---
-    def create_session(self, token: str, user_id: int, expires_at: datetime) -> None:
+    def create_session(self, token_hash: str, user_id: int, expires_at: datetime) -> None:
         raise NotImplementedError
 
-    def get_session_user_id(self, token: str, now: datetime) -> Optional[int]:
+    def get_session_user_id(self, token_hash: str, now: datetime) -> Optional[int]:
         raise NotImplementedError
 
-    def delete_session(self, token: str) -> None:
+    def delete_session(self, token_hash: str) -> None:
         raise NotImplementedError
 
     # --- 健檢紀錄 ---
@@ -181,17 +183,17 @@ class InMemoryStore(Store):
         user.update(username=username, password_hash=password_hash, is_guest=False)
         return True
 
-    def create_session(self, token, user_id, expires_at):
-        self.sessions[token] = {"user_id": user_id, "expires_at": expires_at}
+    def create_session(self, token_hash, user_id, expires_at):
+        self.sessions[token_hash] = {"user_id": user_id, "expires_at": expires_at}
 
-    def get_session_user_id(self, token, now):
-        session = self.sessions.get(token)
+    def get_session_user_id(self, token_hash, now):
+        session = self.sessions.get(token_hash)
         if not session or session["expires_at"] <= now:
             return None
         return session["user_id"]
 
-    def delete_session(self, token):
-        self.sessions.pop(token, None)
+    def delete_session(self, token_hash):
+        self.sessions.pop(token_hash, None)
 
     def add_health_check(self, user_id, values) -> int:
         check_id = self._next_check_id
@@ -311,24 +313,24 @@ class PostgresStore(Store):
             ).fetchone()
             return row is not None
 
-    def create_session(self, token, user_id, expires_at):
+    def create_session(self, token_hash, user_id, expires_at):
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO sessions (token, user_id, expires_at) VALUES (%s, %s, %s)",
-                (token, user_id, expires_at),
+                (token_hash, user_id, expires_at),
             )
 
-    def get_session_user_id(self, token, now):
+    def get_session_user_id(self, token_hash, now):
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT user_id FROM sessions WHERE token = %s AND expires_at > %s",
-                (token, now),
+                (token_hash, now),
             ).fetchone()
         return row[0] if row else None
 
-    def delete_session(self, token):
+    def delete_session(self, token_hash):
         with self._connect() as conn:
-            conn.execute("DELETE FROM sessions WHERE token = %s", (token,))
+            conn.execute("DELETE FROM sessions WHERE token = %s", (token_hash,))
 
     def add_health_check(self, user_id, values) -> int:
         with self._connect() as conn:
