@@ -577,19 +577,47 @@ class TestPwaAssets:
     def test_apple_touch_icon_exists(self):
         assert (WEB_DIR / "icons" / "apple-touch-icon.png").is_file()
 
-    def test_service_worker_precache_list_has_no_api_paths(self):
-        """一旦 /api/* 混進快取清單,SSE 串流會被 cache-first 攔截而整個斷掉。"""
+    @staticmethod
+    def _sw_url_list(name):
         sw = (WEB_DIR / "sw.js").read_text("utf-8")
-        urls = re.findall(r'"(/[^"]*)"', sw.split("PRECACHE_URLS = [")[1].split("]")[0])
-        assert urls, "沒解析到任何預快取路徑,測試本身可能失效"
-        assert not any(u.startswith("/api/") for u in urls)
+        block = sw.split(f"{name} = [")[1].split("]")[0]
+        return re.findall(r'"(/[^"]*)"', block)
 
-    def test_service_worker_precache_files_exist_on_disk(self):
-        sw = (WEB_DIR / "sw.js").read_text("utf-8")
-        urls = re.findall(r'"(/[^"]*)"', sw.split("PRECACHE_URLS = [")[1].split("]")[0])
-        for url in urls:
-            path = WEB_DIR / "index.html" if url == "/" else WEB_DIR / url.lstrip("/")
-            assert path.is_file(), f"sw.js 預快取但不存在:{url}"
+    def test_service_worker_cache_lists_have_no_api_paths(self):
+        """一旦 /api/* 混進快取清單,SSE 串流會被攔截而整個斷掉。"""
+        for name in ("CODE_URLS", "ASSET_URLS"):
+            urls = self._sw_url_list(name)
+            assert urls, f"沒解析到 {name},測試本身可能失效"
+            assert not any(u.startswith("/api/") for u in urls)
+
+    def test_service_worker_cached_files_exist_on_disk(self):
+        for name in ("CODE_URLS", "ASSET_URLS"):
+            for url in self._sw_url_list(name):
+                path = WEB_DIR / "index.html" if url == "/" else WEB_DIR / url.lstrip("/")
+                assert path.is_file(), f"sw.js 快取但不存在:{url}"
+
+    def test_all_code_files_are_network_first(self):
+        """HTML/CSS/JS 必須走網路優先。
+
+        走快取優先時真實發生過兩件事:部署後第一次載入必定是舊版;
+        以及各檔案獨立更新造成「舊 HTML + 新 JS」,新 JS 找不到元素而
+        讓整頁按鈕失效。這條測試確保不會有人把程式碼檔案挪回素材清單。
+        """
+        code_urls = set(self._sw_url_list("CODE_URLS"))
+        for path in WEB_DIR.rglob("*"):
+            if path.suffix not in (".js", ".css", ".html"):
+                continue
+            if path.name == "sw.js":      # service worker 由瀏覽器自己管理更新
+                continue
+            url = "/" + path.relative_to(WEB_DIR).as_posix()
+            assert url in code_urls or (url == "/index.html" and "/" in code_urls), (
+                f"{url} 是程式碼卻不在 CODE_URLS,會走快取優先而可能與其他檔案版本錯配"
+            )
+
+    def test_code_and_asset_lists_do_not_overlap(self):
+        """同一個路徑落在兩份清單會讓行為取決於程式碼順序,不該存在。"""
+        overlap = set(self._sw_url_list("CODE_URLS")) & set(self._sw_url_list("ASSET_URLS"))
+        assert not overlap, f"重複出現在兩份清單:{overlap}"
 
     def test_index_html_links_manifest_and_service_worker_registration(self):
         html = (WEB_DIR / "index.html").read_text("utf-8")
