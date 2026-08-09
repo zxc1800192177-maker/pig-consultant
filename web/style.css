@@ -182,6 +182,38 @@ textarea:focus, input:focus {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 
+/* ── 語音輸入 ── */
+.input-with-mic { position: relative; }
+.input-with-mic textarea { padding-right: 46px; }
+
+.mic-btn {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease, transform .12s ease;
+}
+.mic-btn:hover { background: var(--border-light); }
+.mic-btn:active { transform: scale(.93); }
+.mic-btn[aria-pressed="true"] {
+  background: var(--critical);
+  color: #fff;
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--critical) 40%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--critical) 0%, transparent); }
+}
+
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 18px; }
 .chip {
   background: var(--surface-2);

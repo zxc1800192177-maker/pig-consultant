@@ -7,7 +7,7 @@
 //
 // CACHE_VERSION 需要在每次靜態檔案改版時手動遞增,否則使用者的瀏覽器
 // 會一直吃到舊快取,看不到新版畫面。
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = `pig-consultant-${CACHE_VERSION}`;
 
 const PRECACHE_URLS = [
@@ -18,6 +18,7 @@ const PRECACHE_URLS = [
   "/lib/format.js",
   "/lib/markdown.js",
   "/lib/sse.js",
+  "/lib/speech.js",
   "/pig-sleeping.png",
   "/manifest.webmanifest",
   "/icons/icon-192.png",

@@ -3,6 +3,7 @@
 import { renderMarkdown, trimDangling, escapeHtml } from "./lib/markdown.js";
 import { formatShortfall, formatValue, gradeTone } from "./lib/format.js";
 import { SseParser } from "./lib/sse.js";
+import { isSpeechRecognitionSupported, mergeTranscript, splitFinalAndInterim } from "./lib/speech.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -244,6 +245,63 @@ $("question").addEventListener("keydown", (e) => {
     $("askBtn").click();
   }
 });
+
+// ── 語音輸入 ──
+// 桌面版 Firefox 完全不支援,其餘瀏覽器需要廠商前綴 —— 不支援就不顯示
+// 按鈕,漸進增強,不影響手動打字的既有流程。
+const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+if (isSpeechRecognitionSupported(window)) {
+  const recognition = new SpeechRecognitionCtor();
+  recognition.lang = "zh-TW";
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  // 錄音開始當下的文字要記住 —— continuous 模式的 event.results 是
+  // 整段錄音從頭到現在的累積結果,每次都要接在「錄音前」的文字後面,
+  // 不能接在「上一次事件」的文字後面,否則手打的內容會被蓋掉或重複。
+  let baseTextAtStart = "";
+
+  const setListening = (on) => $("micBtn").setAttribute("aria-pressed", String(on));
+
+  const showMicHint = (text) => {
+    $("micHint").textContent = text;
+    $("micHint").hidden = false;
+  };
+
+  recognition.addEventListener("result", (event) => {
+    const { finalText, interimText } = splitFinalAndInterim(event.results);
+    $("question").value = mergeTranscript(baseTextAtStart, finalText + interimText);
+  });
+
+  recognition.addEventListener("end", () => setListening(false));
+
+  recognition.addEventListener("error", (event) => {
+    // no-speech、aborted 這類使用者無法採取行動的狀況靜默重置就好;
+    // 權限或裝置問題才值得中斷並說明,否則使用者只會看到按鈕跳掉卻不知道為什麼。
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      showMicHint("沒有取得麥克風權限,請到瀏覽器設定允許存取麥克風後再試一次。");
+    } else if (event.error === "audio-capture") {
+      showMicHint("找不到可用的麥克風裝置。");
+    }
+  });
+
+  $("micBtn").hidden = false;
+  $("micBtn").addEventListener("click", () => {
+    if ($("micBtn").getAttribute("aria-pressed") === "true") {
+      recognition.stop();
+      return;
+    }
+    $("micHint").hidden = true;
+    baseTextAtStart = $("question").value;
+    try {
+      recognition.start();
+      setListening(true);
+    } catch {
+      // 例如上一段錄音還沒完全結束就被再次觸發,忽略即可,使用者再點一次就好
+    }
+  });
+}
 
 async function ask(question) {
   setConsultBusy(true);
