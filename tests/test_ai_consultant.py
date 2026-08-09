@@ -83,28 +83,35 @@ class TestFarmContext:
         assert "離乳前死亡率" in transport.last_prompt
 
     def test_works_without_context(self):
+        """問句刻意不含任何官方劑量對照表關鍵字,單純測健檢背景這一個軸,
+        不要跟劑量查表化的比對結果混在一起判斷。
+        """
         transport = FakeTransport(chunks=["ok"])
         c = Consultant(transport=transport)
-        result = c.consult("豬隻咳嗽")
+        result = c.consult("豬隻精神沉鬱食慾不振")
         list(result.stream)
-        assert transport.last_prompt.strip() == "豬隻咳嗽"
+        assert transport.last_prompt.strip() == "豬隻精神沉鬱食慾不振"
 
 
 class TestDosageMatching:
     """劑量查表化:比對結果是計算出來的,取得時即已確定,不必等 AI 回完。"""
 
-    def test_no_match_for_ordinary_question(self):
-        """正式資料檔目前是空的(還沒有人提供查證過的資料),永遠比對不到。"""
+    def test_matches_for_relevant_question(self):
         result = _consultant().consult("小豬下痢怎麼辦")
+        assert result.dosage_matches != []
+
+    def test_no_match_for_unrelated_question(self):
+        result = _consultant().consult("豬隻精神沉鬱食慾不振")
         assert result.dosage_matches == []
 
     def test_available_without_consuming_stream(self):
         result = _consultant().consult("小豬下痢怎麼辦")
-        assert result.dosage_matches == []  # 尚未讀取 stream 也拿得到
+        assert result.dosage_matches != []  # 尚未讀取 stream 也拿得到
 
     def test_survives_ai_failure(self):
+        """AI 掛掉時,已經算好的比對結果仍要送達 —— 不依賴 AI 是否成功。"""
         result = _consultant(error=QuotaExceeded("額度用盡")).consult("小豬下痢")
-        assert result.dosage_matches == []
+        assert result.dosage_matches != []
         with pytest.raises(QuotaExceeded):
             list(result.stream)
 

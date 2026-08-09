@@ -393,9 +393,14 @@ class TestDosageLookup:
         _, body = _post(app, "/api/consult", {"question": "小豬下痢"})
         assert "dosageReference" in body
 
-    def test_empty_by_default_until_admin_provides_verified_data(self, app):
-        """正式資料檔目前是空的,任何問題都比對不到,這是刻意的。"""
+    def test_returns_verified_entries_for_matching_symptom(self, app):
+        """三筆官方手冊資料經 Ian review 後已授權顯示,相關症狀要查得到。"""
         _, body = _post(app, "/api/consult", {"question": "小豬下痢已經兩天"})
+        assert body["dosageReference"] != []
+        assert body["dosageReference"][0]["drugs"]
+
+    def test_empty_for_unrelated_question(self, app):
+        _, body = _post(app, "/api/consult", {"question": "豬隻精神沉鬱食慾不振"})
         assert body["dosageReference"] == []
 
     def test_survives_ai_failure(self):

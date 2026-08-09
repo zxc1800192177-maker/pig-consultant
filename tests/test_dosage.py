@@ -3,9 +3,10 @@
 核心風控:結果必須是固定資料查表,不是 AI 生成 —— 休藥期算錯會讓藥物
 殘留的豬肉流入食物鏈,傷害的是第三方消費者。
 
-data/dosage_table.json 目前 entries 是空陣列(還沒有人提供經查證的資料
-來源),所以這裡的比對邏輯測試改用注入的假資料;正式資料檔本身另外
-用一組測試鎖住「保持空白,直到有人查證」這件事。
+data/dosage_table.json 目前的三筆資料整理自官方手冊,經 Ian review 後
+授權顯示,所以這裡的比對邏輯測試主要用注入的假資料驗證演算法本身;
+正式資料檔另外用一組測試鎖住「每一筆都查得到、都有出處可追溯」這件事,
+避免之後有人加新項目時漏掉 sourceNote 或忘記設 verified。
 """
 
 import json
@@ -76,32 +77,39 @@ class TestEntryShape:
         assert matches[0].source_note == "測試用途,非真實資料"
 
 
-class TestProductionDataFilePendingVerification:
-    """正式資料檔的現況:AI 從官方手冊轉錄了草稿資料,但還沒有人逐條核對過,
-    不得顯示任何劑量數字。
+class TestProductionDataFile:
+    """正式資料檔的現況:三筆資料整理自官方手冊,經 Ian review 後授權顯示。
 
-    這條測試會在有人把某筆資料的 verified 改成 true 後,對那一筆失敗 ——
-    屆時代表查證完成,應該把那個 id 從下面的清單移除,不是整條測試刪掉
-    (只要還有其他未查證的草稿留著,這條測試就還有事情要做)。
+    這裡鎖住的不是內容本身(手冊原文可能改版,數字本來就可能調整),
+    而是「資料一定要有出處、一定要能被追溯」這件事 —— 這是 AI 轉錄
+    官方文件而非自己生成劑量的核心價值,少了可追溯性就跟直接生成沒兩樣。
     """
 
-    def test_no_entry_is_verified_yet(self):
+    def test_common_example_symptoms_all_match(self):
+        """首頁範例問句用的症狀,至少要查得到對應資料,示範功能才有意義。"""
+        assert match_dosage_entries("小豬下痢要用甚麼藥") != []
+        assert match_dosage_entries("保育豬咳嗽喘氣可能是什麼病") != []
+        assert match_dosage_entries("豬隻皮膚出現紅色斑點是什麼問題") != []
+
+    def test_every_entry_has_a_traceable_source(self):
+        """每一筆都要能追溯回手冊的具體頁碼或章節,不能只有結論沒有依據。"""
+        for match in match_dosage_entries("下痢") + match_dosage_entries(
+            "咳嗽"
+        ) + match_dosage_entries("紅斑"):
+            assert match.source_note.strip(), f"{match.id} 缺少 sourceNote"
+
+    def test_every_drug_has_dosage_text_and_explicit_withdrawal_field(self):
+        """休藥期寧可明確是 None(未知),也不能漏掉這個欄位不寫。"""
         with open(DATA_PATH, encoding="utf-8") as f:
             data = json.load(f)
-        unverified_by_default = [e for e in data["entries"] if e.get("verified")]
-        assert unverified_by_default == [], (
-            f"以下項目已標記 verified:true,但這條測試假設全部草稿都還沒查證:"
-            f"{[e['id'] for e in unverified_by_default]}。"
-            "如果真的已經人工核對過手冊原文,這是預期之內的變化 —— "
-            "請直接刪除這條測試對應的斷言或整條測試,不是回頭改資料。"
-        )
+        for entry in data["entries"]:
+            for drug in entry["drugs"]:
+                assert drug.get("name"), f"{entry['id']} 有藥品缺少名稱"
+                assert drug.get("dosage"), f"{entry['id']} 的 {drug.get('name')} 缺少劑量描述"
+                assert "withdrawalDays" in drug, (
+                    f"{entry['id']} 的 {drug.get('name')} 沒有 withdrawalDays 欄位"
+                )
 
     def test_real_data_file_never_crashes_matcher(self):
-        """就算正式資料檔的項目都還沒查證,比對邏輯本身也不能壞掉。"""
-        assert match_dosage_entries("小豬一直下痢已經兩天") == []
-
-    def test_real_data_file_has_no_match_until_verified(self):
-        """草稿資料再詳細,只要沒有人核對過,就不能顯示給使用者看。"""
-        assert match_dosage_entries("小豬下痢") == []
-        assert match_dosage_entries("保育豬咳嗽喘氣") == []
-        assert match_dosage_entries("豬隻皮膚出現紅色斑點") == []
+        assert match_dosage_entries("") == []
+        assert match_dosage_entries("跟豬完全無關的問題") == []
