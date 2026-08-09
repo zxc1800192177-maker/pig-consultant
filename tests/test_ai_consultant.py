@@ -90,6 +90,78 @@ class TestFarmContext:
         assert transport.last_prompt.strip() == "豬隻咳嗽"
 
 
+class TestDosageMatching:
+    """劑量查表化:比對結果是計算出來的,取得時即已確定,不必等 AI 回完。"""
+
+    def test_no_match_for_ordinary_question(self):
+        """正式資料檔目前是空的(還沒有人提供查證過的資料),永遠比對不到。"""
+        result = _consultant().consult("小豬下痢怎麼辦")
+        assert result.dosage_matches == []
+
+    def test_available_without_consuming_stream(self):
+        result = _consultant().consult("小豬下痢怎麼辦")
+        assert result.dosage_matches == []  # 尚未讀取 stream 也拿得到
+
+    def test_survives_ai_failure(self):
+        result = _consultant(error=QuotaExceeded("額度用盡")).consult("小豬下痢")
+        assert result.dosage_matches == []
+        with pytest.raises(QuotaExceeded):
+            list(result.stream)
+
+
+class TestMyDrugsReachTheModel:
+    """牧場主自己的藥品庫要能影響 AI 看到的內容,且型別/長度要被收斂。"""
+
+    def test_drug_name_reaches_the_model(self):
+        transport = FakeTransport(chunks=["ok"])
+        c = Consultant(transport=transport)
+        result = c.consult("小豬下痢", my_drugs=[
+            {"name": "阿莫西林可溶性粉", "dosageNote": "每公斤10mg", "withdrawalDays": 7},
+        ])
+        list(result.stream)
+        assert "阿莫西林可溶性粉" in transport.last_prompt
+
+    def test_works_without_my_drugs(self):
+        transport = FakeTransport(chunks=["ok"])
+        c = Consultant(transport=transport)
+        result = c.consult("小豬下痢")
+        list(result.stream)
+        assert result is not None
+
+    def test_non_list_my_drugs_is_ignored_not_raised(self):
+        """跟對話歷史一樣:壞掉的格式直接忽略,不能讓整個請求爆掉。"""
+        transport = FakeTransport(chunks=["ok"])
+        c = Consultant(transport=transport)
+        result = c.consult("小豬下痢", my_drugs="不是陣列")
+        list(result.stream)  # 不拋例外即為通過
+
+    def test_entries_missing_name_are_dropped(self):
+        transport = FakeTransport(chunks=["ok"])
+        c = Consultant(transport=transport)
+        result = c.consult("小豬下痢", my_drugs=[{"dosageNote": "沒有名字"}])
+        list(result.stream)
+        assert "沒有名字" not in transport.last_prompt
+
+    def test_over_limit_count_is_truncated(self):
+        import config
+        transport = FakeTransport(chunks=["ok"])
+        c = Consultant(transport=transport)
+        many = [{"name": f"藥{i}"} for i in range(config.MAX_MY_DRUGS + 5)]
+        result = c.consult("小豬下痢", my_drugs=many)
+        list(result.stream)
+        assert f"藥{config.MAX_MY_DRUGS + 4}" not in transport.last_prompt
+
+    def test_overlong_name_is_truncated(self):
+        import config
+        transport = FakeTransport(chunks=["ok"])
+        c = Consultant(transport=transport)
+        result = c.consult("小豬下痢", my_drugs=[
+            {"name": "藥" * (config.MAX_DRUG_NAME_CHARS + 20)},
+        ])
+        list(result.stream)
+        assert "藥" * (config.MAX_DRUG_NAME_CHARS + 1) not in transport.last_prompt
+
+
 class TestImprovementAdvice:
     """生產健檢的改善建議:AI 只解讀已算好的結果。"""
 

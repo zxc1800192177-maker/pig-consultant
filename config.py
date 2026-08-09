@@ -44,6 +44,12 @@ MAX_REQUEST_BYTES = int(os.environ.get("MAX_REQUEST_BYTES", str(64 * 1024)))
 MAX_HISTORY_TURNS = 20
 MAX_HISTORY_CHARS = 500          # 單則歷史保留的字數;超過即截斷
 
+# 使用者自己的藥品庫上限。跟對話歷史一樣存在瀏覽器、跟著請求送上來,
+# 一樣不可信,一樣要在伺服器端強制設限。
+MAX_MY_DRUGS = 20
+MAX_DRUG_NAME_CHARS = 60
+MAX_DRUG_NOTE_CHARS = 200
+
 # 要從 X-Forwarded-For 尾端砍掉幾層基礎設施位址。
 #
 # 正式環境實測的鏈:真實IP, Cloudflare, Render內部 —— 尾端兩層是平台的,

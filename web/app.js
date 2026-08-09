@@ -4,6 +4,7 @@ import { renderMarkdown, trimDangling, escapeHtml } from "./lib/markdown.js";
 import { formatShortfall, formatValue, gradeTone } from "./lib/format.js";
 import { SseParser } from "./lib/sse.js";
 import { isSpeechRecognitionSupported, mergeTranscript, splitFinalAndInterim } from "./lib/speech.js";
+import { addDrug, loadMyDrugs, removeDrug, saveMyDrugs } from "./lib/drugs.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -22,6 +23,68 @@ function rememberTurn(role, content) {
     history = history.slice(-MAX_HISTORY_TURNS);
   }
 }
+
+// ── 我的藥品庫 ──
+// 跟對話歷史一樣只存在瀏覽器裡,不上傳保存;送出問題時才隨請求附上。
+// 顧問會優先引用這裡的內容給劑量,不會自己生成數字(見 core/dosage.py)。
+let myDrugs = loadMyDrugs(localStorage);
+
+function renderDrugList() {
+  const list = $("drugList");
+  if (!myDrugs.length) {
+    list.innerHTML = `<li class="drug-empty">還沒有加入任何藥品。</li>`;
+    return;
+  }
+  list.innerHTML = myDrugs
+    .map((d) => {
+      const metaParts = [];
+      if (d.dosageNote) metaParts.push(escapeHtml(d.dosageNote));
+      if (d.withdrawalDays != null) metaParts.push(`休藥期 ${d.withdrawalDays} 天`);
+      const meta = metaParts.length
+        ? `<div class="drug-meta">${metaParts.join("・")}</div>`
+        : "";
+      return `
+        <li class="drug-item">
+          <div>
+            <div class="drug-name">${escapeHtml(d.name)}</div>
+            ${meta}
+          </div>
+          <button type="button" class="drug-remove" data-id="${escapeHtml(d.id)}">移除</button>
+        </li>`;
+    })
+    .join("");
+}
+
+function readOptionalNumber(el) {
+  const raw = el.value.trim();
+  if (!raw) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+$("addDrugBtn").addEventListener("click", () => {
+  myDrugs = addDrug(myDrugs, {
+    name: $("drugName").value,
+    dosageNote: $("drugNote").value,
+    withdrawalDays: readOptionalNumber($("drugWithdrawal")),
+  });
+  saveMyDrugs(localStorage, myDrugs);
+  renderDrugList();
+  $("drugName").value = "";
+  $("drugNote").value = "";
+  $("drugWithdrawal").value = "";
+  $("drugName").focus();
+});
+
+$("drugList").addEventListener("click", (e) => {
+  const btn = e.target.closest(".drug-remove");
+  if (!btn) return;
+  myDrugs = removeDrug(myDrugs, btn.dataset.id);
+  saveMyDrugs(localStorage, myDrugs);
+  renderDrugList();
+});
+
+renderDrugList();
 
 // ── 頁籤 ──
 document.querySelectorAll(".tab").forEach((tab) => {
@@ -321,6 +384,7 @@ async function ask(question) {
         question,
         weaknesses: lastWeaknesses,
         history,   // 送出前的歷史,不含這一題本身
+        myDrugs,
       }),
     });
 
@@ -351,6 +415,36 @@ async function ask(question) {
   }
 }
 
+function renderDosageReference(entries) {
+  const body = entries
+    .map((entry) => {
+      const drugs = entry.drugs
+        .map((d) => {
+          const withdrawal = d.withdrawalDays != null ? `・休藥期 ${d.withdrawalDays} 天` : "";
+          return `
+            <div class="dosage-drug">
+              <span class="dosage-drug-name">${escapeHtml(d.name)}</span>
+              ${escapeHtml(d.dosage)}${withdrawal}
+            </div>`;
+        })
+        .join("");
+      const source = entry.sourceNote
+        ? `<div class="dosage-source">資料來源:${escapeHtml(entry.sourceNote)}</div>`
+        : "";
+      return `
+        <div class="dosage-entry">
+          <div class="dosage-disease">${escapeHtml(entry.diseaseName)}</div>
+          ${drugs}${source}
+        </div>`;
+    })
+    .join("");
+  return `
+    <div class="notice notice-verified">
+      <div class="section-label tag-computed">官方劑量對照(系統查表,非 AI 生成)</div>
+      ${body}
+    </div>`;
+}
+
 function handleConsultEvent(event, getAnswer, setAnswer) {
   if (event.type === "meta") {
     // 通報提示是計算出來的,在 AI 開口之前就先呈現(憲法第一條)
@@ -359,6 +453,11 @@ function handleConsultEvent(event, getAnswer, setAnswer) {
       parts.push(`<div class="notice notice-alert">${escapeHtml(event.escalation.notice)}</div>`);
     }
     parts.push(`<div class="notice notice-info">${escapeHtml(event.baselineNotice)}</div>`);
+    // 劑量查表化:這張卡片是伺服器直接算出來的,不是 AI 寫的 ——
+    // 跟下面的 AI 文字分開呈現,使用者才看得出哪些數字是查表來的。
+    if (event.dosageReference && event.dosageReference.length) {
+      parts.push(renderDosageReference(event.dosageReference));
+    }
     // 醫療免責緊貼在回答上方,使用者不用捲到頁尾才看得到
     if (event.medicalDisclaimer) {
       parts.push(

@@ -61,6 +61,25 @@
       </p>
     </div>
 
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>我的藥品庫</h2>
+          <p class="hint">
+            列出你手邊有的藥,顧問建議劑量時會優先引用這裡的資料,不會憑空生成數字。
+            只存在這台裝置的瀏覽器裡,不會上傳。
+          </p>
+        </div>
+      </div>
+      <ul class="drug-list" id="drugList"></ul>
+      <div class="drug-form">
+        <input type="text" id="drugName" placeholder="藥品名稱,例如:阿莫西林可溶性粉">
+        <input type="text" id="drugNote" placeholder="劑量說明(選填),例如:每公斤體重 10mg,一天兩次">
+        <input type="number" id="drugWithdrawal" placeholder="休藥期天數(選填)" min="0" step="1">
+        <button type="button" class="btn-ghost" id="addDrugBtn">+ 新增藥品</button>
+      </div>
+    </div>
+
     <div id="consultResult">
       <div class="empty-state">
         <img class="pig-empty" src="pig-sleeping.png" alt="">

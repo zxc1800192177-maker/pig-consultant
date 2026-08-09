@@ -381,6 +381,73 @@ class TestMedicalDisclaimer:
         assert len(texts) == 1
 
 
+class TestDosageLookup:
+    """劑量查表化。結果是伺服器算出來的,不是 AI 生成的 —— 要跟 AI 文字
+    分開送到前端(meta 事件 vs delta 事件),前端才能各自呈現。
+    """
+
+    def test_meta_always_carries_dosage_reference_field(self, app):
+        """就算查無資料,欄位本身也要在,前端才知道『查了但沒有』跟
+        『這個版本根本沒做這個功能』是兩回事。
+        """
+        _, body = _post(app, "/api/consult", {"question": "小豬下痢"})
+        assert "dosageReference" in body
+
+    def test_empty_by_default_until_admin_provides_verified_data(self, app):
+        """正式資料檔目前是空的,任何問題都比對不到,這是刻意的。"""
+        _, body = _post(app, "/api/consult", {"question": "小豬下痢已經兩天"})
+        assert body["dosageReference"] == []
+
+    def test_survives_ai_failure(self):
+        """AI 掛掉時,已經算好的比對結果仍要送達。"""
+        app = Application(transport=FakeTransport(error=QuotaExceeded("用盡")))
+        _, body = _post(app, "/api/consult", {"question": "小豬下痢"})
+        assert "dosageReference" in body
+
+    def test_dosage_reference_arrives_before_any_answer_text(self, app):
+        events = list(app.consult_events({"question": "小豬下痢"}, "test"))
+        kinds = [e["type"] for e in events]
+        assert "dosageReference" in events[0]
+        assert kinds.index("meta") < kinds.index("delta")
+
+
+class TestMyDrugsInventory:
+    """牧場主自己的藥品庫。來自瀏覽器 localStorage,一樣不可信,
+    伺服器要能安全處理格式錯誤的輸入,並讓內容確實影響 AI 看到的提示詞。
+    """
+
+    def test_accepted_and_reaches_the_model(self):
+        transport = FakeTransport(chunks=["ok"])
+        app = Application(transport=transport)
+        status, _ = _post(app, "/api/consult", {
+            "question": "小豬下痢",
+            "myDrugs": [{"name": "阿莫西林可溶性粉", "dosageNote": "每公斤10mg"}],
+        })
+        assert status == 200
+        assert "阿莫西林可溶性粉" in transport.last_prompt
+
+    def test_malformed_shape_does_not_crash_request(self, app):
+        """跟 history 一樣:壞掉的格式直接忽略,不是回 500。"""
+        status, _ = _post(app, "/api/consult", {
+            "question": "小豬下痢",
+            "myDrugs": "不是陣列",
+        })
+        assert status == 200
+
+    def test_entries_missing_required_name_are_dropped(self):
+        transport = FakeTransport(chunks=["ok"])
+        app = Application(transport=transport)
+        _post(app, "/api/consult", {
+            "question": "小豬下痢",
+            "myDrugs": [{"dosageNote": "沒有名字的藥"}],
+        })
+        assert "沒有名字的藥" not in transport.last_prompt
+
+    def test_missing_my_drugs_still_works(self, app):
+        status, _ = _post(app, "/api/consult", {"question": "小豬下痢"})
+        assert status == 200
+
+
 class TestIsWeakComesFromBackend:
     """弱項判斷規則只存在後端(DRY)。
 

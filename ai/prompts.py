@@ -17,6 +17,12 @@ DISEASE_SYSTEM_PROMPT = """你是「豬豬顧問」,協助台灣豬場的疾病�
 2. 建議藥品與使用方式
 3. 風險評估:副作用、休藥期、抗藥性,三者缺一不可
 
+用藥劑量規範(務必遵守,不可違反):
+- 只能引用背景資訊裡標示為「官方劑量對照表」或「牧場主自己的藥品庫」的數字
+- 這兩個來源都沒有涵蓋的藥物,只能講方向與原理,絕對不可以自己編劑量或休藥期數字
+- 不可以修改上述來源提供的數字,即使你認為自己知道正確答案
+- 兩個來源都沒有適合的藥時,要老實說系統查無資料,建議洽詢獸醫或查閱藥品標示
+
 用語規範:
 - 用繁體中文,採台灣豬業慣用術語
 - 說「可能病因」「建議方向」,不要用確診語氣斷定豬隻得了什麼病
@@ -88,6 +94,56 @@ def build_history_context(history: Optional[List[dict]]) -> str:
         "【先前的對話,供你理解使用者這次在追問什麼】\n"
         + "\n".join(lines)
         + "\n【以上為歷史紀錄。使用者這次的問題在下方】\n"
+    )
+
+
+def build_dosage_reference(matches: Optional[List]) -> str:
+    """把官方劑量對照表的比對結果整理成給 AI 的引用依據。
+
+    這些數字已由系統管理者查證過(core/dosage.py 只回傳 verified=True 的
+    項目)。送進提示詞主要是讓 AI 的文字說明跟畫面上的對照卡片(由
+    server.py 直接算出,不經過 AI)內容一致,不要各說各話 —— 數字的正確性
+    本來就不依賴 AI 有沒有照做。
+    """
+    if not matches:
+        return ""
+
+    lines = []
+    for m in matches:
+        for drug in m.drugs:
+            withdrawal = drug.get("withdrawalDays")
+            withdrawal_text = f",休藥期 {withdrawal} 天" if withdrawal is not None else ""
+            lines.append(f"- {m.disease_name}:{drug['name']},{drug['dosage']}{withdrawal_text}")
+
+    return (
+        "【官方劑量對照表比對結果,以下數字已經查證,只能引用,"
+        "不可自行更改或另外生成其他劑量】\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+
+
+def build_my_drugs_context(my_drugs: Optional[List[dict]]) -> str:
+    """把牧場主自己輸入的藥品庫整理成給 AI 的引用依據。
+
+    信任邊界跟官方對照表不同:這是牧場主自己抄自己藥品標示的內容,
+    系統沒有另外查證,但也不是 AI 生成的 —— 一樣不可以被 AI 改寫成別的數字。
+    """
+    if not my_drugs:
+        return ""
+
+    lines = []
+    for d in my_drugs:
+        note = f",{d['dosage_note']}" if d.get("dosage_note") else ""
+        withdrawal = d.get("withdrawal_days")
+        withdrawal_text = f",休藥期 {withdrawal} 天" if withdrawal is not None else ""
+        lines.append(f"- {d['name']}{note}{withdrawal_text}")
+
+    return (
+        "【牧場主自己的藥品庫,由牧場主輸入,劑量以此處內容或藥品標示為準,"
+        "系統未另外查證正確性,你一樣不可以自己改寫或生成其他數字】\n"
+        + "\n".join(lines)
+        + "\n"
     )
 
 

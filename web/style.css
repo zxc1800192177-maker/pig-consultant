@@ -308,6 +308,41 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   font-size: 13px;
   margin-bottom: 14px;
 }
+/* 官方劑量對照:用good色系跟其他提示區分開來,
+   標示「這是系統查表算出來的,不是AI寫的」 */
+.notice-verified { background: var(--good-bg); color: var(--ink); }
+.dosage-entry { margin-bottom: 10px; }
+.dosage-entry:last-child { margin-bottom: 0; }
+.dosage-disease { font-weight: 600; margin-bottom: 4px; }
+.dosage-drug { font-size: 13.5px; margin-bottom: 2px; }
+.dosage-drug-name { font-weight: 500; margin-right: 6px; }
+.dosage-source { font-size: 12.5px; color: var(--ink-faint); margin-top: 4px; }
+
+/* ── 我的藥品庫 ── */
+.drug-list { list-style: none; padding: 0; margin: 0 0 14px; }
+.drug-item {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 10px 0; border-bottom: 1px solid var(--border-light);
+}
+.drug-item:last-child { border-bottom: none; }
+.drug-name { font-weight: 600; letter-spacing: -0.01em; }
+.drug-meta { font-size: 13px; color: var(--ink-soft); margin-top: 2px; letter-spacing: 0; }
+.drug-remove {
+  background: transparent; border: none; color: var(--ink-faint);
+  font-size: 13px; font-family: inherit; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+}
+.drug-remove:hover { color: var(--critical); }
+.drug-empty { font-size: 13.5px; color: var(--ink-faint); padding: 4px 0 14px; }
+.drug-form { display: grid; gap: 8px; }
+.drug-form input {
+  width: 100%; padding: 10px 13px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  font-size: 14.5px; font-family: inherit; letter-spacing: -0.005em; outline: none;
+}
+.drug-form input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent);
+}
 
 /* ── 級距 ── */
 .grade-pill {

@@ -13,21 +13,25 @@ from ai.prompts import (
     ADVICE_SYSTEM_PROMPT,
     DISEASE_SYSTEM_PROMPT,
     build_advice_prompt,
+    build_dosage_reference,
     build_farm_context,
     build_history_context,
+    build_my_drugs_context,
 )
+from core.dosage import DosageEntry, match_dosage_entries
 from core.reportable import ReportableMatch, baseline_notice, detect_reportable
 
 
 class Consultation(NamedTuple):
     """一次諮詢的結果。
 
-    baseline_notice 與 escalation 是計算出來的,取得時即已確定;
+    baseline_notice、escalation、dosage_matches 是計算出來的,取得時即已確定;
     stream 是 AI 生成的,要迭代才會真的呼叫。
     """
 
     baseline_notice: str
     escalation: Optional[ReportableMatch]
+    dosage_matches: List[DosageEntry]
     stream: Iterator[str]
 
 
@@ -60,16 +64,52 @@ class Consultant:
             })
         return cleaned
 
+    @staticmethod
+    def _clean_my_drugs(my_drugs: Optional[List[dict]]) -> List[dict]:
+        """裁切使用者自己輸入的藥品庫。
+
+        跟對話歷史一樣來自瀏覽器 localStorage,一樣不可信 ——
+        則數與每個欄位的長度都要在伺服器端強制設限,格式壞掉的項目直接忽略。
+        數字本身不查證(信任邊界是牧場主自己抄自己的藥品標示),
+        但型別與長度仍要收斂,否則一則超長字串一樣能拿來灌爆 prompt。
+        """
+        if not isinstance(my_drugs, list):
+            return []
+
+        cleaned = []
+        for drug in my_drugs[:config.MAX_MY_DRUGS]:
+            if not isinstance(drug, dict):
+                continue
+            name = drug.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+
+            note = drug.get("dosageNote")
+            note = note.strip()[:config.MAX_DRUG_NOTE_CHARS] if isinstance(note, str) else ""
+
+            withdrawal = drug.get("withdrawalDays")
+            if not isinstance(withdrawal, (int, float)) or isinstance(withdrawal, bool) or withdrawal < 0:
+                withdrawal = None
+
+            cleaned.append({
+                "name": name.strip()[:config.MAX_DRUG_NAME_CHARS],
+                "dosage_note": note,
+                "withdrawal_days": withdrawal,
+            })
+        return cleaned
+
     def consult(
         self,
         question: str,
         weaknesses: Optional[List[dict]] = None,
         history: Optional[List[dict]] = None,
+        my_drugs: Optional[List[dict]] = None,
     ) -> Consultation:
         """疾病諮詢。
 
         通報判斷先做完再呼叫 AI —— 使用者可能在 AI 回完前就關掉頁面,
-        防疫提示不能等到最後才出現。
+        防疫提示不能等到最後才出現。劑量對照表比對同理:結果必須在
+        呼叫 AI 之前就算好,因為它不依賴 AI 是否成功回答。
         """
         # 型別必須先檢查:非字串直接呼叫 .strip() 會拋 AttributeError,
         # 一路往上炸掉整個請求處理,使用者只會看到畫面永遠卡在載入中。
@@ -83,9 +123,14 @@ class Consultant:
         if len(question) > config.MAX_QUESTION_CHARS:
             raise ValueError(f"問題請控制在 {config.MAX_QUESTION_CHARS} 字以內")
 
+        dosage_matches = match_dosage_entries(question)
+        cleaned_drugs = self._clean_my_drugs(my_drugs)
+
         parts = [
             build_history_context(self._trim_history(history)),
             build_farm_context(weaknesses),
+            build_dosage_reference(dosage_matches),
+            build_my_drugs_context(cleaned_drugs),
             question,
         ]
         prompt = "\n".join(part for part in parts if part)
@@ -95,6 +140,7 @@ class Consultant:
             # 通報偵測只看這次的提問,不看歷史 —— 否則使用者一旦提過
             # 非洲豬瘟,之後每一題都會跳出警示,很快就會被忽略。
             escalation=detect_reportable(question),
+            dosage_matches=dosage_matches,
             stream=self.transport.stream(prompt, DISEASE_SYSTEM_PROMPT),
         )
 

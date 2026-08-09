@@ -285,6 +285,7 @@ class Application:
                 payload.get("question", ""),
                 weaknesses=weaknesses,
                 history=payload.get("history"),
+                my_drugs=payload.get("myDrugs"),
             )
         except ValueError as e:
             yield {"type": "error", "status": 400, "error": str(e)}
@@ -296,6 +297,17 @@ class Application:
             # 醫療免責在回答正上方,由程式強制加,不依賴 AI 自己寫
             "medicalDisclaimer": medical_disclaimer(),
             "disclaimer": reportable_disclaimer(),
+            # 劑量查表化:這份清單是伺服器直接算出來的,不經過 AI ——
+            # 前端要把它跟 AI 生成的文字分開呈現,不能混在同一段 markdown 裡。
+            "dosageReference": [
+                {
+                    "id": m.id,
+                    "diseaseName": m.disease_name,
+                    "drugs": m.drugs,
+                    "sourceNote": m.source_note,
+                }
+                for m in consultation.dosage_matches
+            ],
             "escalation": (
                 {
                     "disease": consultation.escalation.disease,
