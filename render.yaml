@@ -5,13 +5,15 @@ services:
     name: pig-consultant
     runtime: python
     plan: free
-    buildCommand: "true"          # 無相依套件,不需安裝步驟
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "python server.py"
     envVars:
       - key: HOST
         value: 0.0.0.0
       - key: ANTHROPIC_API_KEY
         sync: false               # 在 Render 後台手動填入,不寫進版本控制
+      - key: DATABASE_URL
+        sync: false               # 同上。沒設定時帳號功能自動關閉,網站照常運作
       - key: MAX_AI_REQUESTS_PER_DAY
         value: "500"
     healthCheckPath: /api/health

@@ -1,0 +1,347 @@
+"""帳號與 session 測試。
+
+安全性相關的行為要當成規格來鎖,不是「順便測一下」:
+密碼不得明文可還原、失敗訊息不得洩露帳號是否存在、
+一個使用者不得碰到另一個使用者的資料。
+"""
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+import config
+from auth import (
+    Auth,
+    InvalidCredentials,
+    NotGuest,
+    UsernameTaken,
+    ValidationError,
+    hash_password,
+    normalize_username,
+    verify_password,
+)
+from db import InMemoryStore
+
+
+@pytest.fixture
+def store():
+    return InMemoryStore()
+
+
+@pytest.fixture
+def auth(store):
+    return Auth(store)
+
+
+class TestPasswordHashing:
+    def test_roundtrip(self):
+        stored = hash_password("correct horse battery")
+        assert verify_password("correct horse battery", stored) is True
+
+    def test_wrong_password_rejected(self):
+        stored = hash_password("correct horse battery")
+        assert verify_password("wrong password", stored) is False
+
+    def test_hash_never_contains_the_plaintext(self):
+        """最基本的一條:雜湊值裡不該找得到原始密碼。"""
+        secret = "unmistakable-plaintext-9021"
+        assert secret not in hash_password(secret)
+
+    def test_same_password_hashes_differently_each_time(self):
+        """每次用新的 salt。否則相同密碼會有相同雜湊,一眼就能看出
+        哪些帳號共用同一組密碼,也讓彩虹表可用。
+        """
+        assert hash_password("same-password") != hash_password("same-password")
+
+    def test_stored_hash_carries_its_parameters(self):
+        """參數要跟著存,日後調高成本因子時舊密碼才驗得起來。"""
+        assert hash_password("x").startswith("scrypt$")
+
+    def test_none_hash_is_rejected_not_crashed(self):
+        """訪客沒有密碼(None)。有人拿訪客名稱嘗試登入時不能炸掉。"""
+        assert verify_password("anything", None) is False
+
+    def test_empty_password_rejected(self):
+        assert verify_password("", hash_password("x")) is False
+
+    def test_corrupted_hash_rejected_not_crashed(self):
+        for broken in ("", "notascheme", "scrypt$bad", "scrypt$a$b$c$d$e"):
+            assert verify_password("x", broken) is False
+
+
+class TestUsernameNormalization:
+    def test_strips_surrounding_whitespace(self):
+        """不 trim 的話「ian」與「ian 」是兩個帳號,但畫面上看不出差別。"""
+        assert normalize_username("  ian  ") == "ian"
+
+    def test_rejects_too_short(self):
+        with pytest.raises(ValidationError):
+            normalize_username("a")
+
+    def test_rejects_whitespace_only(self):
+        with pytest.raises(ValidationError):
+            normalize_username("      ")
+
+    def test_rejects_too_long(self):
+        with pytest.raises(ValidationError):
+            normalize_username("x" * (config.MAX_USERNAME_CHARS + 1))
+
+    def test_rejects_non_string(self):
+        with pytest.raises(ValidationError):
+            normalize_username({"a": 1})
+
+
+class TestRegister:
+    def test_creates_account_and_session(self, auth):
+        result = auth.register("farmer", "hunter2hunter2")
+        assert result.user.username == "farmer"
+        assert result.user.is_guest is False
+        assert result.token
+
+    def test_session_resolves_back_to_the_user(self, auth):
+        result = auth.register("farmer", "hunter2hunter2")
+        assert auth.resolve_session(result.token).id == result.user.id
+
+    def test_duplicate_username_rejected(self, auth):
+        auth.register("farmer", "hunter2hunter2")
+        with pytest.raises(UsernameTaken):
+            auth.register("farmer", "different-password")
+
+    def test_duplicate_check_ignores_surrounding_whitespace(self, auth):
+        auth.register("farmer", "hunter2hunter2")
+        with pytest.raises(UsernameTaken):
+            auth.register("  farmer  ", "different-password")
+
+    def test_short_password_rejected(self, auth):
+        with pytest.raises(ValidationError):
+            auth.register("farmer", "short")
+
+    def test_password_not_stored_in_plaintext(self, auth, store):
+        auth.register("farmer", "hunter2hunter2")
+        assert "hunter2hunter2" not in str(store.users)
+
+
+class TestLogin:
+    def test_correct_credentials(self, auth):
+        auth.register("farmer", "hunter2hunter2")
+        assert auth.login("farmer", "hunter2hunter2").user.username == "farmer"
+
+    def test_wrong_password_rejected(self, auth):
+        auth.register("farmer", "hunter2hunter2")
+        with pytest.raises(InvalidCredentials):
+            auth.login("farmer", "wrong-password")
+
+    def test_unknown_user_rejected(self, auth):
+        with pytest.raises(InvalidCredentials):
+            auth.login("nobody", "hunter2hunter2")
+
+    def test_same_error_for_unknown_user_and_wrong_password(self, auth):
+        """訊息若有差別,等於告訴嘗試者「這個帳號存在,繼續猜密碼」。"""
+        auth.register("farmer", "hunter2hunter2")
+
+        with pytest.raises(InvalidCredentials) as wrong_pw:
+            auth.login("farmer", "wrong-password")
+        with pytest.raises(InvalidCredentials) as no_such_user:
+            auth.login("ghost", "wrong-password")
+
+        assert str(wrong_pw.value) == str(no_such_user.value)
+
+    def test_malformed_username_gives_same_error_not_validation_error(self, auth):
+        """格式不合法也要走同一條失敗路徑,不然錯誤型別本身就是線索。"""
+        with pytest.raises(InvalidCredentials):
+            auth.login("a", "hunter2hunter2")
+
+    def test_login_issues_a_new_session_each_time(self, auth):
+        auth.register("farmer", "hunter2hunter2")
+        first = auth.login("farmer", "hunter2hunter2").token
+        second = auth.login("farmer", "hunter2hunter2").token
+        assert first != second
+
+    def test_old_session_still_valid_after_new_login(self, auth):
+        """在手機登入不該把電腦上的登入狀態踢掉。"""
+        auth.register("farmer", "hunter2hunter2")
+        first = auth.login("farmer", "hunter2hunter2").token
+        auth.login("farmer", "hunter2hunter2")
+        assert auth.resolve_session(first) is not None
+
+
+class TestSession:
+    def test_unknown_token_resolves_to_nothing(self, auth):
+        assert auth.resolve_session("not-a-real-token") is None
+
+    def test_empty_token_resolves_to_nothing(self, auth):
+        assert auth.resolve_session("") is None
+        assert auth.resolve_session(None) is None
+
+    def test_expired_session_rejected(self, auth, store):
+        result = auth.register("farmer", "hunter2hunter2")
+        store.sessions[result.token]["expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        )
+        assert auth.resolve_session(result.token) is None
+
+    def test_logout_invalidates_the_session(self, auth):
+        result = auth.register("farmer", "hunter2hunter2")
+        auth.logout(result.token)
+        assert auth.resolve_session(result.token) is None
+
+    def test_logout_tolerates_missing_token(self, auth):
+        auth.logout(None)      # 不該拋例外
+        auth.logout("nope")
+
+    def test_tokens_are_unpredictable(self, auth):
+        """可預測的 token 等於任何人都能算出別人的身分。"""
+        tokens = {auth.guest_login().token for _ in range(20)}
+        assert len(tokens) == 20
+        assert all(len(t) > 20 for t in tokens)
+
+
+class TestGuestLogin:
+    def test_creates_a_usable_identity_without_credentials(self, auth):
+        result = auth.guest_login()
+        assert result.user.is_guest is True
+        assert result.user.username is None
+        assert auth.resolve_session(result.token).id == result.user.id
+
+    def test_each_guest_is_a_separate_identity(self, auth):
+        assert auth.guest_login().user.id != auth.guest_login().user.id
+
+    def test_guest_cannot_be_logged_into_by_name(self, auth):
+        """訪客沒有 username(None)。查詢時不得比對到他們 ——
+        SQL 的 NULL 比對天生不成立,Python 的 None == None 卻為真。
+        """
+        auth.guest_login()
+        with pytest.raises(InvalidCredentials):
+            auth.login(None, "anything")
+
+
+class TestClaimGuestAccount:
+    """訪客升級為正式帳號。重點是資料要延續,不是開一個新的空帳號。"""
+
+    def test_keeps_the_same_user_id(self, auth):
+        guest = auth.guest_login()
+        claimed = auth.claim(guest.token, "farmer", "hunter2hunter2")
+        assert claimed.user.id == guest.user.id
+
+    def test_existing_data_survives_the_upgrade(self, auth, store):
+        guest = auth.guest_login()
+        store.add_health_check(guest.user.id, {"psy": 20.63})
+        store.add_drug(guest.user.id, "阿莫西林")
+
+        claimed = auth.claim(guest.token, "farmer", "hunter2hunter2")
+
+        assert len(store.list_health_checks(claimed.user.id)) == 1
+        assert len(store.list_drugs(claimed.user.id)) == 1
+
+    def test_no_longer_a_guest_afterwards(self, auth):
+        guest = auth.guest_login()
+        claimed = auth.claim(guest.token, "farmer", "hunter2hunter2")
+        assert claimed.user.is_guest is False
+        assert auth.resolve_session(claimed.token).is_guest is False
+
+    def test_can_log_in_with_the_new_credentials(self, auth):
+        guest = auth.guest_login()
+        auth.claim(guest.token, "farmer", "hunter2hunter2")
+        assert auth.login("farmer", "hunter2hunter2").user.id == guest.user.id
+
+    def test_session_stays_valid_after_claiming(self, auth):
+        """升級不該把人踢出去要求重新登入。"""
+        guest = auth.guest_login()
+        claimed = auth.claim(guest.token, "farmer", "hunter2hunter2")
+        assert claimed.token == guest.token
+        assert auth.resolve_session(guest.token) is not None
+
+    def test_taken_username_rejected(self, auth):
+        auth.register("farmer", "hunter2hunter2")
+        guest = auth.guest_login()
+        with pytest.raises(UsernameTaken):
+            auth.claim(guest.token, "farmer", "another-password")
+
+    def test_guest_stays_a_guest_when_claim_fails(self, auth):
+        """失敗後不能留下半升級的狀態,否則使用者既沒帳密又不是訪客。"""
+        auth.register("farmer", "hunter2hunter2")
+        guest = auth.guest_login()
+        with pytest.raises(UsernameTaken):
+            auth.claim(guest.token, "farmer", "another-password")
+        assert auth.resolve_session(guest.token).is_guest is True
+
+    def test_already_registered_account_cannot_be_reclaimed(self, auth):
+        """否則等於提供一條「改掉別人帳號密碼」的路徑。"""
+        registered = auth.register("farmer", "hunter2hunter2")
+        with pytest.raises(NotGuest):
+            auth.claim(registered.token, "newname", "another-password")
+
+    def test_requires_a_valid_session(self, auth):
+        with pytest.raises(InvalidCredentials):
+            auth.claim("not-a-real-token", "farmer", "hunter2hunter2")
+
+    def test_weak_password_rejected(self, auth):
+        guest = auth.guest_login()
+        with pytest.raises(ValidationError):
+            auth.claim(guest.token, "farmer", "short")
+
+
+class TestUserDataIsolation:
+    """跨帳號隔離。這一組若有任何一條失敗,就是資料外洩。"""
+
+    def test_health_checks_are_not_visible_across_users(self, auth, store):
+        a = auth.register("alice", "hunter2hunter2").user
+        b = auth.register("bob", "hunter2hunter2").user
+        store.add_health_check(a.id, {"psy": 20.63})
+
+        assert len(store.list_health_checks(a.id)) == 1
+        assert store.list_health_checks(b.id) == []
+
+    def test_drugs_are_not_visible_across_users(self, auth, store):
+        a = auth.register("alice", "hunter2hunter2").user
+        b = auth.register("bob", "hunter2hunter2").user
+        store.add_drug(a.id, "阿莫西林")
+
+        assert len(store.list_drugs(a.id)) == 1
+        assert store.list_drugs(b.id) == []
+
+    def test_cannot_delete_another_users_drug(self, auth, store):
+        a = auth.register("alice", "hunter2hunter2").user
+        b = auth.register("bob", "hunter2hunter2").user
+        drug_id = store.add_drug(a.id, "阿莫西林")
+
+        assert store.delete_drug(b.id, drug_id) is False
+        assert len(store.list_drugs(a.id)) == 1
+
+    def test_cannot_delete_another_users_health_check(self, auth, store):
+        a = auth.register("alice", "hunter2hunter2").user
+        b = auth.register("bob", "hunter2hunter2").user
+        check_id = store.add_health_check(a.id, {"psy": 20.63})
+
+        assert store.delete_health_check(b.id, check_id) is False
+        assert len(store.list_health_checks(a.id)) == 1
+
+
+class TestHealthCheckRetention:
+    """免費方案的資料庫容量有限,單一帳號不能無限寫入。"""
+
+    def test_keeps_only_the_most_recent(self, auth, store):
+        user = auth.register("farmer", "hunter2hunter2").user
+        for i in range(config.MAX_HEALTH_CHECKS_PER_USER + 5):
+            store.add_health_check(user.id, {"psy": float(i)})
+
+        kept = store.list_health_checks(user.id)
+        assert len(kept) == config.MAX_HEALTH_CHECKS_PER_USER
+
+    def test_the_newest_record_survives_trimming(self, auth, store):
+        user = auth.register("farmer", "hunter2hunter2").user
+        for i in range(config.MAX_HEALTH_CHECKS_PER_USER + 5):
+            store.add_health_check(user.id, {"psy": float(i)})
+
+        newest = store.list_health_checks(user.id)[0]
+        assert newest["values"]["psy"] == float(config.MAX_HEALTH_CHECKS_PER_USER + 4)
+
+    def test_trimming_does_not_touch_other_users(self, auth, store):
+        a = auth.register("alice", "hunter2hunter2").user
+        b = auth.register("bob", "hunter2hunter2").user
+        store.add_health_check(b.id, {"psy": 1.0})
+
+        for i in range(config.MAX_HEALTH_CHECKS_PER_USER + 5):
+            store.add_health_check(a.id, {"psy": float(i)})
+
+        assert len(store.list_health_checks(b.id)) == 1

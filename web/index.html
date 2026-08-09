@@ -19,11 +19,30 @@
 <body>
 <div class="page">
 
+  <div class="authbar" id="authBar" hidden></div>
+
   <header class="masthead">
     <img class="pig" src="pig-sleeping.png" alt="" width="200" height="212">
     <h1>豬豬顧問</h1>
     <p id="sourceLabel">載入中…</p>
   </header>
+
+  <!-- 登入 / 註冊 / 訪客升級共用這一張表單,標題與按鈕文字由 JS 依模式切換 -->
+  <div class="card is-hidden" id="authPanel">
+    <div class="card-head">
+      <div>
+        <h2 id="authTitle">登入</h2>
+        <p class="hint" id="authHint"></p>
+      </div>
+      <button class="btn-ghost" id="authClose">關閉</button>
+    </div>
+    <div class="drug-form">
+      <input type="text" id="authUsername" autocomplete="username" placeholder="使用者名稱">
+      <input type="password" id="authPassword" autocomplete="current-password" placeholder="密碼">
+      <button class="btn-primary" id="authSubmit">登入</button>
+    </div>
+    <p class="hint" id="authError" hidden></p>
+  </div>
 
   <div id="banner" role="status"></div>
 
@@ -65,7 +84,7 @@
       <div class="card-head">
         <div>
           <h2>我的藥品庫</h2>
-          <p class="hint">
+          <p class="hint" id="drugStorageHint">
             列出你手邊有的藥,顧問建議劑量時會優先引用這裡的資料,不會憑空生成數字。
             只存在這台裝置的瀏覽器裡,不會上傳。
           </p>
@@ -108,6 +127,17 @@
         <img class="pig-empty" src="pig-sleeping.png" alt="">
         <p>填好數字按「開始健檢」,或先載入範例看看結果長什麼樣。</p>
       </div>
+    </div>
+
+    <!-- 只有登入(含訪客)時才顯示,由 JS 控制 -->
+    <div class="card is-hidden" id="historyCard">
+      <div class="card-head">
+        <div>
+          <h2>歷史紀錄</h2>
+          <p class="hint">每次健檢存起來,就能看出自己牧場逐次的變化。</p>
+        </div>
+      </div>
+      <ul class="history-list" id="historyList"></ul>
     </div>
   </section>
 

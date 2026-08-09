@@ -65,6 +65,30 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "2"))
 # console.anthropic.com 另外設定。
 MAX_AI_REQUESTS_PER_DAY = int(os.environ.get("MAX_AI_REQUESTS_PER_DAY", "500"))
 
+# --- 帳號系統 ---
+#
+# 沒有 DATABASE_URL 就整個帳號功能關閉,網站退回「純工具、免帳號」模式。
+# 這是刻意的:本機開發、demo、以及任何資料庫故障的情況下,疾病諮詢與
+# 生產健檢都必須照常可用 —— 帳號是加值,不是使用門檻。
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+SESSION_TTL_DAYS = int(os.environ.get("SESSION_TTL_DAYS", "30"))
+SESSION_COOKIE_NAME = "pig_session"
+
+MIN_PASSWORD_CHARS = 8
+MIN_USERNAME_CHARS = 2
+MAX_USERNAME_CHARS = 30
+
+# 登入嘗試節流。密碼可以被暴力猜,提問不行 —— 所以這裡的窗口比
+# MAX_QUESTIONS_PER_HOUR 嚴格得多,而且是以「失敗次數」計算,
+# 成功登入不佔額度(自己打錯一次密碼不該讓正常使用者被鎖住)。
+MAX_LOGIN_ATTEMPTS_PER_WINDOW = int(os.environ.get("MAX_LOGIN_ATTEMPTS_PER_WINDOW", "10"))
+LOGIN_WINDOW_SEC = 900           # 15 分鐘
+
+# 每個帳號可保存的健檢紀錄筆數上限。超過時最舊的會被刪掉 ——
+# 這是免費方案的資料庫,不能讓單一使用者無限寫入把容量吃光。
+MAX_HEALTH_CHECKS_PER_USER = int(os.environ.get("MAX_HEALTH_CHECKS_PER_USER", "100"))
+
 # --- AI 呼叫 ---
 MODEL = "sonnet"                          # CLI 傳輸層用的別名
 API_MODEL = "claude-sonnet-5"              # Anthropic API 傳輸層用的完整型號名稱

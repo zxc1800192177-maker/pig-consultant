@@ -1,12 +1,38 @@
 // 畫面接線。純邏輯都在 lib/ 底下,那些有單元測試;這裡只做 DOM 操作。
 
 import { renderMarkdown, trimDangling, escapeHtml } from "./lib/markdown.js";
-import { formatShortfall, formatValue, gradeTone } from "./lib/format.js";
+import {
+  formatRecordDate,
+  formatShortfall,
+  formatValue,
+  gradeTone,
+  summarizeRecord,
+} from "./lib/format.js";
 import { SseParser } from "./lib/sse.js";
 import { isSpeechRecognitionSupported, mergeTranscript, splitFinalAndInterim } from "./lib/speech.js";
 import { addDrug, loadMyDrugs, removeDrug, saveMyDrugs } from "./lib/drugs.js";
 
 const $ = (id) => document.getElementById(id);
+
+// 統一的 API 呼叫。回應不是 JSON(502、逾時、被代理攔截)時不該讓
+// 呼叫端整個爆掉 —— 稍早就踩過這個坑:畫面永遠卡在載入中卻沒有錯誤。
+async function api(path, options) {
+  try {
+    const res = await fetch(path, options);
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: `連線失敗:${String(e)}` } };
+  }
+}
+
+function postJson(body) {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
 
 let metricDefs = [];
 let lastWeaknesses = [];   // 供疾病諮詢當背景資訊(US-1 驗收條件 7)
@@ -24,19 +50,201 @@ function rememberTurn(role, content) {
   }
 }
 
+// ── 帳號 ──
+//
+// 帳號是選填的加值,不是使用門檻:未登入照樣能問診、能健檢,藥品庫
+// 存在自己的瀏覽器。登入(含訪客)之後才改由伺服器保存,可跨裝置。
+// 站方沒設定資料庫時(accountsAvailable=false),整個帳號介面不出現 ——
+// 不是出現了按下去才報錯。
+let account = { loggedIn: false, username: null, isGuest: false };
+let accountsAvailable = false;
+
+const LOGGED_OUT = { loggedIn: false, username: null, isGuest: false };
+
+async function refreshAccount() {
+  const { ok, data } = await api("/api/auth/me");
+  account = ok && data.loggedIn ? data : LOGGED_OUT;
+  renderAuthBar();
+  await Promise.all([reloadDrugs(), reloadHistory()]);
+}
+
+function renderAuthBar() {
+  const bar = $("authBar");
+  if (!bar) return;
+  if (!accountsAvailable) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+
+  if (!account.loggedIn) {
+    bar.innerHTML = `
+      <button class="btn-ghost" data-auth-open="guest">訪客試用</button>
+      <button class="btn-ghost" data-auth-open="register">註冊</button>
+      <button class="btn-ghost" data-auth-open="login">登入</button>`;
+  } else if (account.isGuest) {
+    bar.innerHTML = `
+      <span class="authbar-who">訪客</span>
+      <button class="btn-ghost" data-auth-open="claim">設定帳號密碼</button>
+      <button class="btn-ghost" data-auth-action="logout">登出</button>`;
+  } else {
+    bar.innerHTML = `
+      <span class="authbar-who">${escapeHtml(account.username)}</span>
+      <button class="btn-ghost" data-auth-action="logout">登出</button>`;
+  }
+}
+
+// 三種模式共用同一張表單,差別只在文字與端點。
+const AUTH_MODES = {
+  login: {
+    title: "登入", submit: "登入", endpoint: "/api/auth/login",
+    hint: "", autocomplete: "current-password",
+  },
+  register: {
+    title: "註冊", submit: "建立帳號", endpoint: "/api/auth/register",
+    hint: "密碼至少 8 個字元。健檢紀錄與藥品庫會存在你的帳號下,換裝置也看得到。",
+    autocomplete: "new-password",
+  },
+  claim: {
+    title: "設定帳號密碼", submit: "設定並保留資料", endpoint: "/api/auth/claim",
+    hint: "目前訪客身分下的健檢紀錄與藥品庫都會完整保留,不會重新開始。",
+    autocomplete: "new-password",
+  },
+};
+
+function openAuthPanel(mode) {
+  const spec = AUTH_MODES[mode];
+  if (!spec) return;
+  $("authPanel").dataset.mode = mode;
+  $("authTitle").textContent = spec.title;
+  $("authSubmit").textContent = spec.submit;
+  $("authHint").textContent = spec.hint;
+  $("authPassword").setAttribute("autocomplete", spec.autocomplete);
+  $("authError").hidden = true;
+  $("authUsername").value = "";
+  $("authPassword").value = "";
+  $("authPanel").classList.remove("is-hidden");
+  $("authUsername").focus();
+}
+
+function closeAuthPanel() {
+  $("authPanel").classList.add("is-hidden");
+}
+
+function showAuthError(message) {
+  $("authError").textContent = message;
+  $("authError").hidden = false;
+}
+
+async function submitAuthForm() {
+  const mode = $("authPanel").dataset.mode;
+  const spec = AUTH_MODES[mode];
+  if (!spec) return;
+
+  $("authSubmit").disabled = true;
+  try {
+    const { ok, data } = await api(spec.endpoint, postJson({
+      username: $("authUsername").value,
+      password: $("authPassword").value,
+    }));
+    if (!ok) {
+      showAuthError(data.error || "操作失敗,請稍後再試");
+      return;
+    }
+    closeAuthPanel();
+    await refreshAccount();
+  } finally {
+    $("authSubmit").disabled = false;
+  }
+}
+
+async function startGuestSession() {
+  const { ok, data } = await api("/api/auth/guest", postJson({}));
+  if (!ok) {
+    showBanner(data.error || "無法建立訪客身分,請稍後再試", "warn");
+    return;
+  }
+  await refreshAccount();
+}
+
+async function logout() {
+  await api("/api/auth/logout", postJson({}));
+  await refreshAccount();
+}
+
+const authBarEl = $("authBar");
+if (authBarEl) {
+  authBarEl.addEventListener("click", (e) => {
+    const opener = e.target.closest("[data-auth-open]");
+    if (opener) {
+      const mode = opener.dataset.authOpen;
+      // 訪客試用不需要表單,點下去就進入
+      return mode === "guest" ? startGuestSession() : openAuthPanel(mode);
+    }
+    if (e.target.closest('[data-auth-action="logout"]')) logout();
+  });
+}
+
+$("authSubmit")?.addEventListener("click", submitAuthForm);
+$("authClose")?.addEventListener("click", closeAuthPanel);
+$("authPassword")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") submitAuthForm();
+});
+
+// 訪客提醒。這段話必須主動講:資料確實存在伺服器,但只有這台瀏覽器的
+// cookie 能取回 —— 使用者不會自己想到「清瀏覽器資料 = 永久失去」。
+function guestWarningHtml() {
+  if (!account.loggedIn || !account.isGuest) return "";
+  return `
+    <div class="guest-warning">
+      <span>目前是訪客身分,資料只能靠這台裝置的瀏覽器取回。
+        清除瀏覽器資料或換裝置就會失去存取權,沒有辦法救回。</span>
+      <button class="btn-ghost" data-auth-open="claim">設定帳號密碼</button>
+    </div>`;
+}
+
+// 訪客提醒裡的按鈕散落在不同區塊,用事件委派統一接,不必每次重繪都重新綁定
+document.addEventListener("click", (e) => {
+  const opener = e.target.closest(".guest-warning [data-auth-open]");
+  if (opener) openAuthPanel(opener.dataset.authOpen);
+});
+
 // ── 我的藥品庫 ──
-// 跟對話歷史一樣只存在瀏覽器裡,不上傳保存;送出問題時才隨請求附上。
-// 顧問會優先引用這裡的內容給劑量,不會自己生成數字(見 core/dosage.py)。
-let myDrugs = loadMyDrugs(localStorage);
+// 未登入:存在這台瀏覽器的 localStorage(行為與加入帳號功能前完全相同)。
+// 已登入:存在伺服器,可跨裝置;疾病諮詢時由伺服器直接讀取,
+//         不再信任請求裡的內容(見 server.py 的 _drugs_for_consult)。
+// 顧問會優先引用這裡的劑量,不會自己生成數字(見 core/dosage.py)。
+let myDrugs = [];
+
+async function reloadDrugs() {
+  if (account.loggedIn) {
+    const { ok, data } = await api("/api/my-drugs");
+    myDrugs = ok ? data.drugs : [];
+  } else {
+    myDrugs = loadMyDrugs(localStorage);
+  }
+  renderDrugList();
+  updateDrugStorageHint();
+}
+
+function updateDrugStorageHint() {
+  const hint = $("drugStorageHint");
+  if (!hint) return;
+  hint.textContent = account.loggedIn
+    ? "列出你手邊有的藥,顧問建議劑量時會優先引用這裡的資料,不會憑空生成數字。已存在你的帳號下,換裝置也看得到。"
+    : "列出你手邊有的藥,顧問建議劑量時會優先引用這裡的資料,不會憑空生成數字。只存在這台裝置的瀏覽器裡,不會上傳。";
+}
 
 function renderDrugList() {
   const list = $("drugList");
   if (!list) return;
+
+  const warning = guestWarningHtml();
   if (!myDrugs.length) {
-    list.innerHTML = `<li class="drug-empty">還沒有加入任何藥品。</li>`;
+    list.innerHTML = `${warning}<li class="drug-empty">還沒有加入任何藥品。</li>`;
     return;
   }
-  list.innerHTML = myDrugs
+  list.innerHTML = warning + myDrugs
     .map((d) => {
       const metaParts = [];
       if (d.dosageNote) metaParts.push(escapeHtml(d.dosageNote));
@@ -63,6 +271,43 @@ function readOptionalNumber(el) {
   return Number.isFinite(n) ? n : undefined;
 }
 
+async function submitNewDrug() {
+  const draft = {
+    name: $("drugName").value,
+    dosageNote: $("drugNote").value,
+    withdrawalDays: readOptionalNumber($("drugWithdrawal")),
+  };
+  if (!draft.name.trim()) return $("drugName").focus();
+
+  if (account.loggedIn) {
+    const { ok, data } = await api("/api/my-drugs", postJson(draft));
+    if (!ok) return showBanner(data.error || "新增失敗", "warn");
+    await reloadDrugs();
+  } else {
+    myDrugs = addDrug(myDrugs, draft);
+    saveMyDrugs(localStorage, myDrugs);
+    renderDrugList();
+  }
+
+  $("drugName").value = "";
+  $("drugNote").value = "";
+  $("drugWithdrawal").value = "";
+  $("drugName").focus();
+}
+
+async function deleteDrug(id) {
+  if (account.loggedIn) {
+    const { ok, data } = await api(`/api/my-drugs/${encodeURIComponent(id)}`,
+                                   { method: "DELETE" });
+    if (!ok) return showBanner(data.error || "移除失敗", "warn");
+    await reloadDrugs();
+  } else {
+    myDrugs = removeDrug(myDrugs, id);
+    saveMyDrugs(localStorage, myDrugs);
+    renderDrugList();
+  }
+}
+
 // 只在這個區塊真正需要的元素都存在時才接線 —— 瀏覽器快取(尤其是 PWA
 // 的 service worker)偶爾會讓 index.html 跟 app.js 版本對不上,若這裡
 // 對著不存在的元素呼叫 addEventListener 而不做防呆,拋出的例外會讓
@@ -71,29 +316,97 @@ function readOptionalNumber(el) {
 const drugListEl = $("drugList");
 const addDrugBtnEl = $("addDrugBtn");
 if (drugListEl && addDrugBtnEl) {
-  addDrugBtnEl.addEventListener("click", () => {
-    myDrugs = addDrug(myDrugs, {
-      name: $("drugName").value,
-      dosageNote: $("drugNote").value,
-      withdrawalDays: readOptionalNumber($("drugWithdrawal")),
-    });
-    saveMyDrugs(localStorage, myDrugs);
-    renderDrugList();
-    $("drugName").value = "";
-    $("drugNote").value = "";
-    $("drugWithdrawal").value = "";
-    $("drugName").focus();
-  });
-
+  addDrugBtnEl.addEventListener("click", submitNewDrug);
   drugListEl.addEventListener("click", (e) => {
     const btn = e.target.closest(".drug-remove");
-    if (!btn) return;
-    myDrugs = removeDrug(myDrugs, btn.dataset.id);
-    saveMyDrugs(localStorage, myDrugs);
-    renderDrugList();
+    if (btn) deleteDrug(btn.dataset.id);
   });
+}
 
-  renderDrugList();
+// ── 健檢歷史紀錄 ──
+async function reloadHistory() {
+  const card = $("historyCard");
+  if (!card) return;
+  if (!account.loggedIn) {
+    card.classList.add("is-hidden");
+    return;
+  }
+  card.classList.remove("is-hidden");
+  const { ok, data } = await api("/api/health-checks");
+  renderHistory(ok ? data.records : []);
+}
+
+function renderHistory(records) {
+  const list = $("historyList");
+  if (!list) return;
+
+  const warning = guestWarningHtml();
+  if (!records.length) {
+    list.innerHTML =
+      `${warning}<li class="history-empty">還沒有存過健檢紀錄。做完健檢後按「存入歷史紀錄」。</li>`;
+    return;
+  }
+  list.innerHTML = warning + records
+    .map((r) => `
+      <li class="history-item">
+        <div>
+          <div class="history-date">${escapeHtml(formatRecordDate(r.createdAt))}</div>
+          <div class="history-summary">${escapeHtml(summarizeRecord(r))}</div>
+        </div>
+        <div class="history-actions">
+          <button type="button" class="btn-ghost" data-history-load="${escapeHtml(r.id)}">
+            載入
+          </button>
+          <button type="button" class="drug-remove" data-history-delete="${escapeHtml(r.id)}">
+            刪除
+          </button>
+        </div>
+      </li>`)
+    .join("");
+}
+
+// 最近一次健檢送出的數字。存入歷史時用這份,而不是重新讀表單 ——
+// 使用者可能在看完結果後又改了輸入框,那樣存進去的會跟畫面上的結果對不起來。
+let lastGradedValues = null;
+
+async function saveCurrentHealthCheck() {
+  if (!lastGradedValues) return;
+  const { ok, data } = await api("/api/health-checks", postJson({ values: lastGradedValues }));
+  if (!ok) return showBanner(data.error || "存檔失敗", "warn");
+  showBanner("已存入歷史紀錄", "info");
+  await reloadHistory();
+}
+
+function loadHistoryRecord(records, id) {
+  const record = records.find((r) => String(r.id) === String(id));
+  if (!record) return;
+  Object.entries(record.values).forEach(([key, value]) => {
+    const input = $(`m-${key}`);
+    if (input) input.value = value;
+  });
+  showBanner("已載入該次紀錄的數字,可直接按「開始健檢」重新查看", "info");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+const historyListEl = $("historyList");
+if (historyListEl) {
+  historyListEl.addEventListener("click", async (e) => {
+    const loadBtn = e.target.closest("[data-history-load]");
+    const deleteBtn = e.target.closest("[data-history-delete]");
+
+    if (loadBtn) {
+      const { ok, data } = await api("/api/health-checks");
+      if (ok) loadHistoryRecord(data.records, loadBtn.dataset.historyLoad);
+      return;
+    }
+    if (deleteBtn) {
+      const id = deleteBtn.dataset.historyDelete;
+      const { ok, data } = await api(`/api/health-checks/${encodeURIComponent(id)}`,
+                                     { method: "DELETE" });
+      if (!ok) return showBanner(data.error || "刪除失敗", "warn");
+      await reloadHistory();
+    }
+  });
 }
 
 // ── 頁籤 ──
@@ -112,22 +425,26 @@ document.querySelectorAll(".tab").forEach((tab) => {
 
 // ── 啟動 ──
 async function init() {
-  try {
-    const health = await (await fetch("/api/health")).json();
+  const { ok, data: health } = await api("/api/health");
+  if (!ok) {
+    showBanner("無法連線到伺服器,請稍後再試。", "warn");
+  } else {
     $("sourceLabel").textContent = health.source;
+    accountsAvailable = Boolean(health.accountsAvailable);
     if (!health.aiAvailable) {
       // 提示文字由後端提供(core/labels.py),前端不自己維護一份措辭
       showBanner(health.aiUnavailableNote, "warn");
       $("askBtn").disabled = true;
     }
-  } catch {
-    showBanner("無法連線到本機伺服器,請確認 server.py 正在執行。", "warn");
   }
 
   const meta = await (await fetch("/api/metrics")).json();
   metricDefs = meta.metrics;
   $("disclaimer").textContent = meta.disclaimer;
   renderMetricFields();
+
+  // 指標欄位要先畫出來,「載入某次紀錄」才有地方可以填
+  if (accountsAvailable) await refreshAccount();
 }
 
 function showBanner(text, tone) {
@@ -168,23 +485,27 @@ $("loadExample").addEventListener("click", async () => {
 });
 
 $("gradeBtn").addEventListener("click", async () => {
-  const res = await fetch("/api/grade", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ values: collectValues() }),
-  });
-  const data = await res.json();
+  const values = collectValues();
+  const { ok, data } = await api("/api/grade", postJson({ values }));
 
-  if (!res.ok) {
-    $("healthResult").innerHTML = `<div class="card"><div class="notice notice-warn">${data.errors
-      .map((e) => escapeHtml(e.message))
-      .join("<br>")}</div></div>`;
+  if (!ok) {
+    const messages = (data.errors || []).map((e) => escapeHtml(e.message)).join("<br>");
+    $("healthResult").innerHTML =
+      `<div class="card"><div class="notice notice-warn">${
+        messages || escapeHtml(data.error || "健檢失敗,請稍後再試")
+      }</div></div>`;
     return;
   }
 
   lastWeaknesses = data.weaknesses;
+  lastGradedValues = values;
   renderHealthResult(data);
   requestAdvice(data.weaknesses);
+});
+
+// 存檔按鈕每次健檢都會重新產生,用事件委派接才不必重複綁定
+$("healthResult")?.addEventListener("click", (e) => {
+  if (e.target.closest("#saveHealthCheck")) saveCurrentHealthCheck();
 });
 
 function renderHealthResult(data) {
@@ -238,10 +559,18 @@ function renderHealthResult(data) {
         .join("")
     : `<li class="hint">沒有低於全國中位數的項目,表現良好。</li>`;
 
+  // 存檔按鈕只在登入時出現 —— 未登入時按了也沒地方存,不如不要顯示
+  const saveButton = account.loggedIn
+    ? `<button class="btn-ghost" id="saveHealthCheck">存入歷史紀錄</button>`
+    : "";
+
   $("healthResult").innerHTML = `
     ${warnings}
     <div class="card">
-      <div class="section-label tag-computed">計算結果 · ${escapeHtml(data.source)}</div>
+      <div class="card-head">
+        <div class="section-label tag-computed">計算結果 · ${escapeHtml(data.source)}</div>
+        ${saveButton}
+      </div>
       <div class="table-scroll">
         <table>
           <thead><tr>
@@ -398,7 +727,9 @@ async function ask(question) {
         question,
         weaknesses: lastWeaknesses,
         history,   // 送出前的歷史,不含這一題本身
-        myDrugs,
+        // 已登入時伺服器會自己去資料庫拿,送了也會被忽略(見 server.py 的
+        // _drugs_for_consult)—— 不送是為了讓「誰是可信來源」在這裡就看得出來
+        myDrugs: account.loggedIn ? undefined : myDrugs,
       }),
     });
 

@@ -6,7 +6,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { gradeTone, formatShortfall, formatValue } from "../../web/lib/format.js";
+import {
+  gradeTone,
+  formatShortfall,
+  formatValue,
+  formatRecordDate,
+  summarizeRecord,
+} from "../../web/lib/format.js";
 
 describe("級距語意色", () => {
   it("A、B 為良好", () => {
@@ -79,5 +85,42 @@ describe("數值顯示", () => {
   it("缺值顯示為破折號,不顯示 undefined", () => {
     assert.equal(formatValue(null, "%"), "—");
     assert.equal(formatValue(undefined, "%"), "—");
+  });
+});
+
+describe("歷史紀錄日期", () => {
+  it("轉成農民看得懂的格式,不是 ISO 字串", () => {
+    const text = formatRecordDate("2026-08-09T14:30:00Z");
+    assert.match(text, /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/);
+  });
+
+  it("含時間 —— 同一天做兩次健檢要分得出先後", () => {
+    const a = formatRecordDate("2026-08-09T09:00:00Z");
+    const b = formatRecordDate("2026-08-09T18:00:00Z");
+    assert.notEqual(a, b);
+  });
+
+  it("壞掉的日期顯示破折號,不顯示 Invalid Date", () => {
+    assert.equal(formatRecordDate("不是日期"), "—");
+    assert.equal(formatRecordDate(undefined), "—");
+  });
+});
+
+describe("歷史紀錄摘要", () => {
+  it("列出指標數與待改善數", () => {
+    const text = summarizeRecord({ grades: { psy: "D", fr: "B" }, weakCount: 1 });
+    assert.ok(text.includes("2"));
+    assert.ok(text.includes("1"));
+  });
+
+  it("全部達標時不說「0 項待改善」,直接說全部達標", () => {
+    const text = summarizeRecord({ grades: { psy: "A" }, weakCount: 0 });
+    assert.ok(text.includes("全部達標"));
+    assert.ok(!text.includes("0 項"));
+  });
+
+  it("沒有可評級項目時說清楚,不顯示空白", () => {
+    assert.ok(summarizeRecord({ grades: {}, weakCount: 0 }).length > 0);
+    assert.ok(summarizeRecord({}).length > 0);
   });
 });

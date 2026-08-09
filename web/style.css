@@ -131,7 +131,9 @@ body {
 }
 .tab:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
-.panel.is-hidden { display: none; }
+/* 通用而不是只綁 .panel —— 登入表單與歷史紀錄卡片都靠它切換顯示。
+   原本寫成 .panel.is-hidden,套到 .card 上完全沒有作用,表單會一直開著。 */
+.is-hidden { display: none !important; }
 
 /* ── 卡片 ── */
 .card {
@@ -317,6 +319,38 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .dosage-drug { font-size: 13.5px; margin-bottom: 2px; }
 .dosage-drug-name { font-weight: 500; margin-right: 6px; }
 .dosage-source { font-size: 12.5px; color: var(--ink-faint); margin-top: 4px; }
+
+/* ── 登入狀態列 ── */
+.authbar {
+  display: flex; justify-content: flex-end; align-items: center;
+  gap: 14px; flex-wrap: wrap;
+  padding: 10px 2px 0;
+  font-size: 13.5px; color: var(--ink-soft); letter-spacing: 0;
+}
+.authbar .btn-ghost { font-size: 13.5px; padding: 4px 2px; }
+.authbar-who { font-weight: 600; color: var(--ink); }
+
+/* 訪客提醒:資料存在伺服器,但只有這張 cookie 能存取 —— 這件事
+   使用者不會自己想到,必須主動講,而且不能像一般提示那樣容易被略過 */
+.guest-warning {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: var(--warn-bg); color: var(--warn);
+  border-radius: var(--radius-sm); padding: 12px 15px;
+  font-size: 13px; line-height: 1.55; margin-bottom: 14px;
+}
+.guest-warning .btn-ghost { color: var(--warn); font-weight: 600; }
+
+/* ── 歷史紀錄 ── */
+.history-list { list-style: none; padding: 0; margin: 0; }
+.history-item {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 12px 0; border-bottom: 1px solid var(--border-light);
+}
+.history-item:last-child { border-bottom: none; }
+.history-date { font-weight: 600; letter-spacing: -0.01em; }
+.history-summary { font-size: 13px; color: var(--ink-soft); margin-top: 2px; letter-spacing: 0; }
+.history-actions { display: flex; gap: 10px; flex-shrink: 0; }
+.history-empty { font-size: 13.5px; color: var(--ink-faint); padding: 4px 0; }
 
 /* ── 我的藥品庫 ── */
 .drug-list { list-style: none; padding: 0; margin: 0 0 14px; }

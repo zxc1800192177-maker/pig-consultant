@@ -11,7 +11,7 @@ import pytest
 
 import config
 from ai.transport import AnthropicApiTransport, FakeTransport, NotLoggedIn, QuotaExceeded
-from server import WEB_DIR, Application
+from server import CLEAR_SESSION_KEY, SET_SESSION_KEY, WEB_DIR, Application
 
 # monkeypatch.setattr 已在每個測試結束後自動還原 config 的修改,不需額外處理。
 
@@ -596,3 +596,357 @@ class TestPwaAssets:
         assert 'rel="manifest"' in html
         js = (WEB_DIR / "app.js").read_text("utf-8")
         assert "serviceWorker" in js and "register(" in js
+
+
+# --- 帳號系統 ---
+#
+# 全部用 InMemoryStore 注入,不連真的資料庫:測試要能離線跑、幾秒跑完,
+# 而且不會因為外部服務不穩就變成紅燈。真的接資料庫的驗證另外手動做。
+
+def _account_app():
+    from db import InMemoryStore
+    return Application(transport=FakeTransport(chunks=["建議內容"]), store=InMemoryStore())
+
+
+def _register(app, username="farmer", password="hunter2hunter2"):
+    """註冊並回傳 session token,供後續請求使用。"""
+    status, body = _post(app, "/api/auth/register",
+                         {"username": username, "password": password})
+    assert status == 200, body
+    return body[SET_SESSION_KEY]
+
+
+def _post_as(app, path, payload, token):
+    """帶著 session 的 POST。"""
+    return app.handle_post(
+        path, json.dumps(payload).encode("utf-8"), client="test", token=token
+    )
+
+
+class TestAccountsDisabledWithoutDatabase:
+    """沒設定 DATABASE_URL 時帳號功能關閉,其餘功能完全不受影響 ——
+    這是這個站的核心賣點:免帳號就能用,帳號只是加值。
+    """
+
+    def test_health_reports_accounts_unavailable(self, app):
+        _, body = app.handle_get("/api/health")
+        assert body["accountsAvailable"] is False
+
+    def test_auth_endpoints_report_unavailable_not_crash(self, app):
+        status, body = _post(app, "/api/auth/login",
+                             {"username": "farmer", "password": "hunter2hunter2"})
+        assert status == 503
+        assert "error" in body
+
+    def test_consult_still_works(self, app):
+        assert _post(app, "/api/consult", {"question": "小豬下痢"})[0] == 200
+
+    def test_grade_still_works(self, app):
+        assert _post(app, "/api/grade", {"values": {"psy": 20.63}})[0] == 200
+
+    def test_me_reports_logged_out(self, app):
+        status, body = app.handle_get("/api/auth/me")
+        assert status == 200
+        assert body["loggedIn"] is False
+
+
+class TestAuthEndpoints:
+    def test_health_reports_accounts_available(self):
+        _, body = _account_app().handle_get("/api/health")
+        assert body["accountsAvailable"] is True
+
+    def test_register_then_me(self):
+        app = _account_app()
+        token = _register(app)
+        status, body = app.handle_get("/api/auth/me", token)
+        assert status == 200
+        assert body["loggedIn"] is True
+        assert body["username"] == "farmer"
+        assert body["isGuest"] is False
+
+    def test_duplicate_username_is_409(self):
+        app = _account_app()
+        _register(app)
+        status, _ = _post(app, "/api/auth/register",
+                          {"username": "farmer", "password": "another-password"})
+        assert status == 409
+
+    def test_weak_password_is_400(self):
+        app = _account_app()
+        status, _ = _post(app, "/api/auth/register",
+                          {"username": "farmer", "password": "short"})
+        assert status == 400
+
+    def test_wrong_password_is_401(self):
+        app = _account_app()
+        _register(app)
+        status, _ = _post(app, "/api/auth/login",
+                          {"username": "farmer", "password": "wrong-password"})
+        assert status == 401
+
+    def test_login_returns_a_session(self):
+        app = _account_app()
+        _register(app)
+        status, body = _post(app, "/api/auth/login",
+                             {"username": "farmer", "password": "hunter2hunter2"})
+        assert status == 200
+        assert body[SET_SESSION_KEY]
+
+    def test_logout_clears_the_session(self):
+        app = _account_app()
+        token = _register(app)
+        status, body = _post_as(app, "/api/auth/logout", {}, token)
+        assert status == 200
+        assert body[CLEAR_SESSION_KEY] is True
+        assert app.handle_get("/api/auth/me", token)[1]["loggedIn"] is False
+
+    def test_invalid_token_is_treated_as_logged_out(self):
+        app = _account_app()
+        _, body = app.handle_get("/api/auth/me", "not-a-real-token")
+        assert body["loggedIn"] is False
+
+    def test_session_token_never_appears_in_normal_responses(self):
+        """token 只能經由 HttpOnly cookie 傳遞。若混進一般回應內容,
+        JavaScript 就讀得到,HttpOnly 等於白設。
+        """
+        app = _account_app()
+        token = _register(app)
+        for path in ("/api/auth/me", "/api/my-drugs", "/api/health-checks"):
+            _, body = app.handle_get(path, token)
+            assert SET_SESSION_KEY not in body
+            assert token not in json.dumps(body, ensure_ascii=False)
+
+
+class TestGuestAccounts:
+    def test_guest_login_creates_a_usable_identity(self):
+        app = _account_app()
+        status, body = _post(app, "/api/auth/guest", {})
+        assert status == 200
+        assert body["isGuest"] is True
+        assert body["username"] is None
+        assert app.handle_get("/api/auth/me", body[SET_SESSION_KEY])[1]["loggedIn"] is True
+
+    def test_guest_can_save_and_read_own_data(self):
+        app = _account_app()
+        token = _post(app, "/api/auth/guest", {})[1][SET_SESSION_KEY]
+
+        status, _ = _post_as(app, "/api/health-checks", {"values": {"psy": 20.63}}, token)
+        assert status == 200
+        assert len(app.handle_get("/api/health-checks", token)[1]["records"]) == 1
+
+    def test_claim_keeps_the_data(self):
+        app = _account_app()
+        token = _post(app, "/api/auth/guest", {})[1][SET_SESSION_KEY]
+        _post_as(app, "/api/health-checks", {"values": {"psy": 20.63}}, token)
+
+        status, body = _post_as(
+            app, "/api/auth/claim",
+            {"username": "farmer", "password": "hunter2hunter2"}, token,
+        )
+        assert status == 200
+        assert body["isGuest"] is False
+        assert len(app.handle_get("/api/health-checks", token)[1]["records"]) == 1
+
+    def test_registered_account_cannot_be_reclaimed(self):
+        app = _account_app()
+        token = _register(app)
+        status, _ = _post_as(
+            app, "/api/auth/claim",
+            {"username": "other", "password": "hunter2hunter2"}, token,
+        )
+        assert status == 409
+
+    def test_claim_without_session_is_rejected(self):
+        app = _account_app()
+        status, _ = _post(app, "/api/auth/claim",
+                          {"username": "farmer", "password": "hunter2hunter2"})
+        assert status == 401
+
+
+class TestHealthCheckHistory:
+    def test_requires_login(self):
+        app = _account_app()
+        assert app.handle_get("/api/health-checks")[0] == 401
+        assert _post(app, "/api/health-checks", {"values": {"psy": 20.63}})[0] == 401
+
+    def test_saved_record_comes_back_with_computed_grades(self):
+        app = _account_app()
+        token = _register(app)
+        _post_as(app, "/api/health-checks", {"values": {"psy": 20.63}}, token)
+
+        record = app.handle_get("/api/health-checks", token)[1]["records"][0]
+        # 級距是讀取時即時算的,不是存起來的(單一事實來源)
+        assert record["grades"]["psy"] == "D"
+        assert record["values"]["psy"] == 20.63
+        assert record["createdAt"]
+
+    def test_invalid_values_are_rejected_before_saving(self):
+        """壞資料一旦存進去,之後每次讀歷史都會再壞一次。"""
+        app = _account_app()
+        token = _register(app)
+        status, _ = _post_as(app, "/api/health-checks", {"values": {"psy": "不是數字"}}, token)
+        assert status == 400
+        assert app.handle_get("/api/health-checks", token)[1]["records"] == []
+
+    def test_empty_values_rejected(self):
+        app = _account_app()
+        token = _register(app)
+        assert _post_as(app, "/api/health-checks", {"values": {}}, token)[0] == 400
+
+    def test_newest_first(self):
+        app = _account_app()
+        token = _register(app)
+        for psy in (20.0, 21.0, 22.0):
+            _post_as(app, "/api/health-checks", {"values": {"psy": psy}}, token)
+
+        records = app.handle_get("/api/health-checks", token)[1]["records"]
+        assert [r["values"]["psy"] for r in records] == [22.0, 21.0, 20.0]
+
+    def test_one_user_cannot_see_anothers_records(self):
+        app = _account_app()
+        alice = _register(app, "alice")
+        bob = _register(app, "bob")
+        _post_as(app, "/api/health-checks", {"values": {"psy": 20.63}}, alice)
+
+        assert app.handle_get("/api/health-checks", bob)[1]["records"] == []
+
+    def test_one_user_cannot_delete_anothers_record(self):
+        app = _account_app()
+        alice = _register(app, "alice")
+        bob = _register(app, "bob")
+        _, created = _post_as(app, "/api/health-checks", {"values": {"psy": 20.63}}, alice)
+
+        assert app.handle_delete(f"/api/health-checks/{created['id']}", bob)[0] == 404
+        assert len(app.handle_get("/api/health-checks", alice)[1]["records"]) == 1
+
+
+class TestMyDrugsServerSide:
+    def test_requires_login(self):
+        app = _account_app()
+        assert app.handle_get("/api/my-drugs")[0] == 401
+        assert _post(app, "/api/my-drugs", {"name": "阿莫西林"})[0] == 401
+
+    def test_add_then_list(self):
+        app = _account_app()
+        token = _register(app)
+        status, _ = _post_as(app, "/api/my-drugs", {
+            "name": "阿莫西林", "dosageNote": "每公斤10mg", "withdrawalDays": 7,
+        }, token)
+        assert status == 200
+
+        drugs = app.handle_get("/api/my-drugs", token)[1]["drugs"]
+        assert drugs[0]["name"] == "阿莫西林"
+        assert drugs[0]["withdrawalDays"] == 7
+
+    def test_name_is_required(self):
+        app = _account_app()
+        token = _register(app)
+        for bad in ({"name": ""}, {"name": "   "}, {"dosageNote": "沒有名字"}):
+            assert _post_as(app, "/api/my-drugs", bad, token)[0] == 400
+
+    def test_overlong_fields_are_truncated_not_rejected(self):
+        app = _account_app()
+        token = _register(app)
+        _post_as(app, "/api/my-drugs",
+                 {"name": "藥" * 200, "dosageNote": "說" * 500}, token)
+
+        drug = app.handle_get("/api/my-drugs", token)[1]["drugs"][0]
+        assert len(drug["name"]) <= config.MAX_DRUG_NAME_CHARS
+        assert len(drug["dosageNote"]) <= config.MAX_DRUG_NOTE_CHARS
+
+    def test_count_is_capped(self):
+        app = _account_app()
+        token = _register(app)
+        for i in range(config.MAX_MY_DRUGS):
+            _post_as(app, "/api/my-drugs", {"name": f"藥{i}"}, token)
+
+        assert _post_as(app, "/api/my-drugs", {"name": "多的"}, token)[0] == 400
+
+    def test_delete_removes_it(self):
+        app = _account_app()
+        token = _register(app)
+        _, created = _post_as(app, "/api/my-drugs", {"name": "阿莫西林"}, token)
+
+        assert app.handle_delete(f"/api/my-drugs/{created['id']}", token)[0] == 200
+        assert app.handle_get("/api/my-drugs", token)[1]["drugs"] == []
+
+    def test_one_user_cannot_see_anothers_drugs(self):
+        app = _account_app()
+        alice = _register(app, "alice")
+        bob = _register(app, "bob")
+        _post_as(app, "/api/my-drugs", {"name": "阿莫西林"}, alice)
+
+        assert app.handle_get("/api/my-drugs", bob)[1]["drugs"] == []
+
+    def test_one_user_cannot_delete_anothers_drug(self):
+        app = _account_app()
+        alice = _register(app, "alice")
+        bob = _register(app, "bob")
+        _, created = _post_as(app, "/api/my-drugs", {"name": "阿莫西林"}, alice)
+
+        assert app.handle_delete(f"/api/my-drugs/{created['id']}", bob)[0] == 404
+        assert len(app.handle_get("/api/my-drugs", alice)[1]["drugs"]) == 1
+
+    def test_malformed_id_is_rejected(self):
+        app = _account_app()
+        token = _register(app)
+        assert app.handle_delete("/api/my-drugs/abc", token)[0] == 400
+
+
+class TestConsultUsesServerSideDrugs:
+    """已登入時藥品庫一律以資料庫為準。
+
+    信任請求裡的 myDrugs 等於任何人都能塞一組假劑量進去,而畫面上會
+    顯示成「你自己藥品庫的資料」—— 正是劑量查表化要防的事。
+    """
+
+    def test_logged_in_uses_database_not_request_body(self):
+        from db import InMemoryStore
+        transport = FakeTransport(chunks=["ok"])
+        app = Application(transport=transport, store=InMemoryStore())
+        token = _register(app)
+        _post_as(app, "/api/my-drugs", {"name": "資料庫裡的藥"}, token)
+
+        _post_as(app, "/api/consult",
+                 {"question": "小豬下痢", "myDrugs": [{"name": "偽造的藥"}]}, token)
+
+        assert "資料庫裡的藥" in transport.last_prompt
+        assert "偽造的藥" not in transport.last_prompt
+
+    def test_logged_out_still_uses_request_body(self):
+        """未登入使用者的藥品庫存在自己的瀏覽器,行為完全不變。"""
+        transport = FakeTransport(chunks=["ok"])
+        app = Application(transport=transport)
+        _post(app, "/api/consult",
+              {"question": "小豬下痢", "myDrugs": [{"name": "瀏覽器裡的藥"}]})
+        assert "瀏覽器裡的藥" in transport.last_prompt
+
+
+class TestLoginThrottle:
+    """密碼可以被暴力猜,訪客建立會寫入資料庫 —— 兩者都要設限。"""
+
+    def test_repeated_attempts_are_throttled(self, monkeypatch):
+        monkeypatch.setattr(config, "MAX_LOGIN_ATTEMPTS_PER_WINDOW", 3)
+        app = _account_app()
+        for _ in range(3):
+            _post(app, "/api/auth/login", {"username": "farmer", "password": "guess"})
+
+        assert _post(app, "/api/auth/login",
+                     {"username": "farmer", "password": "guess"})[0] == 429
+
+    def test_guest_creation_is_throttled_too(self, monkeypatch):
+        """不設限等於開放任何人把免費方案的資料庫容量灌爆。"""
+        monkeypatch.setattr(config, "MAX_LOGIN_ATTEMPTS_PER_WINDOW", 3)
+        app = _account_app()
+        for _ in range(3):
+            _post(app, "/api/auth/guest", {})
+
+        assert _post(app, "/api/auth/guest", {})[0] == 429
+
+    def test_logout_is_not_throttled(self, monkeypatch):
+        """登出被擋住會讓使用者卡在登入狀態出不去。"""
+        monkeypatch.setattr(config, "MAX_LOGIN_ATTEMPTS_PER_WINDOW", 1)
+        app = _account_app()
+        token = _register(app)
+        for _ in range(5):
+            assert _post_as(app, "/api/auth/logout", {}, token)[0] == 200

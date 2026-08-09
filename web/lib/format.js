@@ -40,3 +40,24 @@ export function formatValue(value, unit) {
   if (!unit) return text;
   return unit === "%" ? `${text}%` : `${text} ${unit}`;
 }
+
+// 歷史紀錄的日期。後端送 ISO 字串,直接顯示對農民不友善,
+// 但也不需要精確到秒 —— 同一天做兩次健檢才需要時間來分辨。
+export function formatRecordDate(isoString) {
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return "—";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ` +
+         `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// 歷史清單每一列的摘要。列出全部 18 項會讓清單完全無法掃讀,
+// 所以只講「填了幾項、其中幾項待改善」。
+export function summarizeRecord(record) {
+  const total = Object.keys(record.grades || {}).length;
+  if (!total) return "沒有可評級的項目";
+  const weak = record.weakCount || 0;
+  return weak
+    ? `${total} 項指標・${weak} 項待改善`
+    : `${total} 項指標・全部達標`;
+}

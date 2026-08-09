@@ -12,9 +12,12 @@ import pathlib
 import socketserver
 import threading
 import time
+from http.cookies import SimpleCookie
 from typing import Dict, List, Optional, Tuple
 
 import config
+from auth import Auth, AuthError, InvalidCredentials, NotGuest, UsernameTaken, ValidationError
+from db import select_store
 from ai.consultant import Consultant
 from ai.transport import (
     AnthropicApiTransport,
@@ -93,14 +96,27 @@ def client_ip(headers, peer_address: str) -> str:
     return (remaining or hops)[-1]
 
 
+# Application 回傳的 dict 裡,這兩個鍵是給 Handler 看的內部指令,
+# 不是要回給瀏覽器的資料 —— Handler 會在序列化之前 pop 掉。
+# 這樣做是為了讓 handle_get/handle_post 維持單純的 (status, dict) 形狀,
+# 不必為了「順便設一個 cookie」把所有呼叫端與測試的簽章都改掉。
+SET_SESSION_KEY = "_setSession"
+CLEAR_SESSION_KEY = "_clearSession"
+
+
 class Application:
     """路由與請求處理。不綁定 HTTP 傳輸,方便測試。"""
 
-    def __init__(self, transport=None):
+    def __init__(self, transport=None, store=None):
         self.transport = transport or ClaudeCliTransport()
         self.consultant = Consultant(self.transport)
+        # store 為 None 代表沒設定資料庫 —— 帳號功能整個關閉,
+        # 其餘功能(疾病諮詢、生產健檢)完全不受影響。
+        self.store = store
+        self.auth = Auth(store) if store else None
         self._last_ai_request: Dict[str, float] = {}
         self._hourly_hits: Dict[str, List[float]] = {}
+        self._login_attempts: Dict[str, List[float]] = {}
         self._ai_request_count = 0
         self._count_day = time.strftime("%Y-%m-%d")
 
@@ -151,6 +167,57 @@ class Application:
             self._hourly_hits[client] = hits
             return False
 
+    def _over_login_limit(self, client: str) -> bool:
+        """登入/註冊/訪客建立的嘗試次數上限。
+
+        跟提問限流分開計算,原因是威脅不同:提問是花錢,登入是被猜密碼,
+        後者需要嚴格得多的窗口。訪客建立也算在這裡 —— 那會在資料庫寫入
+        一列,不設限等於開放任何人把免費方案的容量灌爆。
+        """
+        with self._limit_lock:
+            now = time.monotonic()
+            cutoff = now - config.LOGIN_WINDOW_SEC
+
+            for ip in [ip for ip, hits in self._login_attempts.items()
+                       if not hits or hits[-1] <= cutoff]:
+                del self._login_attempts[ip]
+
+            hits = [t for t in self._login_attempts.get(client, []) if t > cutoff]
+            if len(hits) >= config.MAX_LOGIN_ATTEMPTS_PER_WINDOW:
+                self._login_attempts[client] = hits
+                return True
+
+            hits.append(now)
+            self._login_attempts[client] = hits
+            return False
+
+    def _current_user(self, token):
+        """目前登入的使用者;未登入或帳號功能未啟用時回 None。"""
+        return self.auth.resolve_session(token) if self.auth else None
+
+    @staticmethod
+    def _user_payload(user) -> dict:
+        if user is None:
+            return {"loggedIn": False}
+        return {
+            "loggedIn": True,
+            "username": user.username,
+            "isGuest": user.is_guest,
+        }
+
+    @staticmethod
+    def _auth_error_status(error: AuthError) -> int:
+        """例外型別決定狀態碼。訊息一律用例外自己帶的文字,不在這裡
+        改寫 —— 稍早的教訓:改寫過的訊息會蓋掉真正的原因,把除錯帶偏。
+        """
+        if isinstance(error, UsernameTaken):
+            return 409
+        if isinstance(error, ValidationError):
+            return 400
+        if isinstance(error, NotGuest):
+            return 409
+        return 401     # InvalidCredentials 與其他
+
     def _over_daily_budget(self) -> bool:
         """對外上線走 API 計費,失控會直接扣款,不像訂閱額度頂多是用完。
 
@@ -182,7 +249,7 @@ class Application:
 
     # --- GET ---
 
-    def handle_get(self, path: str) -> Tuple[int, dict]:
+    def handle_get(self, path: str, token: Optional[str] = None) -> Tuple[int, dict]:
         if path == "/api/health":
             return 200, {
                 "aiAvailable": self.transport.is_logged_in(),
@@ -191,7 +258,16 @@ class Application:
                 "source": source_label(),
                 # 文字由後端提供,前端不自己寫一份(措辭改動只需改一處)
                 "aiUnavailableNote": ai_unavailable_note(),
+                # 前端據此決定要不要顯示登入相關的介面。沒有資料庫時
+                # 整個帳號區塊不出現,而不是出現了按下去才報錯。
+                "accountsAvailable": self.auth is not None,
             }
+        if path == "/api/auth/me":
+            return 200, self._user_payload(self._current_user(token))
+        if path == "/api/health-checks":
+            return self._list_health_checks(token)
+        if path == "/api/my-drugs":
+            return self._list_my_drugs(token)
         if path == "/api/metrics":
             return 200, {
                 "metrics": [
@@ -215,7 +291,9 @@ class Application:
 
     # --- POST ---
 
-    def handle_post(self, path: str, raw: bytes, client: str) -> Tuple[int, dict]:
+    def handle_post(
+        self, path: str, raw: bytes, client: str, token: Optional[str] = None
+    ) -> Tuple[int, dict]:
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -224,10 +302,166 @@ class Application:
         if path == "/api/grade":
             return self._grade(payload)
         if path == "/api/consult":
-            return self._consult(payload, client)
+            return self._consult(payload, client, token)
         if path == "/api/advise":
             return self._advise(payload, client)
+        if path.startswith("/api/auth/"):
+            return self._auth_post(path, payload, client, token)
+        if path == "/api/health-checks":
+            return self._save_health_check(payload, token)
+        if path == "/api/my-drugs":
+            return self._add_my_drug(payload, token)
         return 404, {"error": "not found"}
+
+    def handle_delete(self, path: str, token: Optional[str] = None) -> Tuple[int, dict]:
+        user = self._current_user(token)
+        if user is None:
+            return 401, {"error": "請先登入"}
+
+        # 刪除一律連 user_id 一起帶進查詢(見 db.py 的約定)——
+        # 只用 id 的話,換個號碼就能刪別人的資料。
+        if path.startswith("/api/my-drugs/"):
+            drug_id = self._path_id(path)
+            if drug_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            ok = self.store.delete_drug(user.id, drug_id)
+            return (200, {"ok": True}) if ok else (404, {"error": "找不到這筆資料"})
+
+        if path.startswith("/api/health-checks/"):
+            check_id = self._path_id(path)
+            if check_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            ok = self.store.delete_health_check(user.id, check_id)
+            return (200, {"ok": True}) if ok else (404, {"error": "找不到這筆資料"})
+
+        return 404, {"error": "not found"}
+
+    @staticmethod
+    def _path_id(path: str) -> Optional[int]:
+        try:
+            return int(path.rstrip("/").rsplit("/", 1)[-1])
+        except ValueError:
+            return None
+
+    # --- 帳號 ---
+
+    def _auth_post(self, path, payload, client, token) -> Tuple[int, dict]:
+        if self.auth is None:
+            return 503, {"error": "本站目前未啟用帳號功能"}
+
+        if path == "/api/auth/logout":
+            self.auth.logout(token)
+            return 200, {"loggedIn": False, CLEAR_SESSION_KEY: True}
+
+        # 註冊/登入/訪客建立都會消耗資源(雜湊運算或資料庫寫入),
+        # 而且都是可以被自動化重複嘗試的入口,一律先過節流。
+        if self._over_login_limit(client):
+            return 429, {"error": "嘗試次數過多,請稍後再試"}
+
+        try:
+            if path == "/api/auth/register":
+                result = self.auth.register(payload.get("username"), payload.get("password"))
+            elif path == "/api/auth/login":
+                result = self.auth.login(payload.get("username"), payload.get("password"))
+            elif path == "/api/auth/guest":
+                result = self.auth.guest_login()
+            elif path == "/api/auth/claim":
+                result = self.auth.claim(
+                    token, payload.get("username"), payload.get("password")
+                )
+            else:
+                return 404, {"error": "not found"}
+        except AuthError as e:
+            return self._auth_error_status(e), {"error": str(e)}
+
+        return 200, {
+            **self._user_payload(result.user),
+            SET_SESSION_KEY: result.token,
+        }
+
+    # --- 健檢紀錄 ---
+
+    def _list_health_checks(self, token) -> Tuple[int, dict]:
+        user = self._current_user(token)
+        if user is None:
+            return 401, {"error": "請先登入"}
+
+        records = []
+        for row in self.store.list_health_checks(user.id):
+            # 級距是即時算的,不是存起來的 —— core/grading.py 是唯一
+            # 算級距的地方(單一事實來源)。代價是常模改版後舊紀錄顯示的
+            # 級距會跟著變,那是刻意的取捨:寧可跟現行標準一致,
+            # 也不要留下一份無法追溯是用哪版規則算出來的數字。
+            report = validate(row["values"])
+            graded = grade_all(report.cleaned, metrics_index()) if report.ok else {}
+            records.append({
+                "id": row["id"],
+                "createdAt": row["created_at"].isoformat(),
+                "values": row["values"],
+                "grades": {k: g.grade for k, g in graded.items()},
+                "weakCount": sum(1 for k, g in graded.items() if is_weak(k, g)),
+            })
+        return 200, {"records": records}
+
+    def _save_health_check(self, payload, token) -> Tuple[int, dict]:
+        user = self._current_user(token)
+        if user is None:
+            return 401, {"error": "請先登入"}
+
+        # 存進去之前先驗證。壞掉的資料存進資料庫後,每次讀取歷史紀錄
+        # 都會再壞一次,而且使用者不會知道是哪一筆有問題。
+        report = validate(payload.get("values") or {})
+        if not report.ok:
+            return 400, {
+                "errors": [{"key": e.key, "message": e.message} for e in report.errors],
+            }
+        if not report.cleaned:
+            return 400, {"error": "請至少填入一項指標"}
+
+        check_id = self.store.add_health_check(user.id, report.cleaned)
+        return 200, {"id": check_id}
+
+    # --- 藥品庫 ---
+
+    def _list_my_drugs(self, token) -> Tuple[int, dict]:
+        user = self._current_user(token)
+        if user is None:
+            return 401, {"error": "請先登入"}
+        return 200, {"drugs": [self._drug_payload(d) for d in self.store.list_drugs(user.id)]}
+
+    @staticmethod
+    def _drug_payload(row) -> dict:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "dosageNote": row["dosage_note"],
+            "withdrawalDays": row["withdrawal_days"],
+        }
+
+    def _add_my_drug(self, payload, token) -> Tuple[int, dict]:
+        user = self._current_user(token)
+        if user is None:
+            return 401, {"error": "請先登入"}
+
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return 400, {"error": "請填寫藥品名稱"}
+
+        if len(self.store.list_drugs(user.id)) >= config.MAX_MY_DRUGS:
+            return 400, {"error": f"藥品庫最多 {config.MAX_MY_DRUGS} 筆,請先移除不用的"}
+
+        note = payload.get("dosageNote")
+        note = note.strip()[:config.MAX_DRUG_NOTE_CHARS] if isinstance(note, str) else ""
+
+        days = payload.get("withdrawalDays")
+        if not isinstance(days, (int, float)) or isinstance(days, bool) or days < 0:
+            days = None
+
+        drug_id = self.store.add_drug(
+            user.id, name.strip()[:config.MAX_DRUG_NAME_CHARS], note,
+            int(days) if days is not None else None,
+        )
+        return 200, {"id": drug_id}
 
     def _grade(self, payload: dict) -> Tuple[int, dict]:
         """生產健檢。純計算,不呼叫 AI —— 額度用盡時這裡照常運作。"""
@@ -265,7 +499,27 @@ class Application:
             "medicalDisclaimer": medical_disclaimer(),
         }
 
-    def consult_events(self, payload: dict, client: str):
+    def _drugs_for_consult(self, payload: dict, token):
+        """疾病諮詢要參考的藥品庫。
+
+        已登入時一律以資料庫為準,忽略請求裡的 myDrugs —— 那個欄位是
+        給未登入使用者用的(他們的藥品庫存在自己的瀏覽器)。已登入還信任
+        它的話,等於任何人都能在請求裡塞一組假的劑量進去,而畫面上會
+        顯示成「你自己藥品庫的資料」,這正是劑量查表化要防的事。
+        """
+        user = self._current_user(token)
+        if user is None:
+            return payload.get("myDrugs")
+        return [
+            {
+                "name": d["name"],
+                "dosageNote": d["dosage_note"],
+                "withdrawalDays": d["withdrawal_days"],
+            }
+            for d in self.store.list_drugs(user.id)
+        ]
+
+    def consult_events(self, payload: dict, client: str, token: Optional[str] = None):
         """疾病諮詢,逐段產出事件供串流。
 
         通報須知與升級判斷是計算出來的,在呼叫 AI 之前就先送出 ——
@@ -285,7 +539,7 @@ class Application:
                 payload.get("question", ""),
                 weaknesses=weaknesses,
                 history=payload.get("history"),
-                my_drugs=payload.get("myDrugs"),
+                my_drugs=self._drugs_for_consult(payload, token),
             )
         except ValueError as e:
             yield {"type": "error", "status": 400, "error": str(e)}
@@ -352,7 +606,7 @@ class Application:
 
         yield {"type": "done"}
 
-    def _consult(self, payload: dict, client: str) -> Tuple[int, dict]:
+    def _consult(self, payload: dict, client: str, token=None) -> Tuple[int, dict]:
         """把串流事件收攏成單一回應。
 
         供測試與不支援串流的呼叫端使用。與串流路徑共用同一份邏輯,
@@ -362,7 +616,7 @@ class Application:
         answer = []
         error: Optional[dict] = None
 
-        for event in self.consult_events(payload, client):
+        for event in self.consult_events(payload, client, token):
             kind = event.pop("type")
             if kind == "meta":
                 meta = event
@@ -436,26 +690,69 @@ class Application:
 
 # --- HTTP 傳輸 ---
 
-APP = Application(transport=select_transport())
+APP = Application(transport=select_transport(), store=select_store())
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
+    def _session_token(self) -> Optional[str]:
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return None
+        try:
+            jar = SimpleCookie()
+            jar.load(raw)
+        except Exception:
+            # 壞掉的 cookie 標頭視為未登入,不要讓整個請求爆掉
+            return None
+        morsel = jar.get(config.SESSION_COOKIE_NAME)
+        return morsel.value if morsel else None
+
+    @staticmethod
+    def _session_cookie(token: str, max_age: int) -> str:
+        # HttpOnly:JavaScript 讀不到,萬一有 XSS 也偷不走 session。
+        # SameSite=Lax:別的網站送來的跨站請求不會帶上這張 cookie(CSRF)。
+        # Secure:只走 HTTPS。本機開發是 http://localhost,瀏覽器對
+        #   localhost 有豁免,所以兩邊都能運作,不必分環境設定。
+        return (
+            f"{config.SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; "
+            f"SameSite=Lax; Secure; Max-Age={max_age}"
+        )
+
     def _send(self, status: int, payload: dict) -> None:
+        # Application 用這兩個鍵告訴 Handler 要不要動 cookie。
+        # 一定要 pop 掉再序列化 —— session token 本身絕不能出現在
+        # 回應內容裡,那等於繞過 HttpOnly 把它交給 JavaScript。
+        set_token = payload.pop(SET_SESSION_KEY, None)
+        clear = payload.pop(CLEAR_SESSION_KEY, False)
+
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if set_token:
+            self.send_header(
+                "Set-Cookie",
+                self._session_cookie(set_token, config.SESSION_TTL_DAYS * 86400),
+            )
+        elif clear:
+            self.send_header("Set-Cookie", self._session_cookie("", 0))
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
         if self.path.startswith("/api/"):
-            self._send(*APP.handle_get(self.path))
+            self._send(*APP.handle_get(self.path, self._session_token()))
             return
         super().do_GET()
+
+    def do_DELETE(self):
+        if self.path.startswith("/api/"):
+            self._send(*APP.handle_delete(self.path, self._session_token()))
+            return
+        self.send_error(405)
 
     def _send_event(self, payload: dict) -> None:
         line = "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
@@ -477,13 +774,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         raw = self.rfile.read(length) if length else b"{}"
         client = client_ip(self.headers, self.client_address[0])
+        token = self._session_token()
 
         if self.path == "/api/consult":
-            self._stream_consult(raw, client)
+            self._stream_consult(raw, client, token)
             return
-        self._send(*APP.handle_post(self.path, raw, client))
+        self._send(*APP.handle_post(self.path, raw, client, token))
 
-    def _stream_consult(self, raw: bytes, client: str) -> None:
+    def _stream_consult(self, raw: bytes, client: str, token=None) -> None:
         """串流疾病諮詢,讓首段文字盡早出現(規格第 7 節:3 秒內)。"""
         try:
             payload = json.loads(raw.decode("utf-8"))
@@ -498,7 +796,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
         try:
-            for event in APP.consult_events(payload, client):
+            for event in APP.consult_events(payload, client, token):
                 self._send_event(event)
         except (BrokenPipeError, ConnectionAbortedError):
             pass  # 瀏覽器中途離開
