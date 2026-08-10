@@ -437,9 +437,10 @@ function clearScanMarks() {
 }
 
 async function scanDrugLabel(file) {
-  const btn = $("scanLabelBtn");
-  // 辨識一次要十幾秒,不鎖住按鈕使用者會連點,每一下都在花錢
-  btn.disabled = true;
+  // 辨識一次要十幾秒,不鎖住按鈕使用者會連點,每一下都在花錢。
+  // 兩個入口都要鎖 —— 只鎖被按的那顆,從另一顆一樣點得下去。
+  const buttons = [$("scanLabelBtn"), $("pickLabelBtn")].filter(Boolean);
+  buttons.forEach((b) => { b.disabled = true; });
   setScanHint("辨識中,請稍候…");
 
   try {
@@ -470,9 +471,9 @@ async function scanDrugLabel(file) {
     );
     $("drugName").focus();
   } catch {
-    setScanHint("讀不到這張照片,請再拍一次", "warn");
+    setScanHint("讀不到這個檔案,請換一張照片試試", "warn");
   } finally {
-    btn.disabled = false;
+    buttons.forEach((b) => { b.disabled = false; });
   }
 }
 
@@ -504,19 +505,26 @@ if (drugListEl && addDrugBtnEl) {
   });
 }
 
-const scanBtnEl = $("scanLabelBtn");
-const scanInputEl = $("scanLabelInput");
-if (scanBtnEl && scanInputEl) {
-  scanBtnEl.addEventListener("click", () => scanInputEl.click());
-  scanInputEl.addEventListener("change", () => {
-    const file = scanInputEl.files?.[0];
-    // 每次都清空,否則連續拍同一個檔名不會觸發 change,使用者以為壞了
-    scanInputEl.value = "";
+// 拍照與相簿兩個入口,收到檔案之後的處理完全一樣。
+function wireScanInput(buttonId, inputId) {
+  const btn = $(buttonId);
+  const input = $(inputId);
+  if (!btn || !input) return;
+
+  btn.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => {
+    const file = input.files?.[0];
+    // 每次都清空,否則連續選同一個檔案不會觸發 change,使用者以為壞了
+    input.value = "";
     if (file) scanDrugLabel(file);
   });
-  // 使用者自己動過休藥期就不再是「未經確認」,標記要跟著消失
-  $("drugWithdrawal")?.addEventListener("input", clearScanMarks);
 }
+
+wireScanInput("scanLabelBtn", "scanLabelInput");
+wireScanInput("pickLabelBtn", "pickLabelInput");
+
+// 使用者自己動過休藥期就不再是「未經確認」,標記要跟著消失
+$("drugWithdrawal")?.addEventListener("input", clearScanMarks);
 
 // ── 健檢歷史紀錄 ──
 async function reloadHistory() {

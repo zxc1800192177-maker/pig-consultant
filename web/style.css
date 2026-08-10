@@ -455,7 +455,8 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .drug-remove:hover { color: var(--critical); }
 .drug-empty { font-size: 13.5px; color: var(--ink-faint); padding: 4px 0 14px; }
 /* 拍照辨識 */
-.scan-row { margin-bottom: 10px; }
+/* 手機直式螢幕放不下兩顆並排時要能換行,不可以把第二個入口擠出畫面 */
+.scan-row { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-bottom: 10px; }
 .scan-hint { margin: 0 0 10px; }
 .scan-hint-warn { color: var(--warn); font-weight: 500; }
 

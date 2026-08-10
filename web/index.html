@@ -129,9 +129,15 @@
       </div>
       <ul class="drug-list" id="drugList"></ul>
       <div class="scan-row">
-        <button type="button" class="btn-ghost" id="scanLabelBtn">📷 拍照辨識藥品標示</button>
-        <!-- capture="environment" 讓手機直接開後鏡頭,不用先進相簿 -->
+        <button type="button" class="btn-ghost" id="scanLabelBtn">📷 拍照辨識</button>
+        <button type="button" class="btn-ghost" id="pickLabelBtn">🖼️ 從相簿選擇</button>
+        <!-- 兩個 input 而不是一個動態切換 capture:capture 是瀏覽器在
+             click 當下讀取的,用 JS 增刪屬性在部分手機瀏覽器上不可靠,
+             而多一個隱藏的 input 沒有任何代價。
+             有 capture 的直接開後鏡頭(站在藥架前用);沒有 capture 的
+             開系統相簿(藥已經拍過了,或標示要拿近一點慢慢對焦時用)。 -->
         <input type="file" id="scanLabelInput" accept="image/*" capture="environment" hidden>
+        <input type="file" id="pickLabelInput" accept="image/*" hidden>
       </div>
       <p class="hint scan-hint" id="scanHint" hidden></p>
       <div class="drug-form">

@@ -626,7 +626,8 @@ class Application:
         if not draft.get("name"):
             return 422, {
                 "reason": "unreadable",
-                "error": "讀不出藥品資料,請靠近一點、對準標示文字再拍一次",
+                # 措辭要同時適用兩個入口(現拍、從相簿選),不能只講「重拍」
+                "error": "讀不出藥品資料,請換一張對準標示文字、拍得清楚一點的照片",
             }
 
         return 200, {"draft": draft}

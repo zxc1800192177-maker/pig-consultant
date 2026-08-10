@@ -1267,6 +1267,43 @@ def _label_app(chunks=None, error=None):
     )
 
 
+class TestScanEntryPoints:
+    """兩個入口:相機一鍵直開,相簿另一顆。
+
+    差別只在 capture 屬性,而那個屬性是瀏覽器在 click 當下讀的 ——
+    所以是兩個各自固定的 input,不是一個用 JS 切換屬性的 input。
+    這裡鎖住這個區分,避免日後有人「順手合併成一個」而讓相簿入口
+    悄悄變成又開相機。
+    """
+
+    @staticmethod
+    def _tag(html, element_id):
+        match = re.search(r'<input[^>]*id="%s"[^>]*>' % element_id, html)
+        assert match, f"找不到 #{element_id}"
+        return match.group(0)
+
+    def test_camera_input_opens_the_camera(self):
+        html = (WEB_DIR / "index.html").read_text("utf-8")
+        assert 'capture="environment"' in self._tag(html, "scanLabelInput")
+
+    def test_gallery_input_does_not_force_the_camera(self):
+        """有 capture 的話手機會直接開相機,使用者永遠選不到既有照片 ——
+        這正是這個入口要解決的問題。
+        """
+        html = (WEB_DIR / "index.html").read_text("utf-8")
+        assert "capture" not in self._tag(html, "pickLabelInput")
+
+    def test_both_accept_images_only(self):
+        html = (WEB_DIR / "index.html").read_text("utf-8")
+        for element_id in ("scanLabelInput", "pickLabelInput"):
+            assert 'accept="image/*"' in self._tag(html, element_id)
+
+    def test_both_buttons_are_wired(self):
+        js = (WEB_DIR / "app.js").read_text("utf-8")
+        assert 'wireScanInput("scanLabelBtn", "scanLabelInput")' in js
+        assert 'wireScanInput("pickLabelBtn", "pickLabelInput")' in js
+
+
 class TestDrugLabelDoesNotWrite:
     """**這一組是整個功能最重要的測試。**
 
