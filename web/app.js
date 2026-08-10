@@ -557,7 +557,7 @@ function renderHistory(records) {
           <div class="history-summary">${escapeHtml(summarizeRecord(r))}</div>
         </div>
         <div class="history-actions">
-          <button type="button" class="btn-ghost" data-history-load="${escapeHtml(r.id)}">
+          <button type="button" class="btn-soft btn-sm" data-history-load="${escapeHtml(r.id)}">
             載入
           </button>
           <button type="button" class="drug-remove" data-history-delete="${escapeHtml(r.id)}">
@@ -829,7 +829,7 @@ function renderHealthResult(data) {
 
   // 存檔按鈕只在登入時出現 —— 未登入時按了也沒地方存,不如不要顯示
   const saveButton = account.loggedIn
-    ? `<button class="btn-ghost" id="saveHealthCheck">存入歷史紀錄</button>`
+    ? `<button class="btn-soft" id="saveHealthCheck">存入歷史紀錄</button>`
     : "";
 
   $("healthResult").innerHTML = `

@@ -72,7 +72,7 @@
 
       <div class="gate-divider-row"><span>或</span></div>
 
-      <button class="btn-ghost gate-guest-btn" data-auth-open="guest">
+      <button class="btn-soft gate-guest-btn" data-auth-open="guest">
         訪客試用(免帳號密碼)
       </button>
 
@@ -129,8 +129,8 @@
       </div>
       <ul class="drug-list" id="drugList"></ul>
       <div class="scan-row">
-        <button type="button" class="btn-ghost" id="scanLabelBtn">📷 拍照辨識</button>
-        <button type="button" class="btn-ghost" id="pickLabelBtn">🖼️ 從相簿選擇</button>
+        <button type="button" class="btn-soft" id="scanLabelBtn">📷 拍照辨識</button>
+        <button type="button" class="btn-soft" id="pickLabelBtn">🖼️ 從相簿選擇</button>
         <!-- 兩個 input 而不是一個動態切換 capture:capture 是瀏覽器在
              click 當下讀取的,用 JS 增刪屬性在部分手機瀏覽器上不可靠,
              而多一個隱藏的 input 沒有任何代價。
@@ -145,7 +145,7 @@
         <input type="text" id="drugIngredient" placeholder="有效成分(選填),例如:Amoxicillin trihydrate 10%">
         <input type="text" id="drugNote" placeholder="劑量說明(選填),例如:每公斤體重 10mg,一天兩次">
         <input type="number" id="drugWithdrawal" placeholder="休藥期天數(選填)" min="0" step="1">
-        <button type="button" class="btn-ghost" id="addDrugBtn">+ 新增藥品</button>
+        <button type="button" class="btn-soft" id="addDrugBtn">+ 新增藥品</button>
       </div>
     </div>
 
@@ -165,7 +165,7 @@
           <h2>輸入本場生產數字</h2>
           <p class="hint">只填知道的項目即可,沒填的不會評級。</p>
         </div>
-        <button class="btn-ghost" id="loadExample">載入範例資料</button>
+        <button class="btn-soft" id="loadExample">載入範例資料</button>
       </div>
       <div id="metricFields" class="fields"></div>
 
@@ -179,7 +179,7 @@
         <div class="drug-form">
           <input type="text" id="factorName" placeholder="項目名稱,例如:豬舍類型">
           <input type="text" id="factorValue" placeholder="說明(選填),例如:開放式豬舍,夏季悶熱">
-          <button type="button" class="btn-ghost" id="addFactorBtn">+ 新增因素</button>
+          <button type="button" class="btn-soft" id="addFactorBtn">+ 新增因素</button>
         </div>
       </div>
 
