@@ -108,8 +108,16 @@ function applyLoginGate() {
 function renderAuthBar() {
   const bar = $("authBar");
   if (!bar) return;
+
+  // 用 .is-hidden 而不是 bar.hidden —— .authbar 這個 class 自己就設了
+  // display: flex,跟 [hidden] 內建的 display: none 特異度相同,作者
+  // 的規則會贏,結果是設了 hidden 屬性卻沒有真的隱藏,舊內容(例如登出
+  // 前的使用者名稱)留在畫面上。.is-hidden 帶 !important,才真的擋得住。
+  const hide = () => bar.classList.add("is-hidden");
+  const show = () => bar.classList.remove("is-hidden");
+
   if (!accountsAvailable) {
-    bar.hidden = true;
+    hide();
     return;
   }
 
@@ -119,22 +127,22 @@ function renderAuthBar() {
     // 徒增選擇。只有在「帳號選填」模式(loginRequired=false)才需要
     // 頂部這排連結當作進入帳號功能的唯一入口。
     if (loginRequired) {
-      bar.hidden = true;
+      hide();
       return;
     }
-    bar.hidden = false;
+    show();
     bar.innerHTML = `
       <button class="btn-ghost" data-auth-open="guest">訪客試用</button>
       <button class="btn-ghost" data-auth-open="register">註冊</button>
       <button class="btn-ghost" data-auth-open="login">登入</button>`;
   } else if (account.isGuest) {
-    bar.hidden = false;
+    show();
     bar.innerHTML = `
       <span class="authbar-who">訪客</span>
       <button class="btn-ghost" data-auth-open="claim">設定帳號密碼</button>
       <button class="btn-ghost" data-auth-action="logout">登出</button>`;
   } else {
-    bar.hidden = false;
+    show();
     bar.innerHTML = `
       <span class="authbar-who">${escapeHtml(account.username)}</span>
       <button class="btn-ghost" data-auth-action="logout">登出</button>`;

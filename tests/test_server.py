@@ -556,6 +556,49 @@ class TestExampleEndpoint:
         assert body["grades"]["weaning_age"]["grade"] == "F"
 
 
+class TestAuthBarVisibilityBug:
+    """實際回報過的 bug:登出後右上角的使用者名稱沒有消失。
+
+    根因是 .authbar 這個 class 設了 display: flex,跟 [hidden] 屬性
+    預設的 display: none 特異度相同 —— 作者的規則會贏。用
+    `bar.hidden = true` 設定隱藏屬性,DOM 上的屬性有加上去,但畫面上
+    毫無效果,舊的 innerHTML(登出前的使用者名稱)留在原地。
+
+    修法是跟其餘所有隱藏邏輯一樣改用 .is-hidden(帶 !important,才真的
+    蓋得過 display: flex)。這裡鎖住修法本身,不讓它被無意中改回去。
+    """
+
+    def test_authbar_code_uses_is_hidden_not_hidden_property(self):
+        js = (WEB_DIR / "app.js").read_text("utf-8")
+        section = js.split("function renderAuthBar()")[1].split("\nfunction ")[0]
+        # 找的是「賦值」(bar.hidden = ...),不是任何提到這個字的地方 ——
+        # 函式裡的說明註解本身就會提到 bar.hidden 這個寫法(解釋不要用它)。
+        assert not re.search(r"bar\.hidden\s*=", section), (
+            "authBar 改回用 .hidden 屬性設定可見度 —— .authbar 的 "
+            "display: flex 特異度跟 [hidden] 相同,作者規則會贏,"
+            "畫面不會真的隱藏(這正是登出後使用者名稱不消失的成因)"
+        )
+
+    def test_authbar_initial_html_state_uses_is_hidden(self):
+        html = (WEB_DIR / "index.html").read_text("utf-8")
+        tag = re.search(r'<div[^>]*id="authBar"[^>]*>', html)
+        assert tag, "找不到 #authBar"
+        assert "is-hidden" in tag.group(0), (
+            "#authBar 初始狀態應該用 is-hidden class,不是 hidden 屬性"
+        )
+        assert " hidden" not in tag.group(0), (
+            "#authBar 不該用 hidden 屬性 —— .authbar 的 display:flex 會蓋掉它"
+        )
+
+    def test_authbar_css_still_conflicts_with_hidden_attribute(self):
+        """如果這條測試哪天失敗(代表 .authbar 不再設固定 display 了),
+        以上兩條測試就可以拿掉 —— 但那之前,前兩條測試存在的理由都還在。
+        """
+        css = (WEB_DIR / "style.css").read_text("utf-8")
+        rule = css.split(".authbar {")[1].split("}")[0]
+        assert "display:" in rule.replace(" ", "")
+
+
 class TestPwaAssets:
     """manifest / service worker 的檔案沒有動態產生,不會被一般測試碰到,
     改版時很容易漏改而沒人發現(圖示改名、家目錄挪動)。這裡鎖住兩件事:
