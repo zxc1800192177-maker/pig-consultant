@@ -189,8 +189,12 @@ class Consultant:
         if not weaknesses:
             return iter(())
 
+        # 背景先講,指令後講 —— 跟 consult() 的組法一致。
+        # 曾經反過來(弱項與「請給改善建議」在前、參考因素在後),模型會
+        # 把參考因素當成講完才補的附註,建議照樣是通用答案,牧場填的
+        # 豬舍型式、飼養規模完全沒有反映在內容裡。
         cleaned_factors = self._clean_factors(reference_factors)
-        parts = [build_advice_prompt(weaknesses), build_reference_factors(cleaned_factors)]
+        parts = [build_reference_factors(cleaned_factors), build_advice_prompt(weaknesses)]
 
         if question is not None or history is not None:
             # 型別檢查跟 consult() 同一個理由:非字串呼叫 .strip() 會拋

@@ -242,6 +242,32 @@ class TestReferenceFactorsReachTheModel:
         ]))
         assert "字" * (config.MAX_FACTOR_CHARS + 1) not in transport.last_prompt
 
+    def test_factors_come_before_the_instruction(self):
+        """實際踩過的 bug:參考因素被接在「請針對這些項目給出改善建議」
+        之後,模型當成講完才補的附註,建議內容完全沒反映牧場實際條件
+        (使用者回報「AI 還是沒有跟健檢數字一起分析」)。
+
+        背景一律要排在指令前面 —— consult() 就是這樣組的。
+        """
+        transport = FakeTransport(chunks=["建議"])
+        c = Consultant(transport=transport)
+        list(c.advise(self.WEAK, reference_factors=[
+            {"name": "豬舍類型", "value": "開放式豬舍"},
+        ]))
+        prompt = transport.last_prompt
+        assert prompt.index("豬舍類型") < prompt.index("請針對這些項目給出改善建議")
+
+    def test_tells_the_model_to_actually_use_them(self):
+        """只是「附上」不夠 —— 要明講建議必須貼著這些條件寫,
+        否則模型傾向回一份換到別場也通用的答案。
+        """
+        transport = FakeTransport(chunks=["建議"])
+        c = Consultant(transport=transport)
+        list(c.advise(self.WEAK, reference_factors=[
+            {"name": "豬舍類型", "value": "開放式豬舍"},
+        ]))
+        assert "納入考量" in transport.last_prompt
+
     def test_over_limit_count_is_truncated(self):
         import config
         transport = FakeTransport(chunks=["建議"])
