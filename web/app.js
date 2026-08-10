@@ -52,10 +52,10 @@ function rememberTurn(role, content) {
 
 // ── 帳號 ──
 //
-// 帳號是選填的加值,不是使用門檻:未登入照樣能問診、能健檢,藥品庫
-// 存在自己的瀏覽器。登入(含訪客)之後才改由伺服器保存,可跨裝置。
-// 站方沒設定資料庫時(accountsAvailable=false),整個帳號介面不出現 ——
-// 不是出現了按下去才報錯。
+// 兩項核心功能需要先登入(含訪客)才能用,真正的限制在後端(server.py
+// 的 _gate),這裡的門檻只是介面。登入後藥品庫改由伺服器保存,可跨裝置;
+// 站方沒設定資料庫時(accountsAvailable=false)整個帳號介面不出現 ——
+// 不是出現了按下去才報錯,登入要求也會自動失效(見 loginRequired)。
 let account = { loggedIn: false, username: null, isGuest: false };
 let accountsAvailable = false;
 let loginRequired = false;
@@ -79,8 +79,19 @@ function applyLoginGate() {
   if (!gate) return;
 
   const blocked = loginRequired && !account.loggedIn;
+  const wasHidden = gate.classList.contains("is-hidden");
   gate.classList.toggle("is-hidden", !blocked);
   document.querySelector(".tabs")?.classList.toggle("is-hidden", blocked);
+
+  // 每次重新出現都回到「登入」模式,不要停在使用者上次離開時的模式
+  // (例如剛註冊完、登出後回來,下一個直覺動作是登入,不是再註冊一次)
+  if (blocked && wasHidden && $("gateSubmit")) {
+    gateMode = "login";
+    $("gateUsername").value = "";
+    $("gatePassword").value = "";
+    $("gateError").hidden = true;
+    renderGateForm();
+  }
 
   document.querySelectorAll(".panel").forEach((panel) => {
     if (blocked) {
@@ -101,19 +112,29 @@ function renderAuthBar() {
     bar.hidden = true;
     return;
   }
-  bar.hidden = false;
 
   if (!account.loggedIn) {
+    // 未登入且功能被擋住時,登入引導(#loginGate)已經把帳密輸入框
+    // 直接顯示在畫面正中央了 —— 頂部再放一排一樣的連結只是重複,
+    // 徒增選擇。只有在「帳號選填」模式(loginRequired=false)才需要
+    // 頂部這排連結當作進入帳號功能的唯一入口。
+    if (loginRequired) {
+      bar.hidden = true;
+      return;
+    }
+    bar.hidden = false;
     bar.innerHTML = `
       <button class="btn-ghost" data-auth-open="guest">訪客試用</button>
       <button class="btn-ghost" data-auth-open="register">註冊</button>
       <button class="btn-ghost" data-auth-open="login">登入</button>`;
   } else if (account.isGuest) {
+    bar.hidden = false;
     bar.innerHTML = `
       <span class="authbar-who">訪客</span>
       <button class="btn-ghost" data-auth-open="claim">設定帳號密碼</button>
       <button class="btn-ghost" data-auth-action="logout">登出</button>`;
   } else {
+    bar.hidden = false;
     bar.innerHTML = `
       <span class="authbar-who">${escapeHtml(account.username)}</span>
       <button class="btn-ghost" data-auth-action="logout">登出</button>`;
@@ -165,6 +186,13 @@ function showAuthError(message) {
   $("authError").hidden = false;
 }
 
+// 共用的送出邏輯:登入引導(#loginGate)與頂部狀態列的表單(#authPanel)
+// 都呼叫這個,不必各自實作一份請求與錯誤處理。
+async function performAuth(endpoint, username, password) {
+  const { ok, data } = await api(endpoint, postJson({ username, password }));
+  return { ok, error: data.error };
+}
+
 async function submitAuthForm() {
   const mode = $("authPanel").dataset.mode;
   const spec = AUTH_MODES[mode];
@@ -172,18 +200,54 @@ async function submitAuthForm() {
 
   $("authSubmit").disabled = true;
   try {
-    const { ok, data } = await api(spec.endpoint, postJson({
-      username: $("authUsername").value,
-      password: $("authPassword").value,
-    }));
-    if (!ok) {
-      showAuthError(data.error || "操作失敗,請稍後再試");
-      return;
-    }
+    const { ok, error } = await performAuth(
+      spec.endpoint, $("authUsername").value, $("authPassword").value
+    );
+    if (!ok) return showAuthError(error || "操作失敗,請稍後再試");
     closeAuthPanel();
     await refreshAccount();
   } finally {
     $("authSubmit").disabled = false;
+  }
+}
+
+// ── 登入引導的表單(直接顯示在初始畫面,不必先點一下才展開) ──
+let gateMode = "login";
+
+function renderGateForm() {
+  const spec = AUTH_MODES[gateMode];
+  $("gateSubmit").textContent = spec.submit;
+  $("gatePassword").setAttribute("autocomplete", spec.autocomplete);
+  $("gateToggleLabel").textContent = gateMode === "login" ? "還沒有帳號?" : "已經有帳號了?";
+  $("gateModeToggle").textContent = gateMode === "login" ? "註冊一個" : "改成登入";
+  $("gateHint").textContent = spec.hint;
+  $("gateHint").hidden = !spec.hint;
+}
+
+function toggleGateMode() {
+  gateMode = gateMode === "login" ? "register" : "login";
+  $("gateError").hidden = true;
+  renderGateForm();
+}
+
+async function submitGateForm() {
+  const spec = AUTH_MODES[gateMode];
+  $("gateSubmit").disabled = true;
+  $("gateError").hidden = true;
+  try {
+    const { ok, error } = await performAuth(
+      spec.endpoint, $("gateUsername").value, $("gatePassword").value
+    );
+    if (!ok) {
+      $("gateError").textContent = error || "操作失敗,請稍後再試";
+      $("gateError").hidden = false;
+      return;
+    }
+    $("gateUsername").value = "";
+    $("gatePassword").value = "";
+    await refreshAccount();
+  } finally {
+    $("gateSubmit").disabled = false;
   }
 }
 
@@ -218,6 +282,20 @@ $("authClose")?.addEventListener("click", closeAuthPanel);
 $("authPassword")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") submitAuthForm();
 });
+
+if ($("gateSubmit")) {
+  renderGateForm();
+  $("gateSubmit").addEventListener("click", submitGateForm);
+  $("gateModeToggle").addEventListener("click", toggleGateMode);
+  // 帳號欄按 Enter 直接跳到密碼欄,密碼欄按 Enter 直接送出 ——
+  // 不用這兩個欄位都逼使用者伸手點按鈕。
+  $("gateUsername").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("gatePassword").focus(); }
+  });
+  $("gatePassword").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitGateForm();
+  });
+}
 
 // 訪客提醒。這段話必須主動講:資料確實存在伺服器,但只有這台瀏覽器的
 // cookie 能取回 —— 使用者不會自己想到「清瀏覽器資料 = 永久失去」。

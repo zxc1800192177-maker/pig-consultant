@@ -345,18 +345,48 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .gate-body h2 {
   font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 8px;
 }
-.gate-body .hint { max-width: 40ch; margin-inline: auto; }
-.gate-actions { margin: 22px 0 18px; }
-.gate-actions .btn-primary { max-width: 320px; margin-inline: auto; }
-.gate-secondary {
-  display: flex; align-items: center; justify-content: center;
-  gap: 6px; margin-top: 12px; flex-wrap: wrap;
+.gate-body > .hint { max-width: 40ch; margin-inline: auto; }
+
+/* 帳號密碼輸入框直接顯示,不用再點一下才展開 */
+.gate-form {
+  display: grid; gap: 8px; max-width: 320px;
+  margin: 20px auto 0; text-align: left;
 }
-.gate-divider { color: var(--ink-faint); font-size: 13px; }
+.gate-form input {
+  width: 100%; padding: 13px 15px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  font-size: 16px; font-family: inherit; letter-spacing: -0.01em; outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.gate-form input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.gate-form #gateError { color: var(--critical); text-align: center; margin: 2px 0 0; }
+.gate-toggle {
+  text-align: center; margin: 4px 0 0 !important; max-width: none !important;
+}
+.gate-toggle .btn-ghost { font-weight: 600; padding: 0 0 0 2px; }
+
+.gate-divider-row {
+  display: flex; align-items: center; gap: 12px;
+  max-width: 320px; margin: 18px auto; color: var(--ink-faint); font-size: 13px;
+}
+.gate-divider-row::before, .gate-divider-row::after {
+  content: ""; flex: 1; height: 1px; background: var(--border-light);
+}
+
+.gate-guest-btn {
+  display: block; width: 100%; max-width: 320px; margin: 0 auto;
+  padding: 13px; border-radius: 999px; border: 1px solid var(--border);
+  font-size: 15px; font-weight: 500;
+}
+.gate-guest-btn:hover { background: var(--surface-2); }
+
 /* 訪客的取捨要講在前面,不是等使用者踩到才知道 */
 .gate-note {
-  border-top: 1px solid var(--border-light); padding-top: 14px;
-  font-size: 12.5px; max-width: 44ch;
+  border-top: 1px solid var(--border-light); padding-top: 14px; margin-top: 22px;
+  font-size: 12.5px; max-width: 44ch; margin-inline: auto;
 }
 
 /* ── 歷史紀錄 ── */

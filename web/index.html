@@ -47,23 +47,35 @@
   <div id="banner" role="status"></div>
 
   <!-- 未登入時取代功能畫面顯示。可用性由 JS 依 /api/health 的
-       loginRequired 決定,後端另有真正的限制(server.py 的 _gate)。 -->
+       loginRequired 決定,後端另有真正的限制(server.py 的 _gate)。
+       帳號密碼輸入框直接顯示在這裡,不必再點一下才看得到。 -->
   <div class="card is-hidden" id="loginGate">
     <div class="gate-body">
       <img class="pig-empty" src="pig-sleeping.png" alt="">
       <h2>先選一個身分,就可以開始用</h2>
-      <p class="hint">
-        健檢紀錄與藥品庫會存在你的身分下,下次回來還在。
-        不想設帳號密碼的話,「訪客試用」點一下就能進去。
-      </p>
-      <div class="gate-actions">
-        <button class="btn-primary" data-auth-open="guest">訪客試用(免帳號密碼)</button>
-        <div class="gate-secondary">
-          <button class="btn-ghost" data-auth-open="register">註冊帳號</button>
-          <span class="gate-divider">・</span>
-          <button class="btn-ghost" data-auth-open="login">我已經有帳號了</button>
-        </div>
+      <p class="hint">健檢紀錄與藥品庫會存在你的身分下,下次回來還在。</p>
+
+      <div class="gate-form">
+        <input type="text" id="gateUsername" autocomplete="username"
+               autocapitalize="off" autocorrect="off" spellcheck="false"
+               placeholder="使用者名稱">
+        <input type="password" id="gatePassword" autocomplete="current-password"
+               placeholder="密碼">
+        <button class="btn-primary" id="gateSubmit">登入</button>
+        <p class="hint" id="gateHint" hidden></p>
+        <p class="hint" id="gateError" hidden></p>
+        <p class="hint gate-toggle">
+          <span id="gateToggleLabel">還沒有帳號?</span>
+          <button type="button" class="btn-ghost" id="gateModeToggle">註冊一個</button>
+        </p>
       </div>
+
+      <div class="gate-divider-row"><span>或</span></div>
+
+      <button class="btn-ghost gate-guest-btn" data-auth-open="guest">
+        訪客試用(免帳號密碼)
+      </button>
+
       <p class="hint gate-note">
         訪客身分只能靠這台裝置的瀏覽器取回,清除瀏覽器資料就會失去存取權。
         之後隨時可以設定帳號密碼,原有資料會完整保留。
