@@ -6,6 +6,8 @@
 Application 與 HTTP 傳輸分離,測試才能不開 socket 直接驗證行為。
 """
 
+import base64
+import binascii
 import http.server
 import json
 import pathlib
@@ -47,14 +49,74 @@ WEB_DIR = BASE_DIR / "web"
 EXAMPLE_PATH = BASE_DIR / "data" / "example_farm.json"
 
 
-def too_large(content_length: int) -> bool:
+def request_limit(path: str = "") -> int:
+    """這條路徑的請求體上限。
+
+    藥品標示照片必定超過純文字的上限(一張縮圖過的 JPEG 轉 base64
+    就有數百 KB),所以單獨放寬。刻意做成「只有這個路徑例外」而不是
+    把全站上限拉高 —— 其他端點沒有理由收得下一個 2MB 的請求。
+    """
+    if path == "/api/drug-label":
+        return config.MAX_IMAGE_REQUEST_BYTES
+    return config.MAX_REQUEST_BYTES
+
+
+def too_large(content_length: int, path: str = "") -> bool:
     """請求體是否超過上限。
 
     必須在 read() 之前依 Content-Length 判斷 —— 伺服器原本會先把整包
     讀進記憶體,之後才輪到限流,所以每小時 20 次的限制完全擋不住大包灌流
     (實測 19.7MB 照單全收)。免費方案只有 512MB 記憶體。
     """
-    return content_length > config.MAX_REQUEST_BYTES
+    return content_length > request_limit(path)
+
+
+# 檔頭魔數。用來確認「這包位元組真的是它宣告的那種圖片」。
+#
+# 不能只信前端送來的 mediaType:那是不可信輸入(憲法第四條)。宣告成
+# image/jpeg 實際塞別的東西進來,等於讓我們把未知內容轉手送進 AI。
+_IMAGE_MAGIC = {
+    "image/jpeg": lambda b: b[:3] == b"\xff\xd8\xff",
+    "image/png": lambda b: b[:8] == b"\x89PNG\r\n\x1a\n",
+    "image/webp": lambda b: b[:4] == b"RIFF" and b[8:12] == b"WEBP",
+}
+
+
+def decode_image(payload: dict) -> Tuple[Optional[dict], Optional[str]]:
+    """驗證並解碼上傳的圖片,回傳 (圖片, 錯誤訊息) —— 兩者恰有一個是 None。
+
+    圖片全程只留在記憶體:不寫入硬碟、不存進資料庫。憲法第四條要求
+    使用者上傳的檔案只做解析、不做執行,而最穩妥的「不執行」就是
+    根本不讓它落地。
+    """
+    image = payload.get("image")
+    if not isinstance(image, dict):
+        return None, "請附上照片"
+
+    media_type = image.get("mediaType")
+    if media_type not in config.ALLOWED_IMAGE_TYPES:
+        return None, "照片格式不支援,請用 JPEG、PNG 或 WebP"
+
+    data = image.get("data")
+    if not isinstance(data, str) or not data:
+        return None, "照片內容是空的,請重新拍攝"
+
+    try:
+        # validate=True:遇到非 base64 字元直接拒絕,而不是默默略過。
+        # 少了它,一包垃圾會被「清乾淨」後解出一段無意義的位元組,
+        # 一路送到 AI 才發現不對。
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        return None, "照片內容無法解讀,請重新拍攝"
+
+    if not raw:
+        return None, "照片內容是空的,請重新拍攝"
+    if len(raw) > config.MAX_IMAGE_BYTES:
+        return None, f"照片太大,請控制在 {config.MAX_IMAGE_BYTES // 1000} KB 以內"
+    if not _IMAGE_MAGIC[media_type](raw):
+        return None, "照片內容與宣告的格式不符"
+
+    return {"media_type": media_type, "data": data}, None
 
 
 def client_ip(headers, peer_address: str) -> str:
@@ -117,6 +179,7 @@ class Application:
         self._last_ai_request: Dict[str, float] = {}
         self._hourly_hits: Dict[str, List[float]] = {}
         self._login_attempts: Dict[str, List[float]] = {}
+        self._label_scans: Dict[str, List[float]] = {}
         self._ai_request_count = 0
         self._count_day = time.strftime("%Y-%m-%d")
 
@@ -143,29 +206,42 @@ class Application:
             self._last_ai_request[client] = now
             return None
 
-    def _over_hourly_limit(self, client: str) -> bool:
-        """每個 IP 每小時的提問上限,滑動視窗。
+    def _over_window_limit(
+        self, bucket: Dict[str, List[float]], client: str, limit: int, window: int
+    ) -> bool:
+        """滑動視窗限流。每一種額度各自帶一個 bucket 進來。
 
         只在實際放行時記錄 —— 被擋下的嘗試不計入,否則使用者越重試,
         額度恢復時間被推得越晚,等於因為被擋而受到額外懲罰。
+
+        整段在鎖內完成:檢查與記錄之間若可被插隊,同時送達的請求會各自
+        讀到舊值而全部放行(實測:上限 5 次會放行 30 次)。這也是為什麼
+        三種額度共用這一份實作而不是各抄一遍 —— 併發正確性只想驗證一次。
         """
         with self._limit_lock:
             now = time.monotonic()
-            cutoff = now - config.RATE_WINDOW_SEC
+            cutoff = now - window
 
             # 順手清掉已經完全過期的來源,避免這份紀錄無限成長成攻擊面
-            for ip in [ip for ip, hits in self._hourly_hits.items()
+            for ip in [ip for ip, hits in bucket.items()
                        if not hits or hits[-1] <= cutoff]:
-                del self._hourly_hits[ip]
+                del bucket[ip]
 
-            hits = [t for t in self._hourly_hits.get(client, []) if t > cutoff]
-            if len(hits) >= config.MAX_QUESTIONS_PER_HOUR:
-                self._hourly_hits[client] = hits
+            hits = [t for t in bucket.get(client, []) if t > cutoff]
+            if len(hits) >= limit:
+                bucket[client] = hits
                 return True
 
             hits.append(now)
-            self._hourly_hits[client] = hits
+            bucket[client] = hits
             return False
+
+    def _over_hourly_limit(self, client: str) -> bool:
+        """每個 IP 每小時的提問上限。"""
+        return self._over_window_limit(
+            self._hourly_hits, client,
+            config.MAX_QUESTIONS_PER_HOUR, config.RATE_WINDOW_SEC,
+        )
 
     def _over_login_limit(self, client: str) -> bool:
         """登入/註冊/訪客建立的嘗試次數上限。
@@ -174,22 +250,22 @@ class Application:
         後者需要嚴格得多的窗口。訪客建立也算在這裡 —— 那會在資料庫寫入
         一列,不設限等於開放任何人把免費方案的容量灌爆。
         """
-        with self._limit_lock:
-            now = time.monotonic()
-            cutoff = now - config.LOGIN_WINDOW_SEC
+        return self._over_window_limit(
+            self._login_attempts, client,
+            config.MAX_LOGIN_ATTEMPTS_PER_WINDOW, config.LOGIN_WINDOW_SEC,
+        )
 
-            for ip in [ip for ip, hits in self._login_attempts.items()
-                       if not hits or hits[-1] <= cutoff]:
-                del self._login_attempts[ip]
+    def _over_scan_limit(self, client: str) -> bool:
+        """拍照辨識的每小時上限。
 
-            hits = [t for t in self._login_attempts.get(client, []) if t > cutoff]
-            if len(hits) >= config.MAX_LOGIN_ATTEMPTS_PER_WINDOW:
-                self._login_attempts[client] = hits
-                return True
-
-            hits.append(now)
-            self._login_attempts[client] = hits
-            return False
+        跟提問分開計算:建置藥品庫是一次性的(一口氣拍十張很正常),
+        問診是持續性的。共用一個計數會讓牧場主建完藥品庫就突然不能
+        問問題,而且畫面上看不出來為什麼。
+        """
+        return self._over_window_limit(
+            self._label_scans, client,
+            config.MAX_LABEL_SCANS_PER_HOUR, config.RATE_WINDOW_SEC,
+        )
 
     def _current_user(self, token):
         """目前登入的使用者;未登入或帳號功能未啟用時回 None。"""
@@ -340,6 +416,8 @@ class Application:
             return self._save_health_check(payload, token)
         if path == "/api/my-drugs":
             return self._add_my_drug(payload, token)
+        if path == "/api/drug-label":
+            return self._read_drug_label(payload, client, token)
         return 404, {"error": "not found"}
 
     def handle_delete(self, path: str, token: Optional[str] = None) -> Tuple[int, dict]:
@@ -463,6 +541,9 @@ class Application:
         return {
             "id": row["id"],
             "name": row["name"],
+            # 舊資料列在補上欄位之前寫入,讀出來會是 None(見 db.py 的
+            # ALTER TABLE)。用 or "" 收斂成空字串,前端就不必到處判斷。
+            "activeIngredient": row.get("active_ingredient") or "",
             "dosageNote": row["dosage_note"],
             "withdrawalDays": row["withdrawal_days"],
         }
@@ -482,6 +563,12 @@ class Application:
         note = payload.get("dosageNote")
         note = note.strip()[:config.MAX_DRUG_NOTE_CHARS] if isinstance(note, str) else ""
 
+        ingredient = payload.get("activeIngredient")
+        ingredient = (
+            ingredient.strip()[:config.MAX_DRUG_INGREDIENT_CHARS]
+            if isinstance(ingredient, str) else ""
+        )
+
         days = payload.get("withdrawalDays")
         if not isinstance(days, (int, float)) or isinstance(days, bool) or days < 0:
             days = None
@@ -489,8 +576,60 @@ class Application:
         drug_id = self.store.add_drug(
             user.id, name.strip()[:config.MAX_DRUG_NAME_CHARS], note,
             int(days) if days is not None else None,
+            active_ingredient=ingredient,
         )
         return 200, {"id": drug_id}
+
+    def _read_drug_label(self, payload, client, token) -> Tuple[int, dict]:
+        """從藥品標示照片讀出藥品資料,回傳一份待核對的草稿。
+
+        **這裡不寫入任何資料。** 回傳的內容只會被前端填進表單,由牧場主
+        核對後自己按「新增藥品」才真的入庫(憲法第三條)。藥品庫的內容
+        會被當成可引用的劑量依據送進疾病諮詢,若 AI 讀出來的數字能自動
+        入庫,等於 AI 的輸出繞一圈變成了「使用者提供的事實」。
+        """
+        gate = self._gate(token)
+        if gate:
+            return 401, gate
+
+        image, error = decode_image(payload)
+        if error:
+            return 400, {"error": error}
+
+        wait = self._throttled(client)
+        if wait is not None:
+            return 429, {"error": f"請稍候 {wait} 秒再拍下一張"}
+
+        if self._over_scan_limit(client):
+            return 429, {
+                "reason": "scan_limit",
+                "error": (
+                    f"每小時最多辨識 {config.MAX_LABEL_SCANS_PER_HOUR} 張照片,"
+                    "已達上限。你仍然可以手動輸入藥品資料。"
+                ),
+            }
+
+        if self._over_daily_budget():
+            return 503, {
+                "reason": "daily_limit",
+                "error": f"今日 AI 用量已達上限。{ai_unavailable_note()}",
+            }
+
+        try:
+            draft = self.consultant.read_label(image)
+        except TransportError as e:
+            return 503, self._transport_error(e)
+
+        # 連藥品名稱都讀不出來,填進表單也沒有意義,不如直接請他重拍。
+        # 這裡刻意不回傳「部分結果」—— 名稱是這份草稿的骨幹,沒有名稱
+        # 卻填了一個休藥期數字進去,是最容易被誤用的狀態。
+        if not draft.get("name"):
+            return 422, {
+                "reason": "unreadable",
+                "error": "讀不出藥品資料,請靠近一點、對準標示文字再拍一次",
+            }
+
+        return 200, {"draft": draft}
 
     def _grade(self, payload: dict) -> Tuple[int, dict]:
         """生產健檢。純計算,不呼叫 AI —— 額度用盡時這裡照常運作。"""
@@ -542,6 +681,7 @@ class Application:
         return [
             {
                 "name": d["name"],
+                "activeIngredient": d.get("active_ingredient") or "",
                 "dosageNote": d["dosage_note"],
                 "withdrawalDays": d["withdrawal_days"],
             }
@@ -893,9 +1033,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             length = 0
 
         # 在讀進記憶體之前就擋掉,否則限流形同虛設
-        if too_large(length):
+        if too_large(length, self.path):
             self._send(413, {
-                "error": f"請求過大,上限 {config.MAX_REQUEST_BYTES // 1024} KB",
+                "error": f"請求過大,上限 {request_limit(self.path) // 1024} KB",
             })
             return
 

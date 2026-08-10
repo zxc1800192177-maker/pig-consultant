@@ -29,13 +29,14 @@ function makeId() {
   return `${Date.now()}-${idCounter}`;
 }
 
-export function addDrug(drugs, { name, dosageNote, withdrawalDays } = {}) {
+export function addDrug(drugs, { name, activeIngredient, dosageNote, withdrawalDays } = {}) {
   const trimmedName = (name || "").trim();
   if (!trimmedName) return drugs; // 沒有名字的藥品不构成一筆有效紀錄
 
   const entry = {
     id: makeId(),
     name: trimmedName,
+    activeIngredient: (activeIngredient || "").trim(),
     dosageNote: (dosageNote || "").trim(),
     withdrawalDays:
       typeof withdrawalDays === "number" && Number.isFinite(withdrawalDays) && withdrawalDays >= 0

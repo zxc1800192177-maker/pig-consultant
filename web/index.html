@@ -128,8 +128,15 @@
         </div>
       </div>
       <ul class="drug-list" id="drugList"></ul>
+      <div class="scan-row">
+        <button type="button" class="btn-ghost" id="scanLabelBtn">📷 拍照辨識藥品標示</button>
+        <!-- capture="environment" 讓手機直接開後鏡頭,不用先進相簿 -->
+        <input type="file" id="scanLabelInput" accept="image/*" capture="environment" hidden>
+      </div>
+      <p class="hint scan-hint" id="scanHint" hidden></p>
       <div class="drug-form">
         <input type="text" id="drugName" placeholder="藥品名稱,例如:阿莫西林可溶性粉">
+        <input type="text" id="drugIngredient" placeholder="有效成分(選填),例如:Amoxicillin trihydrate 10%">
         <input type="text" id="drugNote" placeholder="劑量說明(選填),例如:每公斤體重 10mg,一天兩次">
         <input type="number" id="drugWithdrawal" placeholder="休藥期天數(選填)" min="0" step="1">
         <button type="button" class="btn-ghost" id="addDrugBtn">+ 新增藥品</button>

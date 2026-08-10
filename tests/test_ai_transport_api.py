@@ -103,6 +103,46 @@ class TestRequestConstruction:
         assert body["model"]
 
 
+class TestImageRequestConstruction:
+    """帶圖片的請求。content 從字串換成 image + text 的陣列。"""
+
+    IMAGE = {"media_type": "image/png", "data": "QUJD"}
+
+    @pytest.fixture
+    def body(self):
+        transport = AnthropicApiTransport(api_key="sk-test-key")
+        req = transport.build_image_request("讀這張", "系統提示", self.IMAGE)
+        return json.loads(req.data.decode("utf-8"))
+
+    def test_content_has_image_then_text(self, body):
+        content = body["messages"][0]["content"]
+        assert [block["type"] for block in content] == ["image", "text"]
+
+    def test_image_source_is_base64_with_media_type(self, body):
+        source = body["messages"][0]["content"][0]["source"]
+        assert source["type"] == "base64"
+        assert source["media_type"] == "image/png"
+        assert source["data"] == "QUJD"
+
+    def test_prompt_carried_in_text_block(self, body):
+        assert body["messages"][0]["content"][1]["text"] == "讀這張"
+
+    def test_system_prompt_carried(self, body):
+        assert body["system"] == "系統提示"
+
+    def test_still_no_tools_passed(self, body):
+        """這條路徑天生沒有工具可用,加了圖片也不該改變這件事。"""
+        assert "tools" not in body
+
+    def test_text_path_unchanged(self):
+        """加了圖片方法之後,純文字請求的形狀必須完全沒變 ——
+        疾病諮詢與健檢建議都走那條路。
+        """
+        transport = AnthropicApiTransport(api_key="sk-test-key")
+        body = json.loads(transport.build_request("小豬下痢", "你是顧問").data)
+        assert body["messages"] == [{"role": "user", "content": "小豬下痢"}]
+
+
 class TestStreamParsing:
     """Anthropic API 的 SSE 事件格式與 Claude Code CLI 不同,需要獨立解析。"""
 

@@ -50,6 +50,37 @@ ADVICE_SYSTEM_PROMPT = """你是「豬豬顧問」,協助台灣豬場解讀生�
 不要重述使用者已經看得到的數字,直接談該怎麼做。"""
 
 
+LABEL_SYSTEM_PROMPT = """你的工作是「抄寫」動物用藥品標示上印出來的字,不是判讀、不是給建議。
+
+規則(全部都是硬性要求):
+- 只寫你在圖片上**實際看得見**的字。看不清楚、被遮住、根本沒印的欄位一律填 null
+- 絕對不可以依據你對這個藥的既有知識補上任何內容。你認得這個藥不代表
+  這一瓶的標示就是那樣寫 —— 不同廠牌、不同濃度、不同國家的規定都不一樣
+- **休藥期尤其不可以猜**。標示上沒有明確寫休藥期就填 null。
+  這個數字錯了會讓帶有藥物殘留的豬肉進入市場
+- 不確定就填 null。填 null 是正確答案,猜一個看起來合理的數字是嚴重錯誤
+
+只輸出一個 JSON 物件,不要 markdown 圍籬,不要任何說明文字:
+
+{"name": "商品名", "activeIngredient": "有效成分", "dosageNote": "用法用量", "withdrawalDays": 數字}
+
+- name:標示上的商品名,照原樣抄(繁體中文或英文)
+- activeIngredient:有效成分/主成分,含濃度或含量(例如 "Amoxicillin trihydrate 10%")
+- dosageNote:用法用量整理成一句話(例如 "每公斤體重 10mg,一天兩次,連續 3-5 天")
+- withdrawalDays:休藥期天數,只填數字。標示寫「肉:7 日」就填 7。沒寫就填 null
+
+如果整張圖根本不是藥品標示,或完全看不清楚,四個欄位全部填 null。"""
+
+
+def build_label_prompt() -> str:
+    """拍照辨識的使用者訊息。
+
+    真正的規則寫在 LABEL_SYSTEM_PROMPT,這裡只給一句指令 —— 跟疾病諮詢
+    一樣,系統提示負責角色與紀律,使用者訊息負責這一次要做什麼。
+    """
+    return "請讀出這張動物用藥品標示上的資訊,依規定的 JSON 格式回覆。"
+
+
 def build_farm_context(weaknesses: Optional[List[dict]]) -> str:
     """把健檢弱項整理成疾病諮詢的背景資訊。
 
@@ -137,10 +168,13 @@ def build_my_drugs_context(my_drugs: Optional[List[dict]]) -> str:
 
     lines = []
     for d in my_drugs:
+        # 有效成分放在商品名後面的括號裡:獸醫開藥講的是成分,同一個成分
+        # 在不同廠牌下是不同商品名,有成分才對得起來。
+        ingredient = f"(成分:{d['active_ingredient']})" if d.get("active_ingredient") else ""
         note = f",{d['dosage_note']}" if d.get("dosage_note") else ""
         withdrawal = d.get("withdrawal_days")
         withdrawal_text = f",休藥期 {withdrawal} 天" if withdrawal is not None else ""
-        lines.append(f"- {d['name']}{note}{withdrawal_text}")
+        lines.append(f"- {d['name']}{ingredient}{note}{withdrawal_text}")
 
     return (
         "【牧場主自己的藥品庫,由牧場主輸入,劑量以此處內容或藥品標示為準,"

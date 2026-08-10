@@ -7,7 +7,7 @@
 import pytest
 
 from ai.consultant import Consultant
-from ai.prompts import ADVICE_SYSTEM_PROMPT
+from ai.prompts import ADVICE_SYSTEM_PROMPT, LABEL_SYSTEM_PROMPT
 from ai.transport import FakeTransport, NotLoggedIn, QuotaExceeded
 
 
@@ -336,6 +336,51 @@ class TestAdviseFollowUp:
         c = Consultant(transport=transport)
         assert list(c.advise([], question="還有呢?")) == []
         assert transport.last_prompt is None
+
+
+class TestReadLabel:
+    """藥品標示拍照辨識。這是抄寫任務,不是顧問對話。"""
+
+    IMAGE = {"media_type": "image/jpeg", "data": "QUJD"}
+
+    def test_image_reaches_the_model(self):
+        """少了這條,「圖片其實沒送出去、模型純靠猜」會一路通過所有測試。"""
+        transport = FakeTransport(chunks=['{"name": "某藥"}'])
+        Consultant(transport=transport).read_label(self.IMAGE)
+        assert transport.last_image == self.IMAGE
+
+    def test_uses_label_persona_not_consultant_personas(self):
+        """套上顧問 persona,模型會開始給用藥建議、加免責聲明,
+        而我們要的只是標示上印了什麼。
+        """
+        transport = FakeTransport(chunks=['{"name": "某藥"}'])
+        Consultant(transport=transport).read_label(self.IMAGE)
+        assert transport.last_system == LABEL_SYSTEM_PROMPT
+        assert transport.last_system != ADVICE_SYSTEM_PROMPT
+
+    def test_returns_parsed_draft(self):
+        transport = FakeTransport(chunks=['{"name": "阿莫西林", "withdrawalDays": 7}'])
+        draft = Consultant(transport=transport).read_label(self.IMAGE)
+        assert draft["name"] == "阿莫西林"
+        assert draft["withdrawalDays"] == 7
+
+    def test_unreadable_response_gives_empty_draft(self):
+        """照片糊掉是預期中會發生的事,不該拋例外。"""
+        transport = FakeTransport(chunks=["這張看不清楚"])
+        draft = Consultant(transport=transport).read_label(self.IMAGE)
+        assert draft["name"] is None
+
+    def test_chunks_are_joined_before_parsing(self):
+        """回應是串流來的,JSON 會被切成好幾段 —— 必須先接起來再解析。"""
+        transport = FakeTransport(chunks=['{"na', 'me": "某', '藥"}'])
+        draft = Consultant(transport=transport).read_label(self.IMAGE)
+        assert draft["name"] == "某藥"
+
+    def test_transport_failure_propagates(self):
+        """額度用盡要讓上層知道,才能顯示正確的降級訊息。"""
+        transport = FakeTransport(error=QuotaExceeded("額度用盡"))
+        with pytest.raises(QuotaExceeded):
+            Consultant(transport=transport).read_label(self.IMAGE)
 
 
 class TestAvailability:

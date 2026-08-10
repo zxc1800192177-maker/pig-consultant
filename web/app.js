@@ -11,6 +11,7 @@ import {
 import { SseParser } from "./lib/sse.js";
 import { isSpeechRecognitionSupported, mergeTranscript, splitFinalAndInterim } from "./lib/speech.js";
 import { addDrug, loadMyDrugs, removeDrug, saveMyDrugs } from "./lib/drugs.js";
+import { fileToJpegBase64 } from "./lib/image.js";
 import { addFactor, removeFactor } from "./lib/factors.js";
 
 const $ = (id) => document.getElementById(id);
@@ -356,6 +357,7 @@ function renderDrugList() {
   list.innerHTML = warning + myDrugs
     .map((d) => {
       const metaParts = [];
+      if (d.activeIngredient) metaParts.push(escapeHtml(d.activeIngredient));
       if (d.dosageNote) metaParts.push(escapeHtml(d.dosageNote));
       if (d.withdrawalDays != null) metaParts.push(`休藥期 ${d.withdrawalDays} 天`);
       const meta = metaParts.length
@@ -383,6 +385,7 @@ function readOptionalNumber(el) {
 async function submitNewDrug() {
   const draft = {
     name: $("drugName").value,
+    activeIngredient: $("drugIngredient").value,
     dosageNote: $("drugNote").value,
     withdrawalDays: readOptionalNumber($("drugWithdrawal")),
   };
@@ -398,10 +401,79 @@ async function submitNewDrug() {
     renderDrugList();
   }
 
-  $("drugName").value = "";
-  $("drugNote").value = "";
-  $("drugWithdrawal").value = "";
+  clearDrugForm();
   $("drugName").focus();
+}
+
+function clearDrugForm() {
+  ["drugName", "drugIngredient", "drugNote", "drugWithdrawal"]
+    .forEach((id) => { $(id).value = ""; });
+  clearScanMarks();
+}
+
+// ── 拍照辨識藥品標示 ──
+//
+// AI 讀出來的內容只填進表單,絕不直接入庫 —— 牧場主核對後自己按
+// 「新增藥品」才算數(憲法第三條)。藥品庫的內容會被當成可引用的劑量
+// 依據送進疾病諮詢,若這裡自動存進去,等於 AI 的輸出繞一圈變成了
+// 「使用者提供的事實」。
+
+function setScanHint(text, tone) {
+  const hint = $("scanHint");
+  if (!hint) return;
+  hint.hidden = !text;
+  hint.textContent = text || "";
+  hint.classList.toggle("scan-hint-warn", tone === "warn");
+}
+
+// 休藥期讀錯會讓帶藥的豬肉上市,是這三個欄位裡唯一會造成食安後果的。
+// 自動填了就一定要看得出來「這是 AI 讀的,還沒有人確認過」。
+function markPendingReview() {
+  $("drugWithdrawal").classList.add("is-unverified");
+}
+
+function clearScanMarks() {
+  $("drugWithdrawal")?.classList.remove("is-unverified");
+}
+
+async function scanDrugLabel(file) {
+  const btn = $("scanLabelBtn");
+  // 辨識一次要十幾秒,不鎖住按鈕使用者會連點,每一下都在花錢
+  btn.disabled = true;
+  setScanHint("辨識中,請稍候…");
+
+  try {
+    const data64 = await fileToJpegBase64(file);
+    const { ok, data } = await api("/api/drug-label", postJson({
+      image: { mediaType: "image/jpeg", data: data64 },
+    }));
+
+    if (!ok) {
+      setScanHint(data.error || "辨識失敗,請再試一次", "warn");
+      return;
+    }
+
+    const draft = data.draft || {};
+    $("drugName").value = draft.name || "";
+    $("drugIngredient").value = draft.activeIngredient || "";
+    $("drugNote").value = draft.dosageNote || "";
+    $("drugWithdrawal").value = draft.withdrawalDays ?? "";
+
+    clearScanMarks();
+    if (draft.withdrawalDays != null) markPendingReview();
+
+    setScanHint(
+      draft.withdrawalDays == null
+        ? "已填入辨識結果。標示上沒讀到休藥期,請自行核對藥瓶後填入。"
+        : "已填入辨識結果,請核對藥瓶上的字(尤其是休藥期),確認無誤再按新增。",
+      "warn",
+    );
+    $("drugName").focus();
+  } catch {
+    setScanHint("讀不到這張照片,請再拍一次", "warn");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function deleteDrug(id) {
@@ -430,6 +502,20 @@ if (drugListEl && addDrugBtnEl) {
     const btn = e.target.closest(".drug-remove");
     if (btn) deleteDrug(btn.dataset.id);
   });
+}
+
+const scanBtnEl = $("scanLabelBtn");
+const scanInputEl = $("scanLabelInput");
+if (scanBtnEl && scanInputEl) {
+  scanBtnEl.addEventListener("click", () => scanInputEl.click());
+  scanInputEl.addEventListener("change", () => {
+    const file = scanInputEl.files?.[0];
+    // 每次都清空,否則連續拍同一個檔名不會觸發 change,使用者以為壞了
+    scanInputEl.value = "";
+    if (file) scanDrugLabel(file);
+  });
+  // 使用者自己動過休藥期就不再是「未經確認」,標記要跟著消失
+  $("drugWithdrawal")?.addEventListener("input", clearScanMarks);
 }
 
 // ── 健檢歷史紀錄 ──

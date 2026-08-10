@@ -65,11 +65,19 @@ CREATE TABLE IF NOT EXISTS my_drugs (
   id SERIAL PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  active_ingredient TEXT NOT NULL DEFAULT '',
   dosage_note TEXT NOT NULL DEFAULT '',
   withdrawal_days INTEGER,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS my_drugs_user_idx ON my_drugs (user_id, created_at);
+
+-- active_ingredient 是後來才加的欄位。上面的 CREATE TABLE IF NOT EXISTS
+-- 對「已經存在的資料表」完全不做事,所以正式站那些既有的 my_drugs
+-- 不會因為改了上面的定義就長出新欄位 —— 必須另外補這一句。
+-- ADD COLUMN IF NOT EXISTS 讓它跟這個檔案其他語句一樣可以重複執行,
+-- 每次啟動都跑一遍也不會出錯(見 ensure_schema)。
+ALTER TABLE my_drugs ADD COLUMN IF NOT EXISTS active_ingredient TEXT NOT NULL DEFAULT '';
 """
 
 
@@ -121,7 +129,8 @@ class Store:
         raise NotImplementedError
 
     # --- 藥品庫 ---
-    def add_drug(self, user_id, name, dosage_note="", withdrawal_days=None) -> int:
+    def add_drug(self, user_id, name, dosage_note="", withdrawal_days=None,
+                 active_ingredient="") -> int:
         raise NotImplementedError
 
     def list_drugs(self, user_id: int) -> List[dict]:
@@ -230,13 +239,15 @@ class InMemoryStore(Store):
         ]
         return len(self.health_checks) < before
 
-    def add_drug(self, user_id, name, dosage_note="", withdrawal_days=None) -> int:
+    def add_drug(self, user_id, name, dosage_note="", withdrawal_days=None,
+                 active_ingredient="") -> int:
         drug_id = self._next_drug_id
         self._next_drug_id += 1
         self.drugs.append({
             "id": drug_id,
             "user_id": user_id,
             "name": name,
+            "active_ingredient": active_ingredient,
             "dosage_note": dosage_note,
             "withdrawal_days": withdrawal_days,
         })
@@ -374,25 +385,28 @@ class PostgresStore(Store):
             ).fetchone()
             return row is not None
 
-    def add_drug(self, user_id, name, dosage_note="", withdrawal_days=None) -> int:
+    def add_drug(self, user_id, name, dosage_note="", withdrawal_days=None,
+                 active_ingredient="") -> int:
         with self._connect() as conn:
             row = conn.execute(
-                "INSERT INTO my_drugs (user_id, name, dosage_note, withdrawal_days)"
-                " VALUES (%s, %s, %s, %s) RETURNING id",
-                (user_id, name, dosage_note, withdrawal_days),
+                "INSERT INTO my_drugs"
+                " (user_id, name, dosage_note, withdrawal_days, active_ingredient)"
+                " VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (user_id, name, dosage_note, withdrawal_days, active_ingredient),
             ).fetchone()
             return row[0]
 
     def list_drugs(self, user_id):
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, dosage_note, withdrawal_days FROM my_drugs"
-                " WHERE user_id = %s ORDER BY created_at, id",
+                "SELECT id, name, dosage_note, withdrawal_days, active_ingredient"
+                " FROM my_drugs WHERE user_id = %s ORDER BY created_at, id",
                 (user_id,),
             ).fetchall()
         return [
             {"id": r[0], "user_id": user_id, "name": r[1],
-             "dosage_note": r[2], "withdrawal_days": r[3]}
+             "dosage_note": r[2], "withdrawal_days": r[3],
+             "active_ingredient": r[4]}
             for r in rows
         ]
 

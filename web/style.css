@@ -454,6 +454,18 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 }
 .drug-remove:hover { color: var(--critical); }
 .drug-empty { font-size: 13.5px; color: var(--ink-faint); padding: 4px 0 14px; }
+/* 拍照辨識 */
+.scan-row { margin-bottom: 10px; }
+.scan-hint { margin: 0 0 10px; }
+.scan-hint-warn { color: var(--warn); font-weight: 500; }
+
+/* 休藥期被 AI 自動填入、尚未經人確認。這是三個欄位裡唯一會造成
+   食安後果的一格,填了就一定要看得出來還沒有人核對過。 */
+.drug-form input.is-unverified {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+
 .drug-form { display: grid; gap: 8px; }
 .drug-form input {
   width: 100%; padding: 10px 13px; border-radius: var(--radius-sm);

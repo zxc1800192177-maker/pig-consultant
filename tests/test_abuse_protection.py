@@ -372,6 +372,31 @@ class TestRequestSizeLimit:
         )
 
 
+class TestImageUploadLimit:
+    """藥品標示照片必定超過純文字的上限,單獨放寬 —— 但只放寬那一條路徑。"""
+
+    def test_photo_path_allows_more(self):
+        from server import too_large
+        big = config.MAX_REQUEST_BYTES + 1
+        assert too_large(big, "/api/drug-label") is False
+        assert too_large(big, "/api/consult") is True
+
+    def test_photo_path_still_has_a_ceiling(self):
+        from server import too_large
+        assert too_large(config.MAX_IMAGE_REQUEST_BYTES + 1, "/api/drug-label") is True
+
+    def test_other_paths_unchanged_by_default(self):
+        """沒帶 path 的呼叫維持原本行為 —— 放寬只給那一條路徑。"""
+        from server import too_large
+        assert too_large(config.MAX_REQUEST_BYTES + 1) is True
+
+    def test_decoded_image_limit_is_bounded(self):
+        """免費方案只有 512MB 記憶體,請求體會先整包讀進來。"""
+        assert 0 < config.MAX_IMAGE_BYTES <= 5_000_000
+        # base64 膨脹約 33%,請求上限必須放得下解碼後的上限
+        assert config.MAX_IMAGE_REQUEST_BYTES > config.MAX_IMAGE_BYTES * 4 / 3
+
+
 class TestHistoryLimit:
     """對話歷史上限。歷史由前端帶上來,伺服器不能照單全收。"""
 

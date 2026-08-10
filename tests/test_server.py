@@ -1245,3 +1245,157 @@ class TestLoginThrottle:
         token = _register(app)
         for _ in range(5):
             assert _post_as(app, "/api/auth/logout", {}, token)[0] == 200
+
+
+# --- 藥品標示拍照辨識 ---
+
+_JPEG = b"\xff\xd8\xff" + b"\x00" * 40      # 檔頭正確的最小假 JPEG
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
+
+
+def _image_payload(raw=_JPEG, media_type="image/jpeg"):
+    import base64
+    return {"image": {"mediaType": media_type, "data": base64.b64encode(raw).decode()}}
+
+
+def _label_app(chunks=None, error=None):
+    from db import InMemoryStore
+    return Application(
+        transport=FakeTransport(chunks=chunks or ['{"name": "阿莫西林", "withdrawalDays": 7}'],
+                                error=error),
+        store=InMemoryStore(),
+    )
+
+
+class TestDrugLabelDoesNotWrite:
+    """**這一組是整個功能最重要的測試。**
+
+    辨識結果只能填進表單,由牧場主核對後自己按新增才入庫(憲法第三條)。
+    藥品庫的內容會被 build_my_drugs_context() 當成可引用的劑量依據送進
+    疾病諮詢 —— 若 AI 讀出來的數字能自動入庫,等於 AI 的輸出繞一圈變成
+    「使用者提供的事實」,違反第二條的單向流動。
+    """
+
+    def test_successful_scan_stores_nothing(self):
+        app = _label_app()
+        token = _register(app)
+        status, body = _post_as(app, "/api/drug-label", _image_payload(), token)
+        assert status == 200
+        assert body["draft"]["name"] == "阿莫西林"
+        # 讀完之後藥品庫必須仍然是空的
+        assert app.handle_get("/api/my-drugs", token)[1]["drugs"] == []
+
+    def test_response_is_labelled_a_draft_not_a_drug(self):
+        """回傳的鍵是 draft,不是 drug —— 名字本身就在說「這還沒算數」。"""
+        app = _label_app()
+        token = _register(app)
+        body = _post_as(app, "/api/drug-label", _image_payload(), token)[1]
+        assert "draft" in body
+        assert "id" not in body
+
+
+class TestDrugLabelEndpoint:
+    def test_requires_login(self):
+        """每次呼叫都在花錢,前端擋不住直接呼叫 API 的人。"""
+        app = _label_app()
+        assert _post(app, "/api/drug-label", _image_payload())[0] == 401
+
+    def test_returns_all_four_fields(self):
+        app = _label_app(chunks=['{"name": "藥", "activeIngredient": "Amoxicillin",'
+                                 ' "dosageNote": "每公斤10mg", "withdrawalDays": 7}'])
+        token = _register(app)
+        draft = _post_as(app, "/api/drug-label", _image_payload(), token)[1]["draft"]
+        assert draft["activeIngredient"] == "Amoxicillin"
+        assert draft["withdrawalDays"] == 7
+
+    def test_accepts_png(self):
+        app = _label_app()
+        token = _register(app)
+        payload = _image_payload(_PNG, "image/png")
+        assert _post_as(app, "/api/drug-label", payload, token)[0] == 200
+
+    def test_unreadable_photo_reports_rather_than_inventing(self):
+        """最危險的失敗模式是編一組數字出來。讀不出名稱就明講重拍。"""
+        app = _label_app(chunks=["這張照片太模糊了"])
+        token = _register(app)
+        status, body = _post_as(app, "/api/drug-label", _image_payload(), token)
+        assert status == 422
+        assert body["reason"] == "unreadable"
+
+    def test_ai_failure_degrades_cleanly(self):
+        app = _label_app(error=QuotaExceeded("額度用盡"))
+        token = _register(app)
+        status, body = _post_as(app, "/api/drug-label", _image_payload(), token)
+        assert status == 503
+        assert body["reason"] == "quota"
+
+
+class TestDrugLabelImageValidation:
+    """圖片一樣是不可信輸入(憲法第四條)。"""
+
+    def test_missing_image_rejected(self):
+        app = _label_app()
+        token = _register(app)
+        assert _post_as(app, "/api/drug-label", {}, token)[0] == 400
+
+    def test_disallowed_media_type_rejected(self):
+        app = _label_app()
+        token = _register(app)
+        payload = _image_payload(_JPEG, "image/svg+xml")
+        assert _post_as(app, "/api/drug-label", payload, token)[0] == 400
+
+    def test_non_base64_rejected(self):
+        app = _label_app()
+        token = _register(app)
+        payload = {"image": {"mediaType": "image/jpeg", "data": "這不是 base64!!"}}
+        assert _post_as(app, "/api/drug-label", payload, token)[0] == 400
+
+    def test_magic_bytes_must_match_declared_type(self):
+        """宣告成 JPEG 卻塞別的東西進來,等於讓我們把未知內容轉手送進 AI。"""
+        app = _label_app()
+        token = _register(app)
+        payload = _image_payload(_PNG, "image/jpeg")   # PNG 內容謊稱是 JPEG
+        status, body = _post_as(app, "/api/drug-label", payload, token)
+        assert status == 400
+        assert "不符" in body["error"]
+
+    def test_oversized_image_rejected(self, monkeypatch):
+        monkeypatch.setattr(config, "MAX_IMAGE_BYTES", 100)
+        app = _label_app()
+        token = _register(app)
+        payload = _image_payload(_JPEG + b"\x00" * 500)
+        assert _post_as(app, "/api/drug-label", payload, token)[0] == 400
+
+    def test_rejected_image_costs_no_ai_call(self):
+        """驗證要排在呼叫 AI 之前,否則壞圖片一樣會花掉額度。"""
+        app = _label_app()
+        token = _register(app)
+        _post_as(app, "/api/drug-label", {}, token)
+        assert app.transport.last_image is None
+
+
+class TestDrugLabelThrottle:
+    def test_scan_limit_is_separate_from_questions(self, monkeypatch):
+        """建置藥品庫是一次性的,問診是持續性的 —— 拍完十張照片不該
+        就不能問問題了。
+        """
+        monkeypatch.setattr(config, "MAX_LABEL_SCANS_PER_HOUR", 2)
+        monkeypatch.setattr(config, "MIN_REQUEST_INTERVAL_SEC", 0)
+        app = _label_app()
+        token = _register(app)
+        for _ in range(2):
+            assert _post_as(app, "/api/drug-label", _image_payload(), token)[0] == 200
+
+        assert _post_as(app, "/api/drug-label", _image_payload(), token)[0] == 429
+        # 拍照額度用完,問診照樣可用
+        assert _post_as(app, "/api/consult", {"question": "小豬下痢"}, token)[0] == 200
+
+    def test_questions_do_not_consume_scan_quota(self, monkeypatch):
+        monkeypatch.setattr(config, "MAX_QUESTIONS_PER_HOUR", 2)
+        monkeypatch.setattr(config, "MIN_REQUEST_INTERVAL_SEC", 0)
+        app = _label_app()
+        token = _register(app)
+        for _ in range(2):
+            _post_as(app, "/api/consult", {"question": "小豬下痢"}, token)
+
+        assert _post_as(app, "/api/drug-label", _image_payload(), token)[0] == 200

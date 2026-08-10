@@ -49,6 +49,21 @@ MAX_HISTORY_CHARS = 500          # 單則歷史保留的字數;超過即截斷
 MAX_MY_DRUGS = 20
 MAX_DRUG_NAME_CHARS = 60
 MAX_DRUG_NOTE_CHARS = 200
+MAX_DRUG_INGREDIENT_CHARS = 100   # 有效成分,例如「Amoxicillin trihydrate 10%」
+
+# --- 藥品標示拍照辨識 ---
+#
+# 圖片一律由前端縮圖後才上傳(見 web/lib/image.js),這裡的上限是伺服器端
+# 的最後一道防線 —— 前端送什麼過來都不可信(憲法第四條)。
+# Render 免費方案只有 512MB 記憶體,而請求體會先整包讀進記憶體才輪到限流。
+MAX_IMAGE_BYTES = 1_500_000            # base64 解碼後的實際大小
+MAX_IMAGE_REQUEST_BYTES = 2_500_000    # base64 膨脹約 33%,加上 JSON 外層
+ALLOWED_IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp")
+
+# 拍照辨識與提問分開計算額度。用途不同:建置藥品庫是一次性的
+# (一口氣拍十張很正常),問診是持續性的。共用一個計數會讓牧場主
+# 建完藥品庫就突然不能問問題,而且看不出來為什麼。
+MAX_LABEL_SCANS_PER_HOUR = int(os.environ.get("MAX_LABEL_SCANS_PER_HOUR", "20"))
 
 # 生產健檢的「其他參考因素」上限。跟藥品庫同樣的道理:來自瀏覽器,
 # 只存在使用者這台裝置上,伺服器不保存,但送進請求時一樣不可信。

@@ -9,13 +9,16 @@
 from typing import Iterator, List, NamedTuple, Optional
 
 import config
+from ai.label import parse_label
 from ai.prompts import (
     ADVICE_SYSTEM_PROMPT,
     DISEASE_SYSTEM_PROMPT,
+    LABEL_SYSTEM_PROMPT,
     build_advice_prompt,
     build_dosage_reference,
     build_farm_context,
     build_history_context,
+    build_label_prompt,
     build_my_drugs_context,
     build_reference_factors,
 )
@@ -88,12 +91,19 @@ class Consultant:
             note = drug.get("dosageNote")
             note = note.strip()[:config.MAX_DRUG_NOTE_CHARS] if isinstance(note, str) else ""
 
+            ingredient = drug.get("activeIngredient")
+            ingredient = (
+                ingredient.strip()[:config.MAX_DRUG_INGREDIENT_CHARS]
+                if isinstance(ingredient, str) else ""
+            )
+
             withdrawal = drug.get("withdrawalDays")
             if not isinstance(withdrawal, (int, float)) or isinstance(withdrawal, bool) or withdrawal < 0:
                 withdrawal = None
 
             cleaned.append({
                 "name": name.strip()[:config.MAX_DRUG_NAME_CHARS],
+                "active_ingredient": ingredient,
                 "dosage_note": note,
                 "withdrawal_days": withdrawal,
             })
@@ -212,3 +222,22 @@ class Consultant:
 
         prompt = "\n".join(part for part in parts if part)
         return self.transport.stream(prompt, ADVICE_SYSTEM_PROMPT)
+
+    def read_label(self, image: dict) -> dict:
+        """從藥品標示照片讀出藥品資料,回傳一份**草稿**。
+
+        用 LABEL_SYSTEM_PROMPT 而不是顧問的兩個 persona:這是純抄寫任務,
+        套上顧問角色模型會開始給用藥建議、加免責聲明,而我們要的只是
+        標示上印了什麼。
+
+        回傳的四個欄位都可能是 None(照片糊掉、標示沒印、根本不是藥品)。
+        **呼叫端不得直接寫進藥品庫** —— 必須讓牧場主核對過(憲法第三條),
+        否則藥品庫會從「人抄的」悄悄變成「AI 猜的」,而疾病諮詢還會把它
+        當成可引用的劑量依據。
+        """
+        text = "".join(
+            self.transport.stream_image(
+                build_label_prompt(), LABEL_SYSTEM_PROMPT, image
+            )
+        )
+        return parse_label(text)

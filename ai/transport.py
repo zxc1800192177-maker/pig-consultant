@@ -113,17 +113,63 @@ class ClaudeCliTransport:
             "--verbose",
         ]
 
-    def stream(self, prompt: str, system: str) -> Iterator[str]:
+    def build_image_args(self, system: str) -> List[str]:
+        """帶圖片時的 CLI 參數。
+
+        差別只有 --input-format stream-json:預設的純文字 stdin 沒有地方
+        可以放圖片,改用這個格式後 stdin 收的是一行 JSON,content 可以是
+        image + text 的陣列(與 Anthropic Messages API 同一種形狀)。
+
+        仍然是單次呼叫 —— 寫一行、關 stdin、讀完就結束,跟 build_args()
+        那條路徑一樣,不需要維持一個長命的互動 session。
+
+        DENY_TOOLS 照樣要帶。圖片一樣來自網頁表單,是不可信輸入,
+        不會因為換了輸入格式就變安全(憲法第四條)。
+        """
+        return self.build_args(system) + ["--input-format", "stream-json"]
+
+    @staticmethod
+    def build_image_message(prompt: str, image: dict) -> str:
+        """組出送進 stdin 的那一行 NDJSON。
+
+        圖片是 base64,體積大,同樣經 stdin 而非命令列 —— 命令列長度
+        在 Windows 上有硬性上限,一張照片必定超過。
+        """
+        return json.dumps({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image["media_type"],
+                            "data": image["data"],
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        }, ensure_ascii=False)
+
+    def _run(self, args: List[str], stdin_text: str) -> Iterator[str]:
+        """跑一次 CLI,把輸出的文字片段逐段吐出來。
+
+        純文字與帶圖片兩條路徑差別只在 args 與 stdin 的內容,收尾方式
+        (等待、判斷有沒有產出、殺掉沒結束的子行程)完全一樣,共用一份
+        才不會日後只修好其中一條。
+        """
         if not self.binary:
             raise NotLoggedIn("找不到 claude CLI,請先安裝 Claude Code")
 
         proc = subprocess.Popen(
-            self.build_args(system),
+            args,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
         try:
-            proc.stdin.write(prompt)
+            proc.stdin.write(stdin_text)
             proc.stdin.close()
 
             produced = False
@@ -139,6 +185,21 @@ class ClaudeCliTransport:
         finally:
             if proc.poll() is None:
                 proc.kill()
+
+    def stream(self, prompt: str, system: str) -> Iterator[str]:
+        return self._run(self.build_args(system), prompt)
+
+    def stream_image(self, prompt: str, system: str, image: dict) -> Iterator[str]:
+        """帶一張圖片呼叫。image 是 {"media_type": ..., "data": base64 字串}。
+
+        stdin 要換行結尾:CLI 是逐行讀 NDJSON 的,沒有換行它會一直等
+        下一個位元組,直到 stdin 關閉才處理 —— 加上去比較不會踩到
+        緩衝相關的邊界情況。
+        """
+        return self._run(
+            self.build_image_args(system),
+            self.build_image_message(prompt, image) + "\n",
+        )
 
     @staticmethod
     def _diagnose(stderr: str) -> TransportError:
@@ -177,11 +238,34 @@ class AnthropicApiTransport:
         return bool(self.api_key)
 
     def build_request(self, prompt: str, system: str) -> urllib.request.Request:
+        return self._build(system, prompt)
+
+    def build_image_request(
+        self, prompt: str, system: str, image: dict
+    ) -> urllib.request.Request:
+        """帶圖片的請求。content 從字串換成 image + text 的陣列。
+
+        一樣不傳 tools —— 這條路徑天生沒有工具可用,不需要 CLI 那份
+        DENY_TOOLS 清單(憲法第四條在這裡是靠「不給」而不是「禁止」達成)。
+        """
+        return self._build(system, [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image["media_type"],
+                    "data": image["data"],
+                },
+            },
+            {"type": "text", "text": prompt},
+        ])
+
+    def _build(self, system: str, content) -> urllib.request.Request:
         body = json.dumps({
             "model": config.API_MODEL,
             "max_tokens": config.API_MAX_TOKENS,
             "system": system,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
             "stream": True,
         }).encode("utf-8")
         return urllib.request.Request(
@@ -207,7 +291,13 @@ class AnthropicApiTransport:
         呼叫端會顯示空白內容,使用者以為是系統壞了卻看不到任何錯誤。
         因此在串流結束時明確檢查:完全沒有文字產出就視為錯誤,而非成功。
         """
-        req = self.build_request(prompt, system)
+        return self._consume(self.build_request(prompt, system))
+
+    def stream_image(self, prompt: str, system: str, image: dict) -> Iterator[str]:
+        """帶一張圖片呼叫。image 是 {"media_type": ..., "data": base64 字串}。"""
+        return self._consume(self.build_image_request(prompt, system, image))
+
+    def _consume(self, req: urllib.request.Request) -> Iterator[str]:
         try:
             response = self._open(req)
         except urllib.error.HTTPError as e:
@@ -270,6 +360,7 @@ class FakeTransport:
         self.error = error
         self.last_prompt: Optional[str] = None
         self.last_system: Optional[str] = None
+        self.last_image: Optional[dict] = None
 
     def is_available(self) -> bool:
         return True
@@ -284,3 +375,9 @@ class FakeTransport:
             raise self.error
         for chunk in self.chunks:
             yield chunk
+
+    def stream_image(self, prompt: str, system: str, image: dict) -> Iterator[str]:
+        # 記下圖片,測試才能斷言它真的被送出去了 —— 少了這條,
+        # 「圖片其實沒送到模型」這種 bug 會一路通過所有測試。
+        self.last_image = image
+        return self.stream(prompt, system)
