@@ -155,26 +155,23 @@
         <button class="btn-ghost" id="loadExample">載入範例資料</button>
       </div>
       <div id="metricFields" class="fields"></div>
-      <button class="btn-primary" id="gradeBtn">開始健檢</button>
-      <p class="hint">健檢為純計算,不需連線 AI,額度用盡時仍可使用。</p>
-    </div>
 
-    <div class="card">
-      <div class="card-head">
-        <div>
-          <h2>其他參考因素</h2>
-          <p class="hint">
-            豬舍類型、飼養規模、最近有無疫情等不在評級項目裡的背景資訊,
-            填了會在 AI 給改善建議時一併參考,不影響級距計算。
-          </p>
+      <div class="factor-section">
+        <h3>其他參考因素</h3>
+        <p class="hint">
+          豬舍類型、飼養規模、最近有無疫情等不在評級項目裡的背景資訊,
+          跟上面的數字一起送給 AI,健檢後給改善建議時會一併參考,不影響級距計算。
+        </p>
+        <ul class="drug-list" id="factorList"></ul>
+        <div class="drug-form">
+          <input type="text" id="factorName" placeholder="項目名稱,例如:豬舍類型">
+          <input type="text" id="factorValue" placeholder="說明(選填),例如:開放式豬舍,夏季悶熱">
+          <button type="button" class="btn-ghost" id="addFactorBtn">+ 新增因素</button>
         </div>
       </div>
-      <ul class="drug-list" id="factorList"></ul>
-      <div class="drug-form">
-        <input type="text" id="factorName" placeholder="項目名稱,例如:豬舍類型">
-        <input type="text" id="factorValue" placeholder="說明(選填),例如:開放式豬舍,夏季悶熱">
-        <button type="button" class="btn-ghost" id="addFactorBtn">+ 新增因素</button>
-      </div>
+
+      <button class="btn-primary" id="gradeBtn">開始健檢</button>
+      <p class="hint">健檢為純計算,不需連線 AI,額度用盡時仍可使用。</p>
     </div>
 
     <div id="healthResult">
