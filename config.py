@@ -50,6 +50,11 @@ MAX_MY_DRUGS = 20
 MAX_DRUG_NAME_CHARS = 60
 MAX_DRUG_NOTE_CHARS = 200
 
+# 生產健檢的「其他參考因素」上限。跟藥品庫同樣的道理:來自瀏覽器,
+# 只存在使用者這台裝置上,伺服器不保存,但送進請求時一樣不可信。
+MAX_REFERENCE_FACTORS = 10
+MAX_FACTOR_CHARS = 100
+
 # 要從 X-Forwarded-For 尾端砍掉幾層基礎設施位址。
 #
 # 正式環境實測的鏈:真實IP, Cloudflare, Render內部 —— 尾端兩層是平台的,

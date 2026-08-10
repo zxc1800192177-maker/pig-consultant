@@ -332,6 +332,8 @@ class Application:
         if path == "/api/advise":
             gate = self._gate(token)
             return (401, gate) if gate else self._advise(payload, client)
+        if path == "/api/advise-chat":
+            return self._advise_chat(payload, client, token)
         if path.startswith("/api/auth/"):
             return self._auth_post(path, payload, client, token)
         if path == "/api/health-checks":
@@ -700,9 +702,100 @@ class Application:
             }
 
         try:
-            return 200, {"advice": "".join(self.consultant.advise(weaknesses))}
+            return 200, {
+                "advice": "".join(self.consultant.advise(
+                    weaknesses, reference_factors=payload.get("referenceFactors"),
+                )),
+            }
         except TransportError as e:
             return 503, self._transport_error(e)
+
+    def advise_events(self, payload: dict, client: str, token: Optional[str] = None):
+        """生產健檢改善建議的追問,逐段產出事件供串流。
+
+        延續同一份改善建議繼續討論,用的是同一個 ADVICE_SYSTEM_PROMPT
+        persona,不是疾病諮詢 —— 這樣使用者才能順著同一個脈絡問「這幾項
+        應該先做哪個」,不會突然被當成在問診。
+
+        事件:
+          delta  AI 生成的一段文字
+          error  含 status,後續不再產出
+          done   正常結束
+        """
+        gate = self._gate(token)
+        if gate:
+            yield {"type": "error", "status": 401, **gate}
+            return
+
+        raw_weaknesses = payload.get("weaknesses") or []
+        if not raw_weaknesses:
+            yield {"type": "error", "status": 400, "error": "沒有健檢結果可以討論,請先完成健檢"}
+            return
+        weaknesses = [self._from_wire_weakness(w) for w in raw_weaknesses]
+
+        wait = self._throttled(client)
+        if wait is not None:
+            yield {
+                "type": "error", "status": 429,
+                "error": f"請稍候 {wait} 秒再送出下一題",
+            }
+            return
+
+        if self._over_hourly_limit(client):
+            yield {
+                "type": "error", "status": 429, "reason": "hourly_limit",
+                "error": (
+                    f"每小時最多提問 {config.MAX_QUESTIONS_PER_HOUR} 次,"
+                    "已達上限,請稍後再試。生產健檢不受影響。"
+                ),
+            }
+            return
+
+        if self._over_daily_budget():
+            yield {
+                "type": "error", "status": 503, "reason": "daily_limit",
+                "error": "今日 AI 諮詢已達上限,請明天再試,或聯繫管理員調整額度。",
+            }
+            return
+
+        try:
+            stream = self.consultant.advise(
+                weaknesses,
+                reference_factors=payload.get("referenceFactors"),
+                question=payload.get("question", ""),
+                history=payload.get("history"),
+            )
+            for chunk in stream:
+                yield {"type": "delta", "text": chunk}
+        except ValueError as e:
+            yield {"type": "error", "status": 400, "error": str(e)}
+            return
+        except TransportError as e:
+            yield {"type": "error", "status": 503, **self._transport_error(e)}
+            return
+
+        yield {"type": "done"}
+
+    def _advise_chat(self, payload: dict, client: str, token=None) -> Tuple[int, dict]:
+        """把追問串流事件收攏成單一回應。
+
+        供測試與不支援串流的呼叫端使用,邏輯與串流路徑共用,
+        避免兩條路走久了行為不一致(見 _consult 的同一個理由)。
+        """
+        answer = []
+        error: Optional[dict] = None
+
+        for event in self.advise_events(payload, client, token):
+            kind = event.pop("type")
+            if kind == "delta":
+                answer.append(event["text"])
+            elif kind == "error":
+                error = event
+
+        if error is not None:
+            status = error.pop("status")
+            return status, error
+        return 200, {"answer": "".join(answer)}
 
     @staticmethod
     def _transport_error(error: TransportError) -> dict:
@@ -811,12 +904,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         token = self._session_token()
 
         if self.path == "/api/consult":
-            self._stream_consult(raw, client, token)
+            self._stream(raw, lambda payload: APP.consult_events(payload, client, token))
+            return
+        if self.path == "/api/advise-chat":
+            self._stream(raw, lambda payload: APP.advise_events(payload, client, token))
             return
         self._send(*APP.handle_post(self.path, raw, client, token))
 
-    def _stream_consult(self, raw: bytes, client: str, token=None) -> None:
-        """串流疾病諮詢,讓首段文字盡早出現(規格第 7 節:3 秒內)。"""
+    def _stream(self, raw: bytes, make_events) -> None:
+        """SSE 串流的共用外殼:解析請求體、送 SSE 表頭、把事件逐一寫出去。
+
+        疾病諮詢與健檢改善建議的追問都走這裡 —— 差別只在 make_events
+        呼叫哪個事件產生器,HTTP 傳輸這一層完全一樣,不必寫兩份。
+        """
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -830,7 +930,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
         try:
-            for event in APP.consult_events(payload, client, token):
+            for event in make_events(payload):
                 self._send_event(event)
         except (BrokenPipeError, ConnectionAbortedError):
             pass  # 瀏覽器中途離開

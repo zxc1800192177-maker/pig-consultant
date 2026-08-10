@@ -534,6 +534,25 @@ tr:last-child td { border-bottom: none; }
 .tag-computed::before { content: "◆ "; color: var(--accent); }
 .tag-ai::before { content: "✦ "; color: var(--pink); }
 
+/* ── 改善建議追問對話框 ── */
+.advice-chat { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border-light); }
+.advice-chat-thread {
+  display: flex; flex-direction: column; gap: 12px;
+  max-height: 360px; overflow-y: auto; margin-bottom: 12px;
+}
+.advice-chat-thread:empty { display: none; }
+.advice-chat-msg {
+  padding: 10px 14px; border-radius: var(--radius-sm);
+  font-size: 14.5px; line-height: 1.55; max-width: 88%;
+}
+.advice-chat-msg .md { font-size: inherit; }
+.advice-chat-msg .notice { margin: 0; }
+.advice-chat-msg-user { align-self: flex-end; background: var(--accent); color: #fff; }
+.advice-chat-msg-assistant { align-self: flex-start; background: var(--surface-2); color: var(--ink); }
+.advice-chat-form { display: flex; gap: 8px; align-items: flex-end; }
+.advice-chat-form textarea { flex: 1; min-height: 44px; }
+.advice-chat-form .btn-primary { width: auto; flex-shrink: 0; }
+
 /* ── 載入狀態 ── */
 .loading {
   display: flex; align-items: center; gap: 11px;

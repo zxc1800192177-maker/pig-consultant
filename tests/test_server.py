@@ -538,6 +538,125 @@ class TestGradeToAdviseRoundTrip:
         assert status == 200, f"應成功,實際回應:{body}"
 
 
+class TestAdviseChatEndpoint:
+    """生產健檢改善建議後的追問對話框(/api/advise-chat)。
+
+    跟 /api/consult 是同一種串流外殼(TestStreamingEvents 已經測過那份共用
+    邏輯),這裡只測這個端點特有的規則:一定要先有健檢弱項、persona 不能
+    跟疾病諮詢混淆、以及登入門檻與限流套用得到。
+    """
+
+    WEAKNESSES = [
+        {"key": "psy", "name": "PSY", "grade": "F", "shortfallSd": 1.0,
+         "improvement": "", "downstreamNames": []},
+    ]
+
+    def _events(self, app, payload, client="test"):
+        return list(app.advise_events(payload, client))
+
+    def test_rejects_without_weaknesses(self, app):
+        status, body = _post(app, "/api/advise-chat", {"question": "先做哪個比較好"})
+        assert status == 400
+        assert "健檢" in body["error"]
+
+    def test_rejects_empty_question(self, app):
+        status, _ = _post(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES, "question": "   ",
+        })
+        assert status == 400
+
+    def test_rejects_overlong_question(self, app):
+        status, _ = _post(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES,
+            "question": "問" * (config.MAX_QUESTION_CHARS + 1),
+        })
+        assert status == 400
+
+    def test_succeeds_with_weaknesses_and_question(self, app):
+        status, body = _post(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES, "question": "先做哪個比較好",
+        })
+        assert status == 200
+        assert body["answer"]
+
+    def test_uses_advice_persona_not_disease_persona(self):
+        """憲法設計:追問改善建議不能被誤送成疾病諮詢的語氣。"""
+        from ai.prompts import ADVICE_SYSTEM_PROMPT, DISEASE_SYSTEM_PROMPT
+
+        transport = FakeTransport(chunks=["建議內容"])
+        app = Application(transport=transport)
+        _post(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES, "question": "先做哪個比較好",
+        })
+        assert transport.last_system == ADVICE_SYSTEM_PROMPT
+        assert transport.last_system != DISEASE_SYSTEM_PROMPT
+
+    def test_threads_reference_factors_into_the_prompt(self):
+        transport = FakeTransport(chunks=["建議內容"])
+        app = Application(transport=transport)
+        _post(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES, "question": "先做哪個比較好",
+            "referenceFactors": [{"name": "豬舍類型", "value": "開放式豬舍"}],
+        })
+        assert "豬舍類型" in transport.last_prompt
+        assert "開放式豬舍" in transport.last_prompt
+
+    def test_threads_history_into_the_prompt(self):
+        transport = FakeTransport(chunks=["建議內容"])
+        app = Application(transport=transport)
+        _post(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES, "question": "那第二個呢",
+            "history": [
+                {"role": "user", "content": "先做哪個比較好"},
+                {"role": "assistant", "content": "先處理離乳前死亡率"},
+            ],
+        })
+        assert "先處理離乳前死亡率" in transport.last_prompt
+
+    def test_error_event_carries_status(self):
+        app = Application(transport=FakeTransport(error=QuotaExceeded("用盡")))
+        events = self._events(app, {
+            "weaknesses": self.WEAKNESSES, "question": "先做哪個比較好",
+        })
+        error = next(e for e in events if e["type"] == "error")
+        assert error["status"] == 503
+        assert error["reason"] == "quota"
+
+    def test_deltas_then_done(self, app):
+        events = self._events(app, {
+            "weaknesses": self.WEAKNESSES, "question": "先做哪個比較好",
+        })
+        assert events[-1]["type"] == "done"
+        assert any(e["type"] == "delta" for e in events)
+
+    def test_blocked_without_login_when_accounts_enabled(self):
+        app = _account_app()
+        status, body = _post(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES, "question": "先做哪個比較好",
+        })
+        assert status == 401
+        assert body.get("reason") == "login_required"
+
+    def test_works_after_guest_login(self):
+        app = _account_app()
+        token = _post(app, "/api/auth/guest", {})[1][SET_SESSION_KEY]
+        status, body = _post_as(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES, "question": "先做哪個比較好",
+        }, token)
+        assert status == 200
+        assert body["answer"]
+
+    def test_second_immediate_request_is_throttled(self, app):
+        _post(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES, "question": "第一問",
+        })
+        status, body = _post(app, "/api/advise-chat", {
+            "weaknesses": self.WEAKNESSES, "question": "第二問",
+        })
+        assert status == 429
+        assert "秒" in body["error"]
+
+
 class TestExampleEndpoint:
     """demo 用的範例資料(範例牧場,已取得授權)。"""
 

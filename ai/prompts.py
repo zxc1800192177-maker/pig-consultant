@@ -147,6 +147,30 @@ def build_my_drugs_context(my_drugs: Optional[List[dict]]) -> str:
     )
 
 
+def build_reference_factors(factors: Optional[List[dict]]) -> str:
+    """把牧場主填寫的「其他參考因素」整理成給 AI 的背景資訊。
+
+    這些不是常模的評級項目,系統無法查核正確性,純粹是牧場主自己提供的
+    補充說明(例如豬舍類型、飼養規模、最近有無疫情)。標成「參考」是要
+    讓 AI 知道這是輔助判斷改善建議時該考慮的背景,不是要它拿來計算
+    或驗證什麼 —— 跟弱項的級距不同,弱項是系統算出來的(憲法第二條),
+    這裡的內容完全是使用者說了算。
+    """
+    if not factors:
+        return ""
+
+    lines = [f"- {f['name']}:{f['value']}" for f in factors if f.get("value")]
+    if not lines:
+        return ""
+
+    return (
+        "【牧場主提供的其他參考因素,供你判斷改善建議時參考,"
+        "不是評級依據】\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+
+
 def build_advice_prompt(weaknesses: List[dict]) -> str:
     """把已算好的弱項整理成給 AI 解讀的輸入。"""
     lines = []

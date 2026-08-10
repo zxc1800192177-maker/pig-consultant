@@ -11,6 +11,7 @@ import {
 import { SseParser } from "./lib/sse.js";
 import { isSpeechRecognitionSupported, mergeTranscript, splitFinalAndInterim } from "./lib/speech.js";
 import { addDrug, loadMyDrugs, removeDrug, saveMyDrugs } from "./lib/drugs.js";
+import { addFactor, removeFactor } from "./lib/factors.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -573,6 +574,58 @@ function showBanner(text, tone) {
 }
 
 // ── 生產健檢 ──
+
+// 其他參考因素:豬舍類型、飼養規模這類不在評級項目裡的背景資訊。
+// 跟疾病諮詢的 history 一樣只存在瀏覽器記憶體,換一次健檢就該重填,
+// 不必跨頁面保留,所以不寫 localStorage。
+let referenceFactors = [];
+
+function renderFactorList() {
+  const list = $("factorList");
+  if (!list) return;
+
+  if (!referenceFactors.length) {
+    list.innerHTML = `<li class="drug-empty">還沒有加入任何參考因素。</li>`;
+    return;
+  }
+  list.innerHTML = referenceFactors
+    .map((f) => `
+      <li class="drug-item">
+        <div>
+          <div class="drug-name">${escapeHtml(f.name)}</div>
+          ${f.value ? `<div class="drug-meta">${escapeHtml(f.value)}</div>` : ""}
+        </div>
+        <button type="button" class="drug-remove" data-id="${escapeHtml(f.id)}">移除</button>
+      </li>`)
+    .join("");
+}
+
+function submitNewFactor() {
+  const name = $("factorName").value;
+  if (!name.trim()) return $("factorName").focus();
+
+  referenceFactors = addFactor(referenceFactors, { name, value: $("factorValue").value });
+  renderFactorList();
+
+  $("factorName").value = "";
+  $("factorValue").value = "";
+  $("factorName").focus();
+}
+
+const factorListEl = $("factorList");
+const addFactorBtnEl = $("addFactorBtn");
+if (factorListEl && addFactorBtnEl) {
+  renderFactorList();
+  addFactorBtnEl.addEventListener("click", submitNewFactor);
+  factorListEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".drug-remove");
+    if (btn) {
+      referenceFactors = removeFactor(referenceFactors, btn.dataset.id);
+      renderFactorList();
+    }
+  });
+}
+
 function renderMetricFields() {
   $("metricFields").innerHTML = metricDefs
     .map(
@@ -712,10 +765,25 @@ function renderHealthResult(data) {
       <div class="section-label tag-ai">AI 改善建議</div>
       <div class="notice notice-caution">${escapeHtml(data.medicalDisclaimer)}</div>
       <div id="adviceBody" class="md"></div>
+      <div class="advice-chat is-hidden" id="adviceChat">
+        <div class="advice-chat-thread" id="adviceChatThread"></div>
+        <div class="advice-chat-form">
+          <textarea id="adviceChatInput" rows="2"
+            placeholder="針對這份建議繼續討論,例如:這幾項應該先做哪個?"></textarea>
+          <button class="btn-primary" id="adviceChatSend">送出</button>
+        </div>
+      </div>
     </div>`;
 }
 
+// 追問改善建議的對話歷史。只存在瀏覽器記憶體,理由跟疾病諮詢的
+// history 一樣(見檔案開頭),而且是完全獨立的一份 —— 不與疾病諮詢
+// 混在一起,否則 AI 會分不清這輪對話到底是在問診還是在談經營改善。
+const MAX_ADVICE_HISTORY_TURNS = MAX_HISTORY_TURNS;
+let adviceHistory = [];
+
 async function requestAdvice(weaknesses) {
+  adviceHistory = [];
   if (!weaknesses.length) {
     $("adviceCard").remove();
     return;
@@ -729,19 +797,106 @@ async function requestAdvice(weaknesses) {
     const res = await fetch("/api/advise", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ weaknesses }),
+      body: JSON.stringify({ weaknesses, referenceFactors }),
     });
     const data = await res.json().catch(() => ({}));
 
-    body.innerHTML = res.ok
-      ? renderMarkdown(data.advice || "")
-      : `<div class="notice notice-warn">${escapeHtml(
-          data.error || `伺服器錯誤(HTTP ${res.status}),請稍後再試`
-        )}</div>`;
+    if (res.ok) {
+      body.innerHTML = renderMarkdown(data.advice || "");
+      // 只有真的拿到建議內容才開放追問,否則使用者會對著一片空白發問
+      if (data.advice) $("adviceChat")?.classList.remove("is-hidden");
+    } else {
+      body.innerHTML = `<div class="notice notice-warn">${escapeHtml(
+        data.error || `伺服器錯誤(HTTP ${res.status}),請稍後再試`
+      )}</div>`;
+    }
   } catch (e) {
     body.innerHTML = `<div class="notice notice-warn">連線失敗:${escapeHtml(String(e))}</div>`;
   }
 }
+
+function appendAdviceChatBubble(role, html) {
+  const thread = $("adviceChatThread");
+  const bubble = document.createElement("div");
+  bubble.className = `advice-chat-msg advice-chat-msg-${role}`;
+  bubble.innerHTML = html;
+  thread.appendChild(bubble);
+  thread.scrollTop = thread.scrollHeight;
+  return bubble;
+}
+
+async function sendAdviceChatMessage() {
+  const input = $("adviceChatInput");
+  const question = input.value.trim();
+  if (!question) return input.focus();
+
+  input.value = "";
+  $("adviceChatSend").disabled = true;
+  appendAdviceChatBubble("user", escapeHtml(question));
+  const loading = appendAdviceChatBubble(
+    "assistant", `<span class="loading"><span class="spinner"></span>思考中…</span>`
+  );
+
+  let answer = "";
+  try {
+    const res = await fetch("/api/advise-chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question, weaknesses: lastWeaknesses, referenceFactors, history: adviceHistory,
+      }),
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const parser = new SseParser();
+    let bubble = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const event of parser.push(decoder.decode(value, { stream: true }))) {
+        if (event.type === "delta") {
+          loading.remove();
+          answer += event.text;
+          if (!bubble) bubble = appendAdviceChatBubble("assistant", "");
+          bubble.innerHTML = renderMarkdown(trimDangling(answer)) + '<span class="cursor"></span>';
+          $("adviceChatThread").scrollTop = $("adviceChatThread").scrollHeight;
+        } else if (event.type === "error") {
+          loading.remove();
+          appendAdviceChatBubble("assistant",
+            `<div class="notice notice-warn">${escapeHtml(event.error)}</div>`);
+        }
+      }
+    }
+
+    if (bubble) bubble.innerHTML = renderMarkdown(answer);
+  } catch (e) {
+    loading.remove();
+    appendAdviceChatBubble("assistant",
+      `<div class="notice notice-warn">連線失敗:${escapeHtml(String(e))}</div>`);
+  } finally {
+    $("adviceChatSend").disabled = false;
+    if (answer) {
+      adviceHistory.push({ role: "user", content: question });
+      adviceHistory.push({ role: "assistant", content: answer });
+      if (adviceHistory.length > MAX_ADVICE_HISTORY_TURNS) {
+        adviceHistory = adviceHistory.slice(-MAX_ADVICE_HISTORY_TURNS);
+      }
+    }
+  }
+}
+
+// adviceCard 每次健檢都整個重畫,用事件委派接住聊天輸入框的按鈕與 Enter 鍵。
+$("healthResult")?.addEventListener("click", (e) => {
+  if (e.target.closest("#adviceChatSend")) sendAdviceChatMessage();
+});
+$("healthResult")?.addEventListener("keydown", (e) => {
+  if (e.target.id === "adviceChatInput" && e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendAdviceChatMessage();
+  }
+});
 
 // ── 疾病諮詢 ──
 function setConsultBusy(busy) {

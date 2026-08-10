@@ -17,6 +17,7 @@ from ai.prompts import (
     build_farm_context,
     build_history_context,
     build_my_drugs_context,
+    build_reference_factors,
 )
 from core.dosage import DosageEntry, match_dosage_entries
 from core.reportable import ReportableMatch, baseline_notice, detect_reportable
@@ -98,6 +99,31 @@ class Consultant:
             })
         return cleaned
 
+    @staticmethod
+    def _clean_factors(factors: Optional[List[dict]]) -> List[dict]:
+        """裁切「其他參考因素」。跟藥品庫同樣的道理:來自瀏覽器,不可信,
+        則數與長度都要在伺服器端強制設限,格式壞掉的項目直接忽略。
+        """
+        if not isinstance(factors, list):
+            return []
+
+        cleaned = []
+        for f in factors[:config.MAX_REFERENCE_FACTORS]:
+            if not isinstance(f, dict):
+                continue
+            name = f.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+
+            value = f.get("value")
+            value = value.strip()[:config.MAX_FACTOR_CHARS] if isinstance(value, str) else ""
+
+            cleaned.append({
+                "name": name.strip()[:config.MAX_FACTOR_CHARS],
+                "value": value,
+            })
+        return cleaned
+
     def consult(
         self,
         question: str,
@@ -144,15 +170,41 @@ class Consultant:
             stream=self.transport.stream(prompt, DISEASE_SYSTEM_PROMPT),
         )
 
-    def advise(self, weaknesses: List[dict]) -> Iterator[str]:
+    def advise(
+        self,
+        weaknesses: List[dict],
+        reference_factors: Optional[List[dict]] = None,
+        question: Optional[str] = None,
+        history: Optional[List[dict]] = None,
+    ) -> Iterator[str]:
         """生產健檢的改善建議。
 
-        送進去的是**已經算好的**級距與落後程度,AI 只負責解讀(憲法第二條)。
+        送進去的級距與落後程度**已經算好**,AI 只負責解讀(憲法第二條)。
         沒有弱項就不呼叫 AI —— 沒必要為了「恭喜你都很好」花掉額度。
+
+        question 有值時是追問模式:延續同一份改善建議繼續討論「那我該
+        先做哪個」這類問題,用的仍是 ADVICE_SYSTEM_PROMPT 這個 persona,
+        不會切換成疾病諮詢的語氣 —— 使用者問的是經營建議,不是在問診。
         """
         if not weaknesses:
             return iter(())
-        return self.transport.stream(
-            build_advice_prompt(weaknesses),
-            ADVICE_SYSTEM_PROMPT,
-        )
+
+        cleaned_factors = self._clean_factors(reference_factors)
+        parts = [build_advice_prompt(weaknesses), build_reference_factors(cleaned_factors)]
+
+        if question is not None or history is not None:
+            # 型別檢查跟 consult() 同一個理由:非字串呼叫 .strip() 會拋
+            # AttributeError,一路炸掉整個請求處理。
+            if question is not None and not isinstance(question, str):
+                raise ValueError("問題必須是文字")
+            question = (question or "").strip()
+            if not question:
+                raise ValueError("問題不可為空")
+            if len(question) > config.MAX_QUESTION_CHARS:
+                raise ValueError(f"問題請控制在 {config.MAX_QUESTION_CHARS} 字以內")
+
+            parts.append(build_history_context(self._trim_history(history)))
+            parts.append(question)
+
+        prompt = "\n".join(part for part in parts if part)
+        return self.transport.stream(prompt, ADVICE_SYSTEM_PROMPT)
