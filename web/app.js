@@ -882,15 +882,20 @@ async function ask(question) {
 }
 
 function renderDosageReference(entries) {
-  const body = entries
+  const groups = entries
     .map((entry) => {
       const drugs = entry.drugs
         .map((d) => {
-          const withdrawal = d.withdrawalDays != null ? `・休藥期 ${d.withdrawalDays} 天` : "";
+          const withdrawal = d.withdrawalDays != null
+            ? `<span class="dosage-withdrawal">休藥期 ${d.withdrawalDays} 天</span>`
+            : `<span class="dosage-withdrawal dosage-withdrawal-unknown">休藥期未知,請洽獸醫</span>`;
           return `
             <div class="dosage-drug">
-              <span class="dosage-drug-name">${escapeHtml(d.name)}</span>
-              ${escapeHtml(d.dosage)}${withdrawal}
+              <div class="dosage-drug-head">
+                <span class="dosage-drug-name">${escapeHtml(d.name)}</span>
+                ${withdrawal}
+              </div>
+              <div class="dosage-drug-detail">${escapeHtml(d.dosage)}</div>
             </div>`;
         })
         .join("");
@@ -898,16 +903,16 @@ function renderDosageReference(entries) {
         ? `<div class="dosage-source">資料來源:${escapeHtml(entry.sourceNote)}</div>`
         : "";
       return `
-        <div class="dosage-entry">
+        <div class="dosage-group">
           <div class="dosage-disease">${escapeHtml(entry.diseaseName)}</div>
           ${drugs}${source}
         </div>`;
     })
     .join("");
   return `
-    <div class="notice notice-verified">
-      <div class="section-label tag-computed">官方劑量對照(系統查表,非 AI 生成)</div>
-      ${body}
+    <div class="card dosage-card">
+      <div class="section-label tag-computed">官方劑量對照 · 系統查表,非 AI 生成</div>
+      ${groups}
     </div>`;
 }
 
