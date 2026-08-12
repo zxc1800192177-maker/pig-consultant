@@ -14,10 +14,13 @@ import pathlib
 import socketserver
 import threading
 import time
+from datetime import date, datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from typing import Dict, List, Optional, Tuple
 
 import config
+import importer
+import schedule
 from auth import Auth, AuthError, InvalidCredentials, NotGuest, UsernameTaken, ValidationError
 from db import select_store
 from ai.consultant import Consultant
@@ -42,7 +45,53 @@ from core.labels import (
     source_label,
     upstream_note,
 )
+from core import labels
 from core.metrics import validate
+
+def _today() -> date:
+    """伺服器的「今天」。**只有這裡取得當下日期** —— schedule.py 與
+    importer.py 都不自己取,一律由呼叫端傳入,測試才能固定日期斷言。
+    """
+    return datetime.now(timezone.utc).date()
+
+
+def _monday(day: date) -> date:
+    return day - timedelta(days=day.weekday())
+
+
+def _iso(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def _date(text) -> Optional[date]:
+    """YYYY-MM-DD → date。壞掉的格式回 None,不拋例外 ——
+    前端送什麼過來都不可信(憲法第四條)。
+    """
+    if isinstance(text, date):
+        return text
+    if not isinstance(text, str):
+        return None
+    try:
+        return date.fromisoformat(text.strip()[:10])
+    except ValueError:
+        return None
+
+
+def _text(value, limit: int) -> str:
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def _query(path: str, key: str) -> Optional[str]:
+    if "?" not in path:
+        return None
+    from urllib.parse import parse_qs
+    values = parse_qs(path.split("?", 1)[1]).get(key)
+    return values[0] if values else None
+
+
+def _route(path: str) -> str:
+    return path.split("?", 1)[0]
+
 
 BASE_DIR = pathlib.Path(__file__).parent
 WEB_DIR = BASE_DIR / "web"
@@ -58,6 +107,8 @@ def request_limit(path: str = "") -> int:
     """
     if path == "/api/drug-label":
         return config.MAX_IMAGE_REQUEST_BYTES
+    if path in ("/api/import", "/api/import/preview"):
+        return config.MAX_IMPORT_BYTES
     return config.MAX_REQUEST_BYTES
 
 
@@ -292,12 +343,46 @@ class Application:
             return None
         return {"reason": "login_required", "error": "請先登入或使用訪客試用"}
 
+    def _farm_of(self, token):
+        """(farm_id, user) —— 兩者都拿不到時回 (None, None)。
+
+        v2 的每一個資料端點都從這裡取 farm_id,不從請求內容拿。
+        讓前端傳 farm_id 等於讓任何人換一個號碼就看到別的牧場
+        (憲法第十一條)。
+        """
+        user = self._current_user(token)
+        if user is None or user.farm_id is None:
+            return None, user
+        return user.farm_id, user
+
+    def _need_farm(self, token):
+        """回 (farm_id, user, 錯誤)。錯誤不是 None 就直接回給前端。"""
+        farm_id, user = self._farm_of(token)
+        if user is None:
+            return None, None, (401, {"error": "請先登入"})
+        if farm_id is None:
+            return None, user, (409, {"error": "這個帳號還沒有對應的牧場"})
+        return farm_id, user, None
+
+    @staticmethod
+    def _need_owner(user):
+        """只有牧場主能做的事:月報、值得檢視、設定、匯入、觸發 AI 建議。
+
+        員工看得到工作清單與母豬卡(那是他做事需要的),但花錢的動作與
+        經營層面的資訊由牧場主控制(憲法第十一條第 5 款、使用者決定)。
+        """
+        if user is not None and not user.is_owner:
+            return 403, {"reason": "owner_only", "error": "這項功能只有牧場主可以使用"}
+        return None
+
     @staticmethod
     def _user_payload(user) -> dict:
         if user is None:
             return {"loggedIn": False}
         return {
             "loggedIn": True,
+            "role": user.role,
+            "isOwner": user.is_owner,
             "username": user.username,
             "isGuest": user.is_guest,
         }
@@ -369,6 +454,22 @@ class Application:
             return self._list_health_checks(token)
         if path == "/api/my-drugs":
             return self._list_my_drugs(token)
+
+        # ── v2 ──
+        route = _route(path)
+        if route == "/api/sows":
+            return self._list_sows(token, path)
+        if route.startswith("/api/sows/"):
+            sow_id = self._path_id(route)
+            if sow_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            return self._sow_detail(token, sow_id)
+        if route == "/api/tasks":
+            return self._tasks(token, path)
+        if route == "/api/alerts":
+            return self._alerts(token)
+        if route == "/api/pens":
+            return self._pens(token)
         if path == "/api/metrics":
             return 200, {
                 "metrics": [
@@ -418,6 +519,18 @@ class Application:
             return self._add_my_drug(payload, token)
         if path == "/api/drug-label":
             return self._read_drug_label(payload, client, token)
+
+        # ── v2 ──
+        if path == "/api/sows":
+            return self._add_sow(payload, token)
+        if path == "/api/sow-events":
+            return self._add_event(payload, token)
+        if path == "/api/pens":
+            return self._add_pen(payload, token)
+        if path == "/api/import/preview":
+            return self._import_preview(payload, token)
+        if path == "/api/import":
+            return self._import_commit(payload, token)
         return 404, {"error": "not found"}
 
     def handle_delete(self, path: str, token: Optional[str] = None) -> Tuple[int, dict]:
@@ -440,6 +553,13 @@ class Application:
                 return 400, {"error": "編號格式錯誤"}
             ok = self.store.delete_health_check(user.id, check_id)
             return (200, {"ok": True}) if ok else (404, {"error": "找不到這筆資料"})
+
+        # ── v2 ──
+        if path.startswith("/api/sow-events/"):
+            event_id = self._path_id(path)
+            if event_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            return self._delete_event(token, event_id)
 
         return 404, {"error": "not found"}
 
@@ -579,6 +699,274 @@ class Application:
             active_ingredient=ingredient,
         )
         return 200, {"id": drug_id}
+
+    # ── v2:母豬場管理 ──
+    #
+    # 每個端點都用 _need_farm 取得 farm_id,不從請求內容拿 ——
+    # 讓前端傳 farm_id 等於讓任何人換個號碼就看到別的牧場。
+
+    @staticmethod
+    def _sow_payload(row) -> dict:
+        return {
+            "id": row["id"],
+            "earTag": row["ear_tag"],
+            "breed": row.get("breed") or "",
+            "parity": row.get("parity") or 0,
+            "status": row.get("status") or "active",
+            "penId": row.get("pen_id"),
+            "sireTag": row.get("sire_tag") or "",
+            "damTag": row.get("dam_tag") or "",
+            "entryDate": _iso(row.get("entry_date")),
+            "birthDate": _iso(row.get("birth_date")),
+        }
+
+    @staticmethod
+    def _event_payload(row) -> dict:
+        return {
+            "id": row["id"],
+            "sowId": row["sow_id"],
+            "type": row["event_type"],
+            "date": _iso(row["event_date"]),
+            "detail": row.get("detail") or {},
+            "excluded": bool(row.get("excluded")),
+            "recordedBy": row.get("recorded_by"),
+        }
+
+    def _list_sows(self, token, path) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        status = "active"
+        if "?" in path and "all" in path.split("?", 1)[1]:
+            status = None
+        return 200, {"sows": [self._sow_payload(s)
+                              for s in self.store.list_sows(farm_id, status)]}
+
+    def _add_sow(self, payload, token) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        tag = payload.get("earTag")
+        if not isinstance(tag, str) or not tag.strip():
+            return 400, {"error": "請填寫耳號"}
+        tag = tag.strip()[:config.MAX_EAR_TAG_CHARS]
+
+        if len(self.store.list_sows(farm_id)) >= config.MAX_SOWS_PER_FARM:
+            return 400, {"error": f"母豬數量已達上限 {config.MAX_SOWS_PER_FARM} 頭"}
+        if self.store.find_sow_by_tag(farm_id, tag):
+            return 409, {"error": f"耳號 {tag} 已經在場,不能重複"}
+
+        try:
+            sow_id = self.store.add_sow(
+                farm_id, tag,
+                entry_date=_date(payload.get("entryDate")),
+                birth_date=_date(payload.get("birthDate")),
+                breed=_text(payload.get("breed"), config.MAX_BREED_CHARS),
+                sire_tag=_text(payload.get("sireTag"), config.MAX_EAR_TAG_CHARS),
+                dam_tag=_text(payload.get("damTag"), config.MAX_EAR_TAG_CHARS),
+            )
+        except ValueError as e:
+            return 409, {"error": str(e)}
+        return 200, {"id": sow_id}
+
+    def _sow_detail(self, token, sow_id) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        sow = self.store.get_sow(farm_id, sow_id)
+        if sow is None:
+            return 404, {"error": "找不到這頭母豬"}
+        events = self.store.list_sow_events(farm_id, sow_id)
+        return 200, {
+            "sow": self._sow_payload(sow),
+            "events": [self._event_payload(e) for e in events],
+        }
+
+    def _add_event(self, payload, token) -> Tuple[int, dict]:
+        """記一筆事件。**記錄即完成** —— 不另設「勾選完成」,所以不會出現
+        「說做了卻沒有資料」的缺口(使用者決定)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        sow_id = payload.get("sowId")
+        if not isinstance(sow_id, int):
+            return 400, {"error": "請指定母豬"}
+        sow = self.store.get_sow(farm_id, sow_id)
+        if sow is None:
+            return 404, {"error": "找不到這頭母豬"}
+
+        code = payload.get("type")
+        if code not in schedule.KNOWN_EVENTS:
+            return 400, {"error": f"不認得的事件類型:{code}"}
+
+        when = _date(payload.get("date"))
+        if when is None:
+            return 400, {"error": "日期格式錯誤"}
+
+        detail = payload.get("detail")
+        detail = detail if isinstance(detail, dict) else {}
+        detail = {k: v for k, v in list(detail.items())[:config.MAX_EVENT_FIELDS]}
+
+        event_id = self.store.add_sow_event(
+            farm_id, sow_id, code, when, detail, recorded_by=user.id)
+
+        # 事件的連帶效果。寫在這裡而非 schedule.py:那一層是純推算,
+        # 不該有副作用。
+        after = dict(sow)
+        if code == "FW":
+            after["parity"] = (sow.get("parity") or 0) + 1
+        elif code == "WN":
+            after["pen_id"] = None            # 離乳後產房欄位空出來
+        elif code in ("SAL", "DTH"):
+            after["status"] = "culled" if code == "SAL" else "dead"
+            after["pen_id"] = None
+            # 離群時自動加民國年後綴,裸號釋放給新豬(牧場既有慣例)。
+            # **用事件日期的年份而非今天** —— 補登去年的淘汰才不會標錯。
+            suffix = f"-D{when.year - 1911}"
+            if not sow["ear_tag"].endswith(suffix):
+                after["ear_tag"] = sow["ear_tag"] + suffix
+
+        changed = {k: v for k, v in after.items()
+                   if k in ("parity", "pen_id", "status", "ear_tag")
+                   and v != sow.get(k)}
+        if changed:
+            self.store.update_sow(farm_id, sow_id, **changed)
+
+        return 200, {"id": event_id, "sow": self._sow_payload({**sow, **changed})}
+
+    def _delete_event(self, token, event_id) -> Tuple[int, dict]:
+        """員工只能刪自己記的、且是最新一筆。
+
+        完全不能改的話,實務上會變成「先不記、等老闆來」—— 反而遺失資料
+        (憲法第十一條第 5 款)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        events = self.store.list_sow_events(farm_id)
+        target = next((e for e in events if e["id"] == event_id), None)
+        if target is None:
+            return 404, {"error": "找不到這筆記錄"}
+
+        if not user.is_owner:
+            newest = max(events, key=lambda e: (e["event_date"], e["id"]))
+            if target["recorded_by"] != user.id:
+                return 403, {"error": "只能修正自己記的那一筆"}
+            if target["id"] != newest["id"]:
+                return 403, {"error": "只能修正最新一筆,較舊的請牧場主處理"}
+
+        self.store.delete_sow_event(farm_id, event_id)
+        return 200, {"ok": True}
+
+    def _tasks(self, token, path) -> Tuple[int, dict]:
+        """這一週的工作。依工作類型分組,不按日期 —— 這個場跑批次生產,
+        一週一批(specs/v2-facts.md 第 7 條)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        start = _date(_query(path, "start")) or _monday(_today())
+        end = start + timedelta(days=6)
+        sows = self.store.list_sows(farm_id, "active")
+        events = self.store.list_sow_events(farm_id)
+        cfg = self._farm_settings(farm_id)
+
+        groups = schedule.build_week_tasks(sows, events, start, end, cfg)
+        return 200, {
+            "weekStart": start.isoformat(),
+            "weekEnd": end.isoformat(),
+            "groups": [
+                {"kind": g["kind"],
+                 "label": labels.task_label(g["kind"]),
+                 "tasks": [{"sowId": t.sow_id, "earTag": t.ear_tag,
+                            "due": t.due.isoformat(), "why": t.why}
+                           for t in g["tasks"]]}
+                for g in groups
+            ],
+        }
+
+    def _alerts(self, token) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        sows = self.store.list_sows(farm_id, "active")
+        events = self.store.list_sow_events(farm_id)
+        pens = self.store.list_pens(farm_id)
+        cfg = self._farm_settings(farm_id)
+        today = _today()
+
+        return 200, {
+            "openSows": schedule.overdue_sows(sows, events, today, cfg),
+            "pens": schedule.pen_pressure(sows, events, pens, today, cfg),
+        }
+
+    def _farm_settings(self, farm_id) -> dict:
+        """牧場自訂的生產參數。目前先用預設值,設定畫面做好後從這裡讀。"""
+        return schedule.settings_with_defaults(None)
+
+    def _import_preview(self, payload, token) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        raw = payload.get("content")
+        if not isinstance(raw, str) or not raw.strip():
+            return 400, {"error": "請選擇要匯入的檔案"}
+
+        result = importer.parse(raw, today=_today())
+        return 200, importer.summarize(result)
+
+    def _import_commit(self, payload, token) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        raw = payload.get("content")
+        if not isinstance(raw, str) or not raw.strip():
+            return 400, {"error": "請選擇要匯入的檔案"}
+
+        exclude = payload.get("excludeLines")
+        exclude = [n for n in exclude if isinstance(n, int)] if isinstance(exclude, list) else []
+
+        result = importer.parse(raw, today=_today())
+        stats = importer.import_into(self.store, farm_id, result,
+                                     exclude_lines=exclude, recorded_by=user.id)
+        return 200, stats
+
+    def _pens(self, token) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        return 200, {"pens": [{"id": p["id"], "name": p["name"]}
+                              for p in self.store.list_pens(farm_id)]}
+
+    def _add_pen(self, payload, token) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return 400, {"error": "請填寫欄位編號"}
+        if len(self.store.list_pens(farm_id)) >= config.MAX_PENS_PER_FARM:
+            return 400, {"error": f"產房欄位最多 {config.MAX_PENS_PER_FARM} 個"}
+        return 200, {"id": self.store.add_pen(
+            farm_id, name.strip()[:config.MAX_PEN_NAME_CHARS])}
 
     def _read_drug_label(self, payload, client, token) -> Tuple[int, dict]:
         """從藥品標示照片讀出藥品資料,回傳一份待核對的草稿。

@@ -148,3 +148,17 @@ DENY_TOOLS = [
 # 本機開發者不需要手動改這裡。
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", 8000))
+
+# --- v2:母豬場管理 ---
+#
+# 上限比照憲法第九條:用量保護的參數寫在設定,不埋在邏輯深處。
+# 數字參考這個牧場的實際規模(451 頭在場、1,690 頭歷史)並留餘裕。
+MAX_SOWS_PER_FARM = int(os.environ.get("MAX_SOWS_PER_FARM", "5000"))
+MAX_PENS_PER_FARM = int(os.environ.get("MAX_PENS_PER_FARM", "500"))
+MAX_EAR_TAG_CHARS = 30
+MAX_BREED_CHARS = 30
+MAX_PEN_NAME_CHARS = 30
+MAX_EVENT_FIELDS = 12          # 單筆事件的 detail 最多幾個欄位
+
+# 匯入的檔案上限。32,814 筆的實際檔案是 1.45 MB,10 MB 已很寬裕。
+MAX_IMPORT_BYTES = int(os.environ.get("MAX_IMPORT_BYTES", str(10 * 1024 * 1024)))

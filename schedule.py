@@ -42,6 +42,13 @@ EXIT_EVENTS = (DEATH, CULL)
 MOVE_IN, INDUCE, FARROW_DUE, WEAN_DUE, MATE_DUE, CHECK_DUE = (
     "move_in", "induce", "farrow", "wean", "mate", "preg_check")
 
+# 可以記錄的事件代碼。server.py 用它擋掉不認得的類型 ——
+# 前端送什麼過來都不可信(憲法第四條)。
+KNOWN_EVENTS = frozenset({
+    MATE, PREG_CHECK, FARROW, WEAN, PIGLET_LOSS,
+    DEATH, CULL, ABORT, "GA", "FON", "FOF",
+})
+
 
 class Task(NamedTuple):
     """一件待辦。`why` 說明「為什麼是這天」,畫面上要顯示 —— 使用者才知道

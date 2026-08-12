@@ -85,3 +85,19 @@ def reportable_disclaimer() -> str:
     關鍵字清單不可能完整,畫面上必須讓使用者知道沒跳提示不等於安全。
     """
     return "本系統的傳染病提醒非完整法定清單,不可作為合規依據;未出現提醒不代表安全"
+
+
+# 工作類型的顯示名稱。放在這裡而不是 schedule.py 或前端 ——
+# 使用者看到的文字只該有一份定義(見 tests/test_single_source.py)。
+TASK_LABELS = {
+    "move_in": "移入產房",
+    "induce": "催產",
+    "farrow": "分娩",
+    "wean": "離乳",
+    "mate": "配種",
+    "preg_check": "驗孕",
+}
+
+
+def task_label(kind: str) -> str:
+    return TASK_LABELS.get(kind, kind)

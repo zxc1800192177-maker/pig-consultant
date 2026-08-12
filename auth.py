@@ -74,6 +74,14 @@ class User(NamedTuple):
     id: int
     username: Optional[str]
     is_guest: bool
+    # v2:資料屬於牧場而非個人(憲法第十一條)。放進 User 而不是讓每個
+    # API 各自再查一次 —— 少查一次就少一個忘記帶 farm_id 的機會。
+    farm_id: Optional[int] = None
+    role: str = "owner"
+
+    @property
+    def is_owner(self) -> bool:
+        return self.role == "owner"
 
 
 class Authenticated(NamedTuple):
@@ -213,6 +221,16 @@ class Auth:
         self.store.create_session(hash_token(token), user_id, expires)
         return token
 
+    def _ensure_farm(self, user_id: int, name: str) -> int:
+        """每個使用者建立時就有一座牧場。
+
+        介面上先做單人(不建邀請功能),但資料一開始就掛在牧場底下 ——
+        日後開放共用時零遷移(見 specs/v2-facts.md)。
+        """
+        farm_id = self.store.create_farm(name)
+        self.store.set_user_farm(user_id, farm_id, "owner")
+        return farm_id
+
     def resolve_session(self, token: Optional[str]) -> Optional[User]:
         """token 對應的使用者;無效或過期回 None。"""
         if not token:
@@ -225,7 +243,8 @@ class Auth:
         row = self.store.get_user_by_id(user_id)
         if not row:
             return None
-        return User(id=row["id"], username=row["username"], is_guest=row["is_guest"])
+        return User(id=row["id"], username=row["username"], is_guest=row["is_guest"],
+                    farm_id=row.get("farm_id"), role=row.get("role") or "owner")
 
     def logout(self, token: Optional[str]) -> None:
         if token:
@@ -239,6 +258,7 @@ class Auth:
         if self.store.get_user_by_username(name):
             raise UsernameTaken("這個使用者名稱已經有人用了")
         user_id = self.store.create_user(name, hash_password(pw), is_guest=False)
+        self._ensure_farm(user_id, f"{name} 的牧場")
         return Authenticated(User(user_id, name, False), self._issue_session(user_id))
 
     def login(self, username, password) -> Authenticated:
@@ -270,6 +290,7 @@ class Auth:
         沒有密碼可以在別台裝置登回來,這點必須讓使用者知道(見前端提示)。
         """
         user_id = self.store.create_user(None, None, is_guest=True)
+        self._ensure_farm(user_id, "試用牧場")
         return Authenticated(User(user_id, None, True), self._issue_session(user_id))
 
     def claim(self, token, username, password) -> Authenticated:
