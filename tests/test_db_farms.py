@@ -269,3 +269,30 @@ class TestBothImplementationsAgree:
                     if got != want:
                         bad.append(f"{impl.__name__}.{name}: {got} != {want}")
         assert bad == [], "\n".join(bad)
+
+
+class TestDedupeIndexStaysCorrect:
+    """InMemoryStore 用索引做判重(對應 PostgresStore 的唯一索引)。
+    刪除後若沒清索引,重新新增會拿回一個已經不存在的 id。
+    """
+
+    def test_reinsert_after_delete_gets_a_fresh_id(self, store):
+        farm = store.create_farm("HYD")
+        sow = store.add_sow(farm, "1183")
+        first = store.add_sow_event(farm, sow, "FW", date(2026, 2, 4))
+        store.delete_sow_event(farm, first)
+
+        again = store.add_sow_event(farm, sow, "FW", date(2026, 2, 4))
+        assert store.set_event_excluded(farm, again, True) is True, (
+            "拿回來的 id 必須真的存在,否則後續操作會靜默失敗")
+        assert len(store.list_sow_events(farm, sow)) == 1
+
+    def test_deleting_a_sow_frees_her_event_keys(self, store):
+        farm = store.create_farm("HYD")
+        sow = store.add_sow(farm, "1183", entry_date=date(2023, 1, 1))
+        store.add_sow_event(farm, sow, "FW", date(2026, 2, 4))
+        store.delete_sow(farm, sow)
+
+        again = store.add_sow(farm, "1183", entry_date=date(2026, 1, 1))
+        ev_id = store.add_sow_event(farm, again, "FW", date(2026, 2, 4))
+        assert store.set_event_excluded(farm, ev_id, True) is True

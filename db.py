@@ -137,15 +137,23 @@ CREATE TABLE IF NOT EXISTS sow_events (
   event_type TEXT NOT NULL,
   event_date DATE NOT NULL,
   detail JSONB NOT NULL DEFAULT '{}',
+  -- 同一頭豬、同一天、同樣內容的第幾筆。來源檔案裡合法地存在一模一樣的
+  -- 連續兩行:同一天死了兩隻仔豬、死因相同,就是各記一筆。
+  seq INTEGER NOT NULL DEFAULT 0,
   recorded_by INTEGER REFERENCES users(id),
   excluded BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sow_events_farm_idx ON sow_events (farm_id, event_date DESC);
 CREATE INDEX IF NOT EXISTS sow_events_sow_idx ON sow_events (sow_id, event_date);
--- 匯入冪等:同一頭豬、同一種事件、同一天只會有一筆
+-- 匯入冪等。**detail 必須納入唯一鍵**:同一頭豬同一天本來就可能有多筆
+-- 同類事件,而且內容不同 ——
+--   仔豬損失:同一天死兩隻,一隻「母豬壓死」一隻「虛弱」(實測 186 組)
+--   配種:同一天用兩頭公豬是真的雙重配種(實測 101 組)
+-- 只用 (sow_id, event_type, event_date) 會把這些當成重複而合併掉,
+-- 實測會靜默吃掉 358 筆真實記錄。
 CREATE UNIQUE INDEX IF NOT EXISTS sow_events_dedupe
-  ON sow_events (sow_id, event_type, event_date);
+  ON sow_events (sow_id, event_type, event_date, detail, seq);
 
 CREATE TABLE IF NOT EXISTS boar_events (
   id SERIAL PRIMARY KEY,
@@ -183,6 +191,13 @@ CREATE TABLE IF NOT EXISTS custom_task_done (
 CREATE UNIQUE INDEX IF NOT EXISTS custom_task_done_unique
   ON custom_task_done (task_id, due_date);
 """
+
+
+def _detail_key(detail) -> str:
+    """把 detail 轉成可比較的鍵。同一天的兩筆同類事件若內容不同,
+    就是兩件不同的事(例如兩隻仔豬死因不同),不可以合併。
+    """
+    return json.dumps(detail or {}, sort_keys=True, ensure_ascii=False)
 
 
 def new_token() -> str:
@@ -301,7 +316,7 @@ class Store:
 
     # --- 母豬事件 ---
     def add_sow_event(self, farm_id, sow_id, event_type, event_date,
-                      detail=None, recorded_by=None) -> int:
+                      detail=None, recorded_by=None, seq=0) -> int:
         raise NotImplementedError
 
     def list_sow_events(self, farm_id: int, sow_id: Optional[int] = None,
@@ -359,6 +374,9 @@ class InMemoryStore(Store):
         self._next_check_id = 1
         self._next_drug_id = 1
         self._next = collections.Counter()
+        # (sow_id, event_type, event_date) → event_id。對應 PostgresStore 的
+        # sow_events_dedupe 唯一索引 —— 沒有它,匯入時的判重是 O(n²)。
+        self._event_key = {}
 
     def _new_id(self, kind: str) -> int:
         self._next[kind] += 1
@@ -568,6 +586,7 @@ class InMemoryStore(Store):
                      if not (s["id"] == sow_id and s["farm_id"] == farm_id)]
         if len(self.sows) < before:
             self.sow_events = [e for e in self.sow_events if e["sow_id"] != sow_id]
+            self._forget_event_keys()
             return True
         return False
 
@@ -587,18 +606,20 @@ class InMemoryStore(Store):
         return dict(rows[0]) if rows else None
 
     def add_sow_event(self, farm_id, sow_id, event_type, event_date,
-                      detail=None, recorded_by=None) -> int:
-        dup = [e for e in self.sow_events
-               if e["sow_id"] == sow_id and e["event_type"] == event_type
-               and e["event_date"] == event_date]
-        if dup:
-            return dup[0]["id"]          # 冪等:匯入重跑不會產生重複事件
+                      detail=None, recorded_by=None, seq=0) -> int:
+        # 用索引而非掃全表。PostgresStore 靠 sow_events_dedupe 唯一索引,
+        # 這裡要對應 —— 掃全表在匯入三萬筆時是 O(n²),實測會慢到幾十秒。
+        # detail 與 seq 都要納入 key,理由見 SCHEMA 的註解。
+        key = (sow_id, event_type, event_date, _detail_key(detail), seq)
+        if key in self._event_key:
+            return self._event_key[key]  # 冪等:匯入重跑不會產生重複事件
         event_id = self._new_id("sow_event")
+        self._event_key[key] = event_id
         self.sow_events.append({
             "id": event_id, "farm_id": farm_id, "sow_id": sow_id,
             "event_type": event_type, "event_date": event_date,
-            "detail": dict(detail or {}), "recorded_by": recorded_by,
-            "excluded": False,
+            "detail": dict(detail or {}), "seq": seq,
+            "recorded_by": recorded_by, "excluded": False,
         })
         return event_id
 
@@ -617,7 +638,22 @@ class InMemoryStore(Store):
         before = len(self.sow_events)
         self.sow_events = [e for e in self.sow_events
                            if not (e["id"] == event_id and e["farm_id"] == farm_id)]
-        return len(self.sow_events) < before
+        if len(self.sow_events) < before:
+            self._forget_event_keys()
+            return True
+        return False
+
+    def _forget_event_keys(self) -> None:
+        """刪除事件後重建判重索引。
+
+        少了這一步,刪掉的事件仍留在索引裡,之後重新新增同一筆會拿回一個
+        已經不存在的 id —— 呼叫端拿它去 set_event_excluded 會靜默失敗。
+        """
+        self._event_key = {
+            (e["sow_id"], e["event_type"], e["event_date"],
+             _detail_key(e["detail"]), e.get("seq", 0)): e["id"]
+            for e in self.sow_events
+        }
 
     def set_event_excluded(self, farm_id, event_id, excluded) -> bool:
         rows = self._owned(self.sow_events, farm_id, id=event_id)
@@ -861,7 +897,7 @@ class PostgresStore(Store):
     SOW_COLS = ("id, farm_id, ear_tag, entry_date, birth_date, breed, sire_tag,"
                 " dam_tag, parity, status, pen_id, photo_url")
     EVENT_COLS = ("id, farm_id, sow_id, event_type, event_date, detail,"
-                  " recorded_by, excluded")
+                  " seq, recorded_by, excluded")
 
     @staticmethod
     def _rows(cur, cols):
@@ -984,17 +1020,17 @@ class PostgresStore(Store):
         return rows[0] if rows else None
 
     def add_sow_event(self, farm_id, sow_id, event_type, event_date,
-                      detail=None, recorded_by=None) -> int:
+                      detail=None, recorded_by=None, seq=0) -> int:
         # ON CONFLICT DO UPDATE(而非 DO NOTHING)才拿得回既有的 id,
         # 匯入重跑時呼叫端不必自己查一次。
         with self._connect() as conn:
             return conn.execute(
                 "INSERT INTO sow_events (farm_id, sow_id, event_type, event_date,"
-                " detail, recorded_by) VALUES (%s,%s,%s,%s,%s,%s)"
-                " ON CONFLICT (sow_id, event_type, event_date)"
-                " DO UPDATE SET detail = EXCLUDED.detail RETURNING id",
+                " detail, seq, recorded_by) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+                " ON CONFLICT (sow_id, event_type, event_date, detail, seq)"
+                " DO UPDATE SET recorded_by = EXCLUDED.recorded_by RETURNING id",
                 (farm_id, sow_id, event_type, event_date,
-                 Jsonb(detail or {}), recorded_by)).fetchone()[0]
+                 Jsonb(detail or {}), seq, recorded_by)).fetchone()[0]
 
     def list_sow_events(self, farm_id, sow_id=None, since=None, until=None):
         sql = f"SELECT {self.EVENT_COLS} FROM sow_events WHERE farm_id = %s"
