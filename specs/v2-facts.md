@@ -203,3 +203,59 @@ v2 的工作清單、提醒、月報全部是日期運算,因此**放在頂層 `
 **因此「值得檢視」名單只陳述事實與依據,措辭不得是「建議淘汰」**
 (憲法第三條第 6 款)。畫面上要標明這份名單看的是什麼,以及它與
 實際決策依據的落差。
+
+---
+
+## 11. 測試看不到 JSON 序列化那一層 ✅
+
+`Application` 與 HTTP 傳輸分離是刻意的(憲法要求,測試才能不開 socket)。
+代價是中間多了一道**沒有任何測試經過的縫**:
+
+```
+測試   → Application.handle_get() → dict        ← 斷言到這裡就結束
+瀏覽器 → Application.handle_get() → dict → json.dumps() → bytes
+                                            ↑ 只有這裡會炸
+```
+
+實際後果:`/api/alerts` 的 `openSows[].since` 是資料庫回來的 `date` 物件,
+`json.dumps` 不認得它而拋 `TypeError`,連線直接斷掉。瀏覽器只看得到
+「Failed to fetch」,伺服器記錄裡才有真正的原因。**全部 788 個測試都是綠的。**
+
+已修:序列化收斂成單一出口 `server.to_json_bytes()`,`date`/`datetime`
+一律轉 ISO 字串,其他型別照樣拋例外(什麼都靜靜轉字串的話,真的組錯
+回應時不會有人發現)。
+
+### 寫這條測試時踩到的兩個坑
+
+第一版測試**在修好之前也會通過**,原因有兩個,少防一個就等於沒測:
+
+| 坑 | 為什麼 |
+|---|---|
+| 用 `POST /api/sows` 鋪資料 | 兩條寫入路徑型別不同:匯入寫的是 `date` 物件,POST 寫的是從 JSON 來的字串。正式環境的 `PostgresStore` 一律回 `date`,所以**要經過匯入**才反映真實情況 |
+| 沒養出空胎母豬 | 出問題的欄位在 `openSows[]` 裡,沒有母豬逾期未配種時那份清單是空的,怎麼測都是綠的 |
+
+→ 新增端點若會回傳日期,測試必須經過 `to_json_bytes()`,而且鋪的資料
+要真的走到那個欄位。見 `TestResponsesAreSerializable`。
+
+---
+
+## 12. 靜態檔沒有 `Cache-Control` 時,瀏覽器會自己猜新鮮期 ✅
+
+`SimpleHTTPRequestHandler` 只送 `Last-Modified`,不送 `Cache-Control`。
+少了這個標頭,瀏覽器套用「啟發式快取」:自行猜一段新鮮期,**期間完全
+不回頭問伺服器**。
+
+實測到的情形:改完 `app.js`、重啟伺服器、重新整理,分頁跑的仍是舊檔。
+`performance.getEntriesByType('resource')` 顯示 `transferSize: 0`
+(完全沒走網路),而 `decodedBodySize` 比磁碟上的檔案多 11 bytes ——
+那是舊版。同一支檔案用 `fetch` 加查詢字串卻是新的,因為那換成了
+另一個快取鍵。
+
+追這個 bug 花掉的時間遠超過修它:console 一直報一個早就從原始碼刪掉的
+變數名,`grep` 找不到、`curl` 拿到的也是新的,看起來像鬧鬼。
+
+已修:靜態檔一律送 `Cache-Control: no-cache`(「每次用之前先問」,不是
+「不要快取」)。既有的 `Last-Modified` 仍然有效,沒改動時回 304 不重傳。
+
+正式站的 service worker 對程式碼採網路優先,本來就繞過這個問題 ——
+但 service worker 註冊起來**之前**的第一次載入不受它保護。
