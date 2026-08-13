@@ -14,9 +14,10 @@ from datetime import date, timedelta
 import pytest
 
 import config
+import schedule
 from ai.transport import FakeTransport
 from db import InMemoryStore
-from server import SET_SESSION_KEY, Application
+from server import SET_SESSION_KEY, Application, to_json_bytes
 
 
 def _app():
@@ -356,6 +357,93 @@ class TestTasksAndAlerts:
         body = app.handle_get("/api/alerts", token)[1]
         assert body["pens"]["total"] == 1
         assert body["pens"]["free"][0]["name"] == "A-01"
+
+
+class TestResponsesAreSerializable:
+    """回應要真的送得出去。
+
+    這裡刻意繞一圈用 to_json_bytes,而不是只檢查回傳的 dict —— 本檔其他
+    測試都停在 dict 就斷言了,序列化那一步從來沒人測到。實際的後果是
+    `/api/sows` 與 `/api/alerts` 全掛:資料庫回來的 entry_date 是 date 物件,
+    json 不認得,序列化拋 TypeError 讓連線直接斷開。瀏覽器那端只看得到
+    「Failed to fetch」,伺服器記錄裡才有真正的原因。
+
+    Application 與 HTTP 傳輸分離讓測試好寫,代價就是中間這道縫 ——
+    這個類別就是把縫補起來。
+    """
+
+    # 鋪資料有兩個講究,少一個測試就抓不到問題。
+    #
+    # 一、**要經過匯入**,不能用 /api/sows 建。兩條寫入路徑存進去的型別
+    #    不一樣:匯入寫的是 date 物件,POST 寫的是從 JSON 來的字串。
+    # 二、**要真的養出一頭空胎母豬**。出問題的欄位是 alerts 的
+    #    openSows[].since,沒有母豬逾期未配種時那份清單是空的,再怎麼測
+    #    都是綠的。
+    #
+    # 這兩點都是踩過才知道的:第一版兩點都沒做到,測試全過,瀏覽器照樣
+    # Failed to fetch。正式環境的 PostgresStore 一律回 date,不是只有匯入。
+
+    @staticmethod
+    def _rows():
+        """離乳後久未配種的母豬 —— 正是 openSows 那份清單的來源。"""
+        overdue = schedule.DEFAULTS["open_sow_alert_days"] + 30
+        weaned = date.today() - timedelta(days=overdue)
+        farrowed = weaned - timedelta(days=22)
+        mated = farrowed - timedelta(days=114)
+        fmt = "%Y%m%d"
+        return "\n".join([
+            "1183|GA|20230519|LY",
+            f"1183|MT|{mated.strftime(fmt)}|D6",
+            f"1183|FW|{farrowed.strftime(fmt)}|12|1|0",
+            f"1183|WN|{weaned.strftime(fmt)}|11||0",
+            # 之後沒有任何配種紀錄 —— 所以她一直掛在空胎名單上
+        ])
+
+    @staticmethod
+    def _seeded():
+        app = Application(transport=FakeTransport(chunks=["建議"]), store=InMemoryStore())
+        token = _owner(app)
+        _post(app, "/api/pens", {"name": "A-01"}, token)
+        stats = _post(app, "/api/import",
+                      {"content": TestResponsesAreSerializable._rows()}, token)[1]
+        assert stats["sows"] == 1, stats
+        sow_id = app.handle_get("/api/sows?all=1", token)[1]["sows"][0]["id"]
+        return app, token, sow_id
+
+    def test_seeded_data_really_reaches_the_broken_field(self):
+        """先確認這組資料真的踩得到,否則下面全是空轉的綠燈。"""
+        app, token, _ = self._seeded()
+        body = app.handle_get("/api/alerts", token)[1]
+        assert body["openSows"], "沒養出空胎母豬,這組測試抓不到序列化問題"
+        assert isinstance(body["openSows"][0]["since"], date), (
+            "since 已經不是 date 了 —— 若是刻意改成字串,請一併更新這個測試"
+        )
+
+    @pytest.mark.parametrize("path", [
+        "/api/sows", "/api/sows?all=1", "/api/alerts", "/api/tasks",
+        "/api/auth/me", "/api/health",
+    ])
+    def test_get_responses_survive_serialization(self, path):
+        app, token, _ = self._seeded()
+        status, body = app.handle_get(path, token)
+        assert status == 200, body
+        to_json_bytes(body)      # 不拋例外即為通過
+
+    def test_sow_card_survives_serialization(self):
+        app, token, sow_id = self._seeded()
+        status, body = app.handle_get(f"/api/sows/{sow_id}", token)
+        assert status == 200, body
+        to_json_bytes(body)
+
+    def test_dates_come_out_as_iso_strings(self):
+        """轉出來的格式要是前端看得懂的 ISO 字串,不是 date 的 repr。"""
+        payload = json.loads(to_json_bytes({"d": date(2026, 8, 13)}))
+        assert payload["d"] == "2026-08-13"
+
+    def test_unknown_types_still_raise(self):
+        """只放行日期。什麼都靜靜轉成字串的話,真的組錯回應時不會有人發現。"""
+        with pytest.raises(TypeError):
+            to_json_bytes({"x": object()})
 
 
 class TestImport:

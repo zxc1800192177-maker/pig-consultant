@@ -6,8 +6,6 @@
 Application 與 HTTP 傳輸分離,測試才能不開 socket 直接驗證行為。
 """
 
-import base64
-import binascii
 import http.server
 import json
 import pathlib
@@ -39,7 +37,6 @@ from core.labels import (
     ai_unavailable_note,
     grade_label,
     medical_disclaimer,
-    reportable_disclaimer,
     sample_size_note,
     shortfall_note,
     source_label,
@@ -105,8 +102,6 @@ def request_limit(path: str = "") -> int:
     就有數百 KB),所以單獨放寬。刻意做成「只有這個路徑例外」而不是
     把全站上限拉高 —— 其他端點沒有理由收得下一個 2MB 的請求。
     """
-    if path == "/api/drug-label":
-        return config.MAX_IMAGE_REQUEST_BYTES
     if path in ("/api/import", "/api/import/preview"):
         return config.MAX_IMPORT_BYTES
     return config.MAX_REQUEST_BYTES
@@ -120,54 +115,6 @@ def too_large(content_length: int, path: str = "") -> bool:
     (實測 19.7MB 照單全收)。免費方案只有 512MB 記憶體。
     """
     return content_length > request_limit(path)
-
-
-# 檔頭魔數。用來確認「這包位元組真的是它宣告的那種圖片」。
-#
-# 不能只信前端送來的 mediaType:那是不可信輸入(憲法第四條)。宣告成
-# image/jpeg 實際塞別的東西進來,等於讓我們把未知內容轉手送進 AI。
-_IMAGE_MAGIC = {
-    "image/jpeg": lambda b: b[:3] == b"\xff\xd8\xff",
-    "image/png": lambda b: b[:8] == b"\x89PNG\r\n\x1a\n",
-    "image/webp": lambda b: b[:4] == b"RIFF" and b[8:12] == b"WEBP",
-}
-
-
-def decode_image(payload: dict) -> Tuple[Optional[dict], Optional[str]]:
-    """驗證並解碼上傳的圖片,回傳 (圖片, 錯誤訊息) —— 兩者恰有一個是 None。
-
-    圖片全程只留在記憶體:不寫入硬碟、不存進資料庫。憲法第四條要求
-    使用者上傳的檔案只做解析、不做執行,而最穩妥的「不執行」就是
-    根本不讓它落地。
-    """
-    image = payload.get("image")
-    if not isinstance(image, dict):
-        return None, "請附上照片"
-
-    media_type = image.get("mediaType")
-    if media_type not in config.ALLOWED_IMAGE_TYPES:
-        return None, "照片格式不支援,請用 JPEG、PNG 或 WebP"
-
-    data = image.get("data")
-    if not isinstance(data, str) or not data:
-        return None, "照片內容是空的,請重新拍攝"
-
-    try:
-        # validate=True:遇到非 base64 字元直接拒絕,而不是默默略過。
-        # 少了它,一包垃圾會被「清乾淨」後解出一段無意義的位元組,
-        # 一路送到 AI 才發現不對。
-        raw = base64.b64decode(data, validate=True)
-    except (binascii.Error, ValueError):
-        return None, "照片內容無法解讀,請重新拍攝"
-
-    if not raw:
-        return None, "照片內容是空的,請重新拍攝"
-    if len(raw) > config.MAX_IMAGE_BYTES:
-        return None, f"照片太大,請控制在 {config.MAX_IMAGE_BYTES // 1000} KB 以內"
-    if not _IMAGE_MAGIC[media_type](raw):
-        return None, "照片內容與宣告的格式不符"
-
-    return {"media_type": media_type, "data": data}, None
 
 
 def client_ip(headers, peer_address: str) -> str:
@@ -215,6 +162,29 @@ def client_ip(headers, peer_address: str) -> str:
 # 不必為了「順便設一個 cookie」把所有呼叫端與測試的簽章都改掉。
 SET_SESSION_KEY = "_setSession"
 CLEAR_SESSION_KEY = "_clearSession"
+
+
+def to_json_bytes(payload: dict) -> bytes:
+    """把回應序列化成要送出去的 bytes。
+
+    date/datetime 一律轉成 ISO 字串。資料庫回來的日期欄位就是 date 物件,
+    json 不認得它 —— 少了這一步,`/api/sows` 與 `/api/alerts` 會在序列化時
+    拋 TypeError,連線直接斷掉,瀏覽器只看得到「Failed to fetch」。
+
+    測試看不到這個 bug:它們呼叫 Application.handle_get() 拿 dict 就斷言,
+    而序列化發生在 Handler 那一層。所以這裡獨立成一個函式,測試才有東西
+    可以直接測(見 TestResponsesAreSerializable)。
+
+    修在這個唯一出口而不是逐個端點補 —— 每加一個回傳日期的端點就再踩
+    一次的話,遲早會漏。ISO 字串本來就是前端要的格式,schedule.py 早就
+    自己這樣轉了。
+    """
+    def _default(value):
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        raise TypeError(f"無法序列化的型別:{type(value).__name__}")
+
+    return json.dumps(payload, ensure_ascii=False, default=_default).encode("utf-8")
 
 
 class Application:
@@ -452,8 +422,6 @@ class Application:
             return 200, self._user_payload(self._current_user(token))
         if path == "/api/health-checks":
             return self._list_health_checks(token)
-        if path == "/api/my-drugs":
-            return self._list_my_drugs(token)
 
         # ── v2 ──
         route = _route(path)
@@ -482,8 +450,7 @@ class Application:
                     }
                     for m in gradable_metrics()
                 ],
-                "disclaimer": reportable_disclaimer(),
-                "source": source_label(),
+                        "source": source_label(),
             }
         if path == "/api/example":
             with open(EXAMPLE_PATH, encoding="utf-8") as f:
@@ -504,8 +471,6 @@ class Application:
         if path == "/api/grade":
             gate = self._gate(token)
             return (401, gate) if gate else self._grade(payload)
-        if path == "/api/consult":
-            return self._consult(payload, client, token)
         if path == "/api/advise":
             gate = self._gate(token)
             return (401, gate) if gate else self._advise(payload, client)
@@ -515,10 +480,6 @@ class Application:
             return self._auth_post(path, payload, client, token)
         if path == "/api/health-checks":
             return self._save_health_check(payload, token)
-        if path == "/api/my-drugs":
-            return self._add_my_drug(payload, token)
-        if path == "/api/drug-label":
-            return self._read_drug_label(payload, client, token)
 
         # ── v2 ──
         if path == "/api/sows":
@@ -540,13 +501,6 @@ class Application:
 
         # 刪除一律連 user_id 一起帶進查詢(見 db.py 的約定)——
         # 只用 id 的話,換個號碼就能刪別人的資料。
-        if path.startswith("/api/my-drugs/"):
-            drug_id = self._path_id(path)
-            if drug_id is None:
-                return 400, {"error": "編號格式錯誤"}
-            ok = self.store.delete_drug(user.id, drug_id)
-            return (200, {"ok": True}) if ok else (404, {"error": "找不到這筆資料"})
-
         if path.startswith("/api/health-checks/"):
             check_id = self._path_id(path)
             if check_id is None:
@@ -650,60 +604,6 @@ class Application:
 
     # --- 藥品庫 ---
 
-    def _list_my_drugs(self, token) -> Tuple[int, dict]:
-        user = self._current_user(token)
-        if user is None:
-            return 401, {"error": "請先登入"}
-        return 200, {"drugs": [self._drug_payload(d) for d in self.store.list_drugs(user.id)]}
-
-    @staticmethod
-    def _drug_payload(row) -> dict:
-        return {
-            "id": row["id"],
-            "name": row["name"],
-            # 舊資料列在補上欄位之前寫入,讀出來會是 None(見 db.py 的
-            # ALTER TABLE)。用 or "" 收斂成空字串,前端就不必到處判斷。
-            "activeIngredient": row.get("active_ingredient") or "",
-            "dosageNote": row["dosage_note"],
-            "withdrawalDays": row["withdrawal_days"],
-        }
-
-    def _add_my_drug(self, payload, token) -> Tuple[int, dict]:
-        user = self._current_user(token)
-        if user is None:
-            return 401, {"error": "請先登入"}
-
-        name = payload.get("name")
-        if not isinstance(name, str) or not name.strip():
-            return 400, {"error": "請填寫藥品名稱"}
-
-        if len(self.store.list_drugs(user.id)) >= config.MAX_MY_DRUGS:
-            return 400, {"error": f"藥品庫最多 {config.MAX_MY_DRUGS} 筆,請先移除不用的"}
-
-        note = payload.get("dosageNote")
-        note = note.strip()[:config.MAX_DRUG_NOTE_CHARS] if isinstance(note, str) else ""
-
-        ingredient = payload.get("activeIngredient")
-        ingredient = (
-            ingredient.strip()[:config.MAX_DRUG_INGREDIENT_CHARS]
-            if isinstance(ingredient, str) else ""
-        )
-
-        days = payload.get("withdrawalDays")
-        if not isinstance(days, (int, float)) or isinstance(days, bool) or days < 0:
-            days = None
-
-        drug_id = self.store.add_drug(
-            user.id, name.strip()[:config.MAX_DRUG_NAME_CHARS], note,
-            int(days) if days is not None else None,
-            active_ingredient=ingredient,
-        )
-        return 200, {"id": drug_id}
-
-    # ── v2:母豬場管理 ──
-    #
-    # 每個端點都用 _need_farm 取得 farm_id,不從請求內容拿 ——
-    # 讓前端傳 farm_id 等於讓任何人換個號碼就看到別的牧場。
 
     @staticmethod
     def _sow_payload(row) -> dict:
@@ -968,57 +868,6 @@ class Application:
         return 200, {"id": self.store.add_pen(
             farm_id, name.strip()[:config.MAX_PEN_NAME_CHARS])}
 
-    def _read_drug_label(self, payload, client, token) -> Tuple[int, dict]:
-        """從藥品標示照片讀出藥品資料,回傳一份待核對的草稿。
-
-        **這裡不寫入任何資料。** 回傳的內容只會被前端填進表單,由牧場主
-        核對後自己按「新增藥品」才真的入庫(憲法第三條)。藥品庫的內容
-        會被當成可引用的劑量依據送進疾病諮詢,若 AI 讀出來的數字能自動
-        入庫,等於 AI 的輸出繞一圈變成了「使用者提供的事實」。
-        """
-        gate = self._gate(token)
-        if gate:
-            return 401, gate
-
-        image, error = decode_image(payload)
-        if error:
-            return 400, {"error": error}
-
-        wait = self._throttled(client)
-        if wait is not None:
-            return 429, {"error": f"請稍候 {wait} 秒再拍下一張"}
-
-        if self._over_scan_limit(client):
-            return 429, {
-                "reason": "scan_limit",
-                "error": (
-                    f"每小時最多辨識 {config.MAX_LABEL_SCANS_PER_HOUR} 張照片,"
-                    "已達上限。你仍然可以手動輸入藥品資料。"
-                ),
-            }
-
-        if self._over_daily_budget():
-            return 503, {
-                "reason": "daily_limit",
-                "error": f"今日 AI 用量已達上限。{ai_unavailable_note()}",
-            }
-
-        try:
-            draft = self.consultant.read_label(image)
-        except TransportError as e:
-            return 503, self._transport_error(e)
-
-        # 連藥品名稱都讀不出來,填進表單也沒有意義,不如直接請他重拍。
-        # 這裡刻意不回傳「部分結果」—— 名稱是這份草稿的骨幹,沒有名稱
-        # 卻填了一個休藥期數字進去,是最容易被誤用的狀態。
-        if not draft.get("name"):
-            return 422, {
-                "reason": "unreadable",
-                # 措辭要同時適用兩個入口(現拍、從相簿選),不能只講「重拍」
-                "error": "讀不出藥品資料,請換一張對準標示文字、拍得清楚一點的照片",
-            }
-
-        return 200, {"draft": draft}
 
     def _grade(self, payload: dict) -> Tuple[int, dict]:
         """生產健檢。純計算,不呼叫 AI —— 額度用盡時這裡照常運作。"""
@@ -1056,144 +905,6 @@ class Application:
             "medicalDisclaimer": medical_disclaimer(),
         }
 
-    def _drugs_for_consult(self, payload: dict, token):
-        """疾病諮詢要參考的藥品庫。
-
-        已登入時一律以資料庫為準,忽略請求裡的 myDrugs —— 那個欄位是
-        給未登入使用者用的(他們的藥品庫存在自己的瀏覽器)。已登入還信任
-        它的話,等於任何人都能在請求裡塞一組假的劑量進去,而畫面上會
-        顯示成「你自己藥品庫的資料」,這正是劑量查表化要防的事。
-        """
-        user = self._current_user(token)
-        if user is None:
-            return payload.get("myDrugs")
-        return [
-            {
-                "name": d["name"],
-                "activeIngredient": d.get("active_ingredient") or "",
-                "dosageNote": d["dosage_note"],
-                "withdrawalDays": d["withdrawal_days"],
-            }
-            for d in self.store.list_drugs(user.id)
-        ]
-
-    def consult_events(self, payload: dict, client: str, token: Optional[str] = None):
-        """疾病諮詢,逐段產出事件供串流。
-
-        通報須知與升級判斷是計算出來的,在呼叫 AI 之前就先送出 ——
-        使用者可能在 AI 回完前關掉頁面,防疫提示不能等到最後(憲法第一條)。
-
-        事件:
-          meta   確定性的部分(通報須知、升級警示、免責聲明)
-          delta  AI 生成的一段文字
-          error  含 status,後續不再產出
-          done   正常結束
-        """
-        # 登入檢查要在最前面 —— 排在通報須知之前。那些提示雖然不花錢,
-        # 但未登入者連功能畫面都看不到,送出去也只是浪費。
-        gate = self._gate(token)
-        if gate:
-            yield {"type": "error", "status": 401, **gate}
-            return
-
-        raw_weaknesses = payload.get("weaknesses") or []
-        weaknesses = [self._from_wire_weakness(w) for w in raw_weaknesses]
-
-        try:
-            consultation = self.consultant.consult(
-                payload.get("question", ""),
-                weaknesses=weaknesses,
-                history=payload.get("history"),
-                my_drugs=self._drugs_for_consult(payload, token),
-            )
-        except ValueError as e:
-            yield {"type": "error", "status": 400, "error": str(e)}
-            return
-
-        yield {
-            "type": "meta",
-            "baselineNotice": consultation.baseline_notice,
-            # 醫療免責在回答正上方,由程式強制加,不依賴 AI 自己寫
-            "medicalDisclaimer": medical_disclaimer(),
-            "disclaimer": reportable_disclaimer(),
-            # 劑量查表化:這份清單是伺服器直接算出來的,不經過 AI ——
-            # 前端要把它跟 AI 生成的文字分開呈現,不能混在同一段 markdown 裡。
-            "dosageReference": [
-                {
-                    "id": m.id,
-                    "diseaseName": m.disease_name,
-                    "drugs": m.drugs,
-                    "sourceNote": m.source_note,
-                }
-                for m in consultation.dosage_matches
-            ],
-            "escalation": (
-                {
-                    "disease": consultation.escalation.disease,
-                    "notice": consultation.escalation.notice,
-                    "matchedTerms": consultation.escalation.matched_terms,
-                }
-                if consultation.escalation else None
-            ),
-        }
-
-        wait = self._throttled(client)
-        if wait is not None:
-            yield {
-                "type": "error", "status": 429,
-                "error": f"請稍候 {wait} 秒再送出下一題",
-            }
-            return
-
-        if self._over_hourly_limit(client):
-            yield {
-                "type": "error", "status": 429, "reason": "hourly_limit",
-                "error": (
-                    f"每小時最多提問 {config.MAX_QUESTIONS_PER_HOUR} 次,"
-                    "已達上限,請稍後再試。生產健檢不受影響。"
-                ),
-            }
-            return
-
-        if self._over_daily_budget():
-            yield {
-                "type": "error", "status": 503, "reason": "daily_limit",
-                "error": "今日 AI 諮詢已達上限,請明天再試,或聯繫管理員調整額度。",
-            }
-            return
-
-        try:
-            for chunk in consultation.stream:
-                yield {"type": "delta", "text": chunk}
-        except TransportError as e:
-            yield {"type": "error", "status": 503, **self._transport_error(e)}
-            return
-
-        yield {"type": "done"}
-
-    def _consult(self, payload: dict, client: str, token=None) -> Tuple[int, dict]:
-        """把串流事件收攏成單一回應。
-
-        供測試與不支援串流的呼叫端使用。與串流路徑共用同一份邏輯,
-        避免兩條路走久了行為不一致。
-        """
-        meta: dict = {}
-        answer = []
-        error: Optional[dict] = None
-
-        for event in self.consult_events(payload, client, token):
-            kind = event.pop("type")
-            if kind == "meta":
-                meta = event
-            elif kind == "delta":
-                answer.append(event["text"])
-            elif kind == "error":
-                error = event
-
-        if error is not None:
-            status = error.pop("status")
-            return status, {**meta, **error}
-        return 200, {**meta, "answer": "".join(answer)}
 
     @staticmethod
     def _from_wire_weakness(w: dict) -> dict:
@@ -1384,7 +1095,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         set_token = payload.pop(SET_SESSION_KEY, None)
         clear = payload.pop(CLEAR_SESSION_KEY, False)
 
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = to_json_bytes(payload)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -1397,6 +1108,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Set-Cookie", self._session_cookie("", 0))
         self.end_headers()
         self.wfile.write(body)
+
+    # 這次回應是不是靜態檔。只有靜態檔要加 Cache-Control —— API 與 SSE
+    # 各自送自己的標頭,重複送同一個標頭反而是壞事。
+    _serving_static = False
+
+    def send_head(self):
+        """靜態檔一律要瀏覽器回頭驗證,不可憑經驗自行判斷還新鮮。
+
+        SimpleHTTPRequestHandler 只送 Last-Modified,不送 Cache-Control。
+        少了這個標頭,瀏覽器會套用「啟發式快取」:自行猜一段新鮮期,期間
+        完全不回頭問伺服器。實際踩到的情形是改完 app.js、重啟伺服器、
+        重新整理,分頁跑的仍是舊檔 —— 連 <script src> 都拿到舊版,而同
+        一支檔案用 fetch 加上查詢字串就是新的,因為那換成了另一個快取鍵。
+
+        no-cache 不是「不要快取」,是「每次用之前先問」。既有的
+        Last-Modified 仍然有效,沒改動時回 304 不重傳內容,所以不會變慢。
+
+        正式站的 service worker 對程式碼採網路優先,本來就繞過這個問題;
+        但 service worker 註冊起來之前的第一次載入不受它保護,那次一樣
+        會拿到瀏覽器猜出來的舊檔。
+        """
+        self._serving_static = True
+        try:
+            return super().send_head()
+        finally:
+            self._serving_static = False
+
+    def end_headers(self):
+        if self._serving_static:
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
 
     def do_GET(self):
         if self.path.startswith("/api/"):
@@ -1432,9 +1174,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         client = client_ip(self.headers, self.client_address[0])
         token = self._session_token()
 
-        if self.path == "/api/consult":
-            self._stream(raw, lambda payload: APP.consult_events(payload, client, token))
-            return
         if self.path == "/api/advise-chat":
             self._stream(raw, lambda payload: APP.advise_events(payload, client, token))
             return

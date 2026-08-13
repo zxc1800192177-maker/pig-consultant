@@ -74,15 +74,3 @@ class TestUpstreamNote:
         assert "覆核" in note
 
 
-class TestReportableDisclaimer:
-    """最重要的一句話:沒跳提示不等於安全。"""
-
-    def test_states_list_is_incomplete(self):
-        assert "非完整" in reportable_disclaimer()
-
-    def test_states_silence_is_not_safety(self):
-        note = reportable_disclaimer()
-        assert "不代表安全" in note
-
-    def test_states_not_for_compliance(self):
-        assert "合規" in reportable_disclaimer()

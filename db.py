@@ -1120,8 +1120,18 @@ def select_store() -> Optional[Store]:
     """沒設 DATABASE_URL 就回 None —— 帳號功能整個關閉,網站退回
     「純工具、免帳號」模式。本機開發與 demo 不必為了跑起來而先去
     申請一個資料庫。
+
+    例外是 DEV_MEMORY_DB:本機要驗 v2 的畫面就得有 store,否則工作清單、
+    母豬卡、提醒全部停在「載入中…」。config 已經保證它只在沒有
+    DATABASE_URL 時成立,不會蓋掉真的資料庫。
     """
     if not config.DATABASE_URL:
+        if config.DEV_MEMORY_DB:
+            # 印出來,免得有人以為自己連到了真的資料庫。
+            # 訊息裡不放符號類字元:Windows 主控台是 cp950,遇到 ⚠ 之類的
+            # 字元會直接 UnicodeEncodeError,伺服器連啟動都啟動不了。
+            print("[DEV_MEMORY_DB] 資料存在記憶體,伺服器一關就全部消失。")
+            return InMemoryStore()
         return None
     store = PostgresStore(config.DATABASE_URL)
     store.ensure_schema()

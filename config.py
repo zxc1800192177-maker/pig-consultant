@@ -92,6 +92,28 @@ MAX_AI_REQUESTS_PER_DAY = int(os.environ.get("MAX_AI_REQUESTS_PER_DAY", "500"))
 # 生產健檢都必須照常可用 —— 帳號是加值,不是使用門檻。
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+# 本機開發用:把資料放在記憶體裡,不必先架一個 Postgres。
+#
+# v1 沒有這個需求 —— 疾病諮詢與生產健檢不碰資料庫,沒有 DATABASE_URL 也能
+# 把整個網站點完。v2 不一樣:工作清單、母豬卡、提醒全都從資料表來,沒有
+# store 就只剩一片「載入中…」,本機根本驗不了畫面。
+#
+# 一定要顯式打開,而且**只在沒有 DATABASE_URL 時**才生效 —— 否則哪天有人
+# 把這個變數留在正式環境,就會安靜地繞過真資料庫,每次重啟資料全部消失。
+# InMemoryStore 與 PostgresStore 的方法完整性由測試強制(test_db_farms.py),
+# 所以這裡不會出現「本機好好的、上線才炸」的落差。
+def memory_db_enabled(flag: str, database_url: str) -> bool:
+    """判斷邏輯抽成純函式,測試才驗得動。
+
+    直接測模組常數的話得 reload config,而 reload 會重新讀 .env ——
+    開發者自己的 .env 裡有什麼,測試結果就跟著變,而且 reload 後的模組
+    是全域共用的,會一路影響到後面的測試。
+    """
+    return flag in ("1", "true", "True") and not database_url
+
+
+DEV_MEMORY_DB = memory_db_enabled(os.environ.get("DEV_MEMORY_DB", ""), DATABASE_URL)
+
 SESSION_TTL_DAYS = int(os.environ.get("SESSION_TTL_DAYS", "30"))
 SESSION_COOKIE_NAME = "pig_session"
 

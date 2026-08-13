@@ -1,0 +1,207 @@
+/* v2:底部導覽與六個分頁。
+   接續 style.css 的設計語彙(同一組 CSS 變數),不另開一套視覺系統。 */
+
+/* 底部固定,內容區要留空間,否則最後一張卡片會被導覽列蓋住 */
+body { padding-bottom: 96px; }
+
+.nav {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 9;
+  display: flex; padding: 6px 4px 10px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  border-top: 1px solid var(--border);
+  backdrop-filter: blur(12px);
+}
+.navbtn {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 3px; min-height: 52px; padding: 6px 1px;
+  border: none; background: none; cursor: pointer;
+  color: var(--ink-faint); font-size: 10px; font-family: inherit;
+  white-space: nowrap; position: relative;
+}
+.navbtn svg {
+  width: 21px; height: 21px; stroke: currentColor; fill: none;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+.navbtn.is-active { color: var(--accent); font-weight: 600; }
+.navbtn .dot {
+  position: absolute; top: 4px; right: calc(50% - 16px);
+  width: 8px; height: 8px; border-radius: 50%; background: var(--critical);
+}
+
+/* ── 工作清單 ── */
+.weekbar {
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--surface-2); border-radius: var(--radius-sm);
+  padding: 10px 16px; margin: 14px 0 6px; font-size: 14px; font-weight: 600;
+}
+.weekbar span {
+  color: var(--ink-faint); font-size: 22px; line-height: 1; cursor: pointer;
+  padding: 0 8px; user-select: none;
+}
+.tgrp {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  margin-top: 12px; overflow: hidden;
+}
+.tgrp-h {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 11px 13px 3px; font-size: 15px; font-weight: 600;
+}
+.tgrp-h .cnt2 { font-size: 12px; color: var(--ink-faint); font-weight: 500; }
+.tgrp-why { font-size: 12px; color: var(--ink-faint); padding: 0 13px 2px; }
+
+/* 耳號按鈕。56×40 是手指點得到的下限,跟 .btn-soft 同一個理由 ——
+   使用者是站在豬舍裡單手拿手機的農民。 */
+.tags { display: flex; flex-wrap: wrap; gap: 7px; padding: 12px 13px 13px; }
+.etag {
+  min-width: 56px; min-height: 40px; padding: 7px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--ink);
+  font-size: 14.5px; font-weight: 700; font-family: inherit;
+  letter-spacing: -0.02em; cursor: pointer;
+}
+.etag:active { transform: scale(.96); }
+
+/* 收合時固定兩行高 —— 一批可能有二十幾頭,全展開會把畫面塞滿 */
+.tags-fold { max-height: 104px; overflow: hidden; }
+.foldbtn {
+  display: block; width: 100%; text-align: left;
+  padding: 9px 13px 11px; border: none; border-top: 1px solid var(--border-light);
+  background: none; color: var(--accent); font-size: 12.5px; font-weight: 600;
+  font-family: inherit; cursor: pointer;
+}
+
+/* ── 提醒 ── */
+.rem {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 12px 0; border-bottom: 1px solid var(--border-light);
+}
+.rem:last-child { border-bottom: none; }
+.rem-ic {
+  flex-shrink: 0; width: 34px; height: 34px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; font-size: 15px;
+}
+.ic-urgent { background: var(--critical-bg); color: var(--critical); }
+.ic-soon { background: var(--warn-bg); color: var(--warn); }
+.ic-ok { background: var(--good-bg); color: var(--good); }
+.rem-b { flex: 1; min-width: 0; }
+.rem-t { font-size: 14px; font-weight: 600; }
+.rem-s { font-size: 12.5px; color: var(--ink-soft); margin-top: 1px; }
+.rem-w { font-size: 12px; color: var(--ink-faint); flex-shrink: 0; text-align: right; }
+
+/* ── 豬場紀錄 ── */
+.rec-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+.rec {
+  min-height: 82px; padding: 14px 6px;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 6px; text-align: center; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.rec .ic { font-size: 22px; line-height: 1; }
+.rec .nm { font-size: 12.5px; font-weight: 600; }
+.rec-hot { background: var(--accent); border-color: var(--accent); color: #fff; }
+.rec-warn { border-color: var(--critical); color: var(--critical); }
+
+/* ── 母豬清單 ── */
+.search {
+  width: 100%; padding: 11px 14px; margin-bottom: 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--ink);
+  font-size: 14.5px; font-family: inherit;
+}
+.search:focus { outline: none; border-color: var(--accent); }
+.sow-row {
+  display: flex; align-items: center; gap: 12px; padding: 11px 0;
+  border-bottom: 1px solid var(--border-light); cursor: pointer;
+}
+.sow-row:last-child { border-bottom: none; }
+.sow-tag { font-size: 16px; font-weight: 700; min-width: 60px; letter-spacing: -0.02em; }
+.sow-mid { flex: 1; min-width: 0; }
+.sow-st { font-size: 12.5px; color: var(--ink-soft); }
+
+/* 胎次色階:不用讀數字就知道這頭豬老不老 */
+.par { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+.par-g { background: var(--good-bg); color: var(--good); }
+.par-y { background: var(--warn-bg); color: var(--warn); }
+.par-r { background: var(--critical-bg); color: var(--critical); }
+.chev { color: var(--ink-faint); font-size: 16px; }
+
+/* ── 母豬卡 ── */
+.head-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.tag { font-size: 30px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; }
+.breed { font-size: 12.5px; color: var(--ink-soft); margin-top: 3px; }
+.parity {
+  display: inline-flex; flex-direction: column; align-items: center;
+  justify-content: center; min-width: 60px; padding: 8px;
+  border: 1px solid var(--warn); border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+}
+.parity b { font-size: 22px; line-height: 1; color: var(--warn); }
+.parity span { font-size: 10.5px; color: var(--warn); margin-top: 2px; }
+.meta {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 9px 16px;
+  margin-top: 14px; padding-top: 13px;
+  border-top: 1px solid var(--border-light); font-size: 13px;
+}
+.meta span { color: var(--ink-faint); }
+.meta b { font-weight: 600; }
+
+/* ── 事件時間軸 ── */
+.tl { position: relative; padding-left: 22px; }
+.tl::before {
+  content: ""; position: absolute; left: 6px; top: 6px; bottom: 6px;
+  width: 2px; background: var(--border);
+}
+.ev { position: relative; padding: 6px 0; font-size: 13px; }
+.ev::before {
+  content: ""; position: absolute; left: -20px; top: 12px;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--ink-faint); border: 2px solid var(--surface);
+}
+.ev.ok::before { background: var(--good); }
+.ev.loss::before { background: var(--critical); }
+.ev .d {
+  color: var(--ink-faint); font-size: 12px; margin-right: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.ev .n { color: var(--ink-soft); font-size: 12px; display: block; }
+.ev .excl {
+  font-size: 10.5px; color: var(--ink-faint); border: 1px solid var(--border);
+  border-radius: 999px; padding: 1px 7px; margin-left: 6px;
+}
+/* 年份標題。每列只印月-日,跨年時才插一列 —— 老母豬的時間軸橫跨
+   四五年,不標年份就分不出是哪一年的配種。負的左邊距讓它壓在
+   時間軸的線上,視覺上就是一個分段點。 */
+.tl-year {
+  margin: 14px 0 4px -22px; font-size: 11px; font-weight: 700;
+  letter-spacing: .06em; color: var(--ink-faint);
+  background: var(--surface); padding: 2px 0;
+}
+.tl-year:first-child { margin-top: 0; }
+
+/* ── 設定 ── */
+.set {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 13px 0; border-bottom: 1px solid var(--border-light);
+}
+.set:last-child { border-bottom: none; }
+.set-l { font-size: 14px; }
+.set-d { font-size: 12px; color: var(--ink-faint); margin-top: 1px; }
+.set-v { font-size: 13.5px; color: var(--accent); font-weight: 600; flex-shrink: 0; }
+
+/* ── 匯入 ── */
+.mine {
+  display: flex; align-items: center; gap: 11px; padding: 11px 0;
+  border-bottom: 1px solid var(--border-light); cursor: pointer;
+}
+.mine:last-child { border-bottom: none; }
+.mine-b { flex: 1; min-width: 0; }
+.mine-n { font-size: 13.5px; font-weight: 600; }
+.mine-s { font-size: 12px; color: var(--ink-faint); }
+.submit {
+  width: 100%; min-height: 48px; margin-top: 18px;
+  border: none; border-radius: 999px; background: var(--accent); color: #fff;
+  font-size: 16px; font-weight: 600; font-family: inherit; cursor: pointer;
+}
+.submit:disabled { opacity: .5; cursor: not-allowed; }
+.notice-good { background: var(--good-bg); color: var(--good); }

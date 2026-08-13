@@ -271,6 +271,48 @@ class TestBothImplementationsAgree:
         assert bad == [], "\n".join(bad)
 
 
+class TestDevMemoryStore:
+    """本機開發用的記憶體 store。
+
+    方便性的功能最怕的是溜到正式環境:資料看起來寫得進去,伺服器一重啟
+    就全部消失,而且完全沒有錯誤訊息。所以「不得蓋掉真資料庫」這件事
+    要有測試釘住,不能只靠註解提醒。
+    """
+
+    def test_off_by_default(self):
+        from config import memory_db_enabled
+        assert memory_db_enabled("", "") is False
+
+    def test_opt_in_without_database_url(self):
+        from config import memory_db_enabled
+        assert memory_db_enabled("1", "") is True
+
+    def test_real_database_always_wins(self):
+        """設了 DATABASE_URL 就一定連真的,旗標留著也不生效。"""
+        from config import memory_db_enabled
+        assert memory_db_enabled("1", "postgresql://example/db") is False
+
+    def test_unrecognised_values_are_off(self):
+        """只認得幾個明確的開啟值。'0'、'no'、拼錯的字都算沒開。"""
+        from config import memory_db_enabled
+        for flag in ("0", "no", "yes", "ture", " 1"):
+            assert memory_db_enabled(flag, "") is False, flag
+
+    def test_select_store_returns_none_when_off(self, monkeypatch):
+        import config as cfg
+        import db
+        monkeypatch.setattr(cfg, "DATABASE_URL", "")
+        monkeypatch.setattr(cfg, "DEV_MEMORY_DB", False)
+        assert db.select_store() is None
+
+    def test_select_store_returns_memory_when_on(self, monkeypatch):
+        import config as cfg
+        import db
+        monkeypatch.setattr(cfg, "DATABASE_URL", "")
+        monkeypatch.setattr(cfg, "DEV_MEMORY_DB", True)
+        assert isinstance(db.select_store(), InMemoryStore)
+
+
 class TestDedupeIndexStaysCorrect:
     """InMemoryStore 用索引做判重(對應 PostgresStore 的唯一索引)。
     刪除後若沒清索引,重新新增會拿回一個已經不存在的 id。

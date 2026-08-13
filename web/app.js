@@ -9,10 +9,11 @@ import {
   summarizeRecord,
 } from "./lib/format.js";
 import { SseParser } from "./lib/sse.js";
-import { isSpeechRecognitionSupported, mergeTranscript, splitFinalAndInterim } from "./lib/speech.js";
-import { addDrug, loadMyDrugs, removeDrug, saveMyDrugs } from "./lib/drugs.js";
-import { fileToJpegBase64 } from "./lib/image.js";
 import { addFactor, removeFactor } from "./lib/factors.js";
+import {
+  alertRow, buildAlerts, eventName, eventRow, formatWeek,
+  shiftDate, sowRow, taskGroup, timelineCaption, TIMELINE_LIMIT,
+} from "./lib/v2.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -37,39 +38,28 @@ function postJson(body) {
 }
 
 let metricDefs = [];
-let lastWeaknesses = [];   // 供疾病諮詢當背景資訊(US-1 驗收條件 7)
-
-// 對話歷史只存在使用者自己的瀏覽器裡,不上傳保存。
-// 若改由伺服器依 IP 保存,同一間辦公室(共用對外 IP)的兩個人會看到彼此的
-// 對話內容,是隱私外洩。伺服器端仍會自行裁切則數與長度,不信任這份資料。
-const MAX_HISTORY_TURNS = 20;
-let history = [];
-
-function rememberTurn(role, content) {
-  history.push({ role, content });
-  if (history.length > MAX_HISTORY_TURNS) {
-    history = history.slice(-MAX_HISTORY_TURNS);
-  }
-}
+let lastWeaknesses = [];
 
 // ── 帳號 ──
 //
-// 兩項核心功能需要先登入(含訪客)才能用,真正的限制在後端(server.py
-// 的 _gate),這裡的門檻只是介面。登入後藥品庫改由伺服器保存,可跨裝置;
-// 站方沒設定資料庫時(accountsAvailable=false)整個帳號介面不出現 ——
-// 不是出現了按下去才報錯,登入要求也會自動失效(見 loginRequired)。
-let account = { loggedIn: false, username: null, isGuest: false };
+// v2 的資料屬於牧場而非個人,所以一定要先有身分才能用。真正的限制在後端
+// (server.py 的 _need_farm),這裡的門檻只是介面 —— 前端隱藏擋不住直接
+// 呼叫 API 的人。站方沒設定資料庫時整個帳號介面不出現。
+// account.role 決定看得到哪些頁籤(owner 全部,worker 只能記錄)。
+let account = { loggedIn: false, username: null, isGuest: false,
+                role: "owner", isOwner: true };
 let accountsAvailable = false;
 let loginRequired = false;
 
-const LOGGED_OUT = { loggedIn: false, username: null, isGuest: false };
+const LOGGED_OUT = { loggedIn: false, username: null, isGuest: false,
+                     role: "owner", isOwner: true };
 
 async function refreshAccount() {
   const { ok, data } = await api("/api/auth/me");
   account = ok && data.loggedIn ? data : LOGGED_OUT;
   renderAuthBar();
   applyLoginGate();
-  await Promise.all([reloadDrugs(), reloadHistory()]);
+  await Promise.all([reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows()]);
 }
 
 // 未登入時把功能畫面換成登入引導。
@@ -83,7 +73,7 @@ function applyLoginGate() {
   const blocked = loginRequired && !account.loggedIn;
   const wasHidden = gate.classList.contains("is-hidden");
   gate.classList.toggle("is-hidden", !blocked);
-  document.querySelector(".tabs")?.classList.toggle("is-hidden", blocked);
+  document.querySelector(".nav")?.classList.toggle("is-hidden", blocked);
 
   // 每次重新出現都回到「登入」模式,不要停在使用者上次離開時的模式
   // (例如剛註冊完、登出後回來,下一個直覺動作是登入,不是再註冊一次)
@@ -100,10 +90,8 @@ function applyLoginGate() {
       panel.classList.add("is-hidden");
       return;
     }
-    // 解除封鎖時回到目前選取的頁籤,而不是把兩個面板都打開
-    const active = document.querySelector(".tab.is-active");
-    const wanted = active ? `panel-${active.dataset.tab}` : "panel-consult";
-    panel.classList.toggle("is-hidden", panel.id !== wanted);
+    // 解除封鎖時回到目前選取的頁籤,而不是把所有面板都打開
+    panel.classList.toggle("is-hidden", panel.id !== `panel-${currentTab}`);
   });
 }
 
@@ -161,13 +149,13 @@ const AUTH_MODES = {
     title: "註冊", submit: "建立帳號", endpoint: "/api/auth/register",
     hint: "密碼至少 8 個英數字元(中文字算兩個,4 個中文字也可以)。"
         + "不要用生日、電話或「password」這類容易被猜到的組合。"
-        + "健檢紀錄與藥品庫會存在你的帳號下,換裝置也看得到。",
+        + "母豬資料與健檢紀錄會存在你的牧場下,換裝置也看得到。",
     autocomplete: "new-password",
   },
   claim: {
     title: "設定帳號密碼", submit: "設定並保留資料", endpoint: "/api/auth/claim",
     hint: "密碼至少 8 個英數字元(中文字算兩個,4 個中文字也可以)。"
-        + "目前訪客身分下的健檢紀錄與藥品庫都會完整保留,不會重新開始。",
+        + "目前訪客身分下的資料都會完整保留,不會重新開始。",
     autocomplete: "new-password",
   },
 };
@@ -319,213 +307,6 @@ function guestWarningHtml() {
     </div>`;
 }
 
-// ── 我的藥品庫 ──
-// 未登入:存在這台瀏覽器的 localStorage(行為與加入帳號功能前完全相同)。
-// 已登入:存在伺服器,可跨裝置;疾病諮詢時由伺服器直接讀取,
-//         不再信任請求裡的內容(見 server.py 的 _drugs_for_consult)。
-// 顧問會優先引用這裡的劑量,不會自己生成數字(見 core/dosage.py)。
-let myDrugs = [];
-
-async function reloadDrugs() {
-  if (account.loggedIn) {
-    const { ok, data } = await api("/api/my-drugs");
-    myDrugs = ok ? data.drugs : [];
-  } else {
-    myDrugs = loadMyDrugs(localStorage);
-  }
-  renderDrugList();
-  updateDrugStorageHint();
-}
-
-function updateDrugStorageHint() {
-  const hint = $("drugStorageHint");
-  if (!hint) return;
-  hint.textContent = account.loggedIn
-    ? "列出你手邊有的藥,顧問建議劑量時會優先引用這裡的資料,不會憑空生成數字。已存在你的帳號下,換裝置也看得到。"
-    : "列出你手邊有的藥,顧問建議劑量時會優先引用這裡的資料,不會憑空生成數字。只存在這台裝置的瀏覽器裡,不會上傳。";
-}
-
-function renderDrugList() {
-  const list = $("drugList");
-  if (!list) return;
-
-  const warning = guestWarningHtml();
-  if (!myDrugs.length) {
-    list.innerHTML = `${warning}<li class="drug-empty">還沒有加入任何藥品。</li>`;
-    return;
-  }
-  list.innerHTML = warning + myDrugs
-    .map((d) => {
-      const metaParts = [];
-      if (d.activeIngredient) metaParts.push(escapeHtml(d.activeIngredient));
-      if (d.dosageNote) metaParts.push(escapeHtml(d.dosageNote));
-      if (d.withdrawalDays != null) metaParts.push(`休藥期 ${d.withdrawalDays} 天`);
-      const meta = metaParts.length
-        ? `<div class="drug-meta">${metaParts.join("・")}</div>`
-        : "";
-      return `
-        <li class="drug-item">
-          <div>
-            <div class="drug-name">${escapeHtml(d.name)}</div>
-            ${meta}
-          </div>
-          <button type="button" class="drug-remove" data-id="${escapeHtml(d.id)}">移除</button>
-        </li>`;
-    })
-    .join("");
-}
-
-function readOptionalNumber(el) {
-  const raw = el.value.trim();
-  if (!raw) return undefined;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-async function submitNewDrug() {
-  const draft = {
-    name: $("drugName").value,
-    activeIngredient: $("drugIngredient").value,
-    dosageNote: $("drugNote").value,
-    withdrawalDays: readOptionalNumber($("drugWithdrawal")),
-  };
-  if (!draft.name.trim()) return $("drugName").focus();
-
-  if (account.loggedIn) {
-    const { ok, data } = await api("/api/my-drugs", postJson(draft));
-    if (!ok) return showBanner(data.error || "新增失敗", "warn");
-    await reloadDrugs();
-  } else {
-    myDrugs = addDrug(myDrugs, draft);
-    saveMyDrugs(localStorage, myDrugs);
-    renderDrugList();
-  }
-
-  clearDrugForm();
-  $("drugName").focus();
-}
-
-function clearDrugForm() {
-  ["drugName", "drugIngredient", "drugNote", "drugWithdrawal"]
-    .forEach((id) => { $(id).value = ""; });
-  clearScanMarks();
-}
-
-// ── 拍照辨識藥品標示 ──
-//
-// AI 讀出來的內容只填進表單,絕不直接入庫 —— 牧場主核對後自己按
-// 「新增藥品」才算數(憲法第三條)。藥品庫的內容會被當成可引用的劑量
-// 依據送進疾病諮詢,若這裡自動存進去,等於 AI 的輸出繞一圈變成了
-// 「使用者提供的事實」。
-
-function setScanHint(text, tone) {
-  const hint = $("scanHint");
-  if (!hint) return;
-  hint.hidden = !text;
-  hint.textContent = text || "";
-  hint.classList.toggle("scan-hint-warn", tone === "warn");
-}
-
-// 休藥期讀錯會讓帶藥的豬肉上市,是這三個欄位裡唯一會造成食安後果的。
-// 自動填了就一定要看得出來「這是 AI 讀的,還沒有人確認過」。
-function markPendingReview() {
-  $("drugWithdrawal").classList.add("is-unverified");
-}
-
-function clearScanMarks() {
-  $("drugWithdrawal")?.classList.remove("is-unverified");
-}
-
-async function scanDrugLabel(file) {
-  // 辨識一次要十幾秒,不鎖住按鈕使用者會連點,每一下都在花錢。
-  // 兩個入口都要鎖 —— 只鎖被按的那顆,從另一顆一樣點得下去。
-  const buttons = [$("scanLabelBtn"), $("pickLabelBtn")].filter(Boolean);
-  buttons.forEach((b) => { b.disabled = true; });
-  setScanHint("辨識中,請稍候…");
-
-  try {
-    const data64 = await fileToJpegBase64(file);
-    const { ok, data } = await api("/api/drug-label", postJson({
-      image: { mediaType: "image/jpeg", data: data64 },
-    }));
-
-    if (!ok) {
-      setScanHint(data.error || "辨識失敗,請再試一次", "warn");
-      return;
-    }
-
-    const draft = data.draft || {};
-    $("drugName").value = draft.name || "";
-    $("drugIngredient").value = draft.activeIngredient || "";
-    $("drugNote").value = draft.dosageNote || "";
-    $("drugWithdrawal").value = draft.withdrawalDays ?? "";
-
-    clearScanMarks();
-    if (draft.withdrawalDays != null) markPendingReview();
-
-    setScanHint(
-      draft.withdrawalDays == null
-        ? "已填入辨識結果。標示上沒讀到休藥期,請自行核對藥瓶後填入。"
-        : "已填入辨識結果,請核對藥瓶上的字(尤其是休藥期),確認無誤再按新增。",
-      "warn",
-    );
-    $("drugName").focus();
-  } catch {
-    setScanHint("讀不到這個檔案,請換一張照片試試", "warn");
-  } finally {
-    buttons.forEach((b) => { b.disabled = false; });
-  }
-}
-
-async function deleteDrug(id) {
-  if (account.loggedIn) {
-    const { ok, data } = await api(`/api/my-drugs/${encodeURIComponent(id)}`,
-                                   { method: "DELETE" });
-    if (!ok) return showBanner(data.error || "移除失敗", "warn");
-    await reloadDrugs();
-  } else {
-    myDrugs = removeDrug(myDrugs, id);
-    saveMyDrugs(localStorage, myDrugs);
-    renderDrugList();
-  }
-}
-
-// 只在這個區塊真正需要的元素都存在時才接線 —— 瀏覽器快取(尤其是 PWA
-// 的 service worker)偶爾會讓 index.html 跟 app.js 版本對不上,若這裡
-// 對著不存在的元素呼叫 addEventListener 而不做防呆,拋出的例外會讓
-// 這個檔案後面所有按鈕(載入範例資料、詢問顧問、健檢)全部沒有反應 ——
-// 一個次要功能的元素缺失,不該連累完全無關的核心功能。
-const drugListEl = $("drugList");
-const addDrugBtnEl = $("addDrugBtn");
-if (drugListEl && addDrugBtnEl) {
-  addDrugBtnEl.addEventListener("click", submitNewDrug);
-  drugListEl.addEventListener("click", (e) => {
-    const btn = e.target.closest(".drug-remove");
-    if (btn) deleteDrug(btn.dataset.id);
-  });
-}
-
-// 拍照與相簿兩個入口,收到檔案之後的處理完全一樣。
-function wireScanInput(buttonId, inputId) {
-  const btn = $(buttonId);
-  const input = $(inputId);
-  if (!btn || !input) return;
-
-  btn.addEventListener("click", () => input.click());
-  input.addEventListener("change", () => {
-    const file = input.files?.[0];
-    // 每次都清空,否則連續選同一個檔案不會觸發 change,使用者以為壞了
-    input.value = "";
-    if (file) scanDrugLabel(file);
-  });
-}
-
-wireScanInput("scanLabelBtn", "scanLabelInput");
-wireScanInput("pickLabelBtn", "pickLabelInput");
-
-// 使用者自己動過休藥期就不再是「未經確認」,標記要跟著消失
-$("drugWithdrawal")?.addEventListener("input", clearScanMarks);
-
 // ── 健檢歷史紀錄 ──
 async function reloadHistory() {
   const card = $("historyCard");
@@ -612,18 +393,26 @@ if (historyListEl) {
   });
 }
 
-// ── 頁籤 ──
-document.querySelectorAll(".tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((t) => {
-      const on = t === tab;
-      t.classList.toggle("is-active", on);
-      t.setAttribute("aria-selected", String(on));
-    });
-    document.querySelectorAll(".panel").forEach((p) => {
-      p.classList.toggle("is-hidden", p.id !== `panel-${tab.dataset.tab}`);
-    });
+// ── 底部導覽 ──
+//
+// 六個頁籤,標籤縮成兩字 —— 375px 手機放不下六個四字標籤。
+// 切換純粹是顯示/隱藏,沒有路由:重新整理回到第一頁是可接受的,
+// 換來的是不必引入前端路由這一整層。
+let currentTab = "tasks";
+
+function showTab(name) {
+  currentTab = name;
+  document.querySelectorAll(".navbtn").forEach((b) => {
+    b.classList.toggle("is-active", b.dataset.tab === name);
   });
+  document.querySelectorAll(".panel").forEach((p) => {
+    p.classList.toggle("is-hidden", p.id !== `panel-${name}`);
+  });
+  window.scrollTo(0, 0);
+}
+
+document.querySelectorAll(".navbtn").forEach((btn) => {
+  btn.addEventListener("click", () => showTab(btn.dataset.tab));
 });
 
 // ── 啟動 ──
@@ -643,9 +432,10 @@ async function init() {
     accountsAvailable = Boolean(health.data.accountsAvailable);
     loginRequired = Boolean(health.data.loginRequired);
     if (!health.data.aiAvailable) {
-      // 提示文字由後端提供(core/labels.py),前端不自己維護一份措辭
+      // 提示文字由後端提供(core/labels.py),前端不自己維護一份措辭。
+      // 這裡只提示,不停用任何按鈕:v2 唯一的 AI 路徑是健檢後的改善建議,
+      // 而健檢本身是純計算,額度用盡照樣要能按(憲法第二條)。
       showBanner(health.data.aiUnavailableNote, "warn");
-      $("askBtn").disabled = true;
     }
   }
 
@@ -659,7 +449,7 @@ async function init() {
     account = me.ok && me.data.loggedIn ? me.data : LOGGED_OUT;
     renderAuthBar();
     applyLoginGate();
-    await Promise.all([reloadDrugs(), reloadHistory()]);
+    await Promise.all([reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows()]);
   }
 }
 
@@ -870,10 +660,10 @@ function renderHealthResult(data) {
     </div>`;
 }
 
-// 追問改善建議的對話歷史。只存在瀏覽器記憶體,理由跟疾病諮詢的
-// history 一樣(見檔案開頭),而且是完全獨立的一份 —— 不與疾病諮詢
-// 混在一起,否則 AI 會分不清這輪對話到底是在問診還是在談經營改善。
-const MAX_ADVICE_HISTORY_TURNS = MAX_HISTORY_TURNS;
+// 追問改善建議的對話歷史。只存在瀏覽器記憶體,不上傳保存 ——
+// 若改由伺服器依牧場保存,同一座牧場的兩個人會看到彼此的提問內容。
+// 伺服器端仍會自行裁切則數與長度,不信任這份資料(config.MAX_HISTORY_*)。
+const MAX_ADVICE_HISTORY_TURNS = 20;
 let adviceHistory = [];
 
 async function requestAdvice(weaknesses) {
@@ -992,223 +782,206 @@ $("healthResult")?.addEventListener("keydown", (e) => {
   }
 });
 
-// ── 疾病諮詢 ──
-function setConsultBusy(busy) {
-  $("askBtn").disabled = busy;
-  document.querySelectorAll("#examples .chip").forEach((c) => (c.disabled = busy));
-}
-
-$("examples").addEventListener("click", (e) => {
-  const chip = e.target.closest(".chip");
-  if (!chip) return;
-  $("question").value = chip.dataset.q;
-  ask(chip.dataset.q);
-});
-
-$("askBtn").addEventListener("click", () => {
-  const q = $("question").value.trim();
-  if (!q) return $("question").focus();
-  ask(q);
-});
-
-$("question").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    $("askBtn").click();
-  }
-});
-
-// ── 語音輸入 ──
-// 桌面版 Firefox 完全不支援,其餘瀏覽器需要廠商前綴 —— 不支援就不顯示
-// 按鈕,漸進增強,不影響手動打字的既有流程。
-// 同時也要檢查 DOM 元素本身存在(而不是只檢查瀏覽器 API 支援)——
-// 快取造成 index.html 跟 app.js 版本對不上時,元素可能不存在,若沒防呆,
-// 拋出的例外會讓這個檔案後面所有東西(包含最下面的 init() 與 service
-// worker 註冊)全部沒有執行。
-const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-if (isSpeechRecognitionSupported(window) && $("micBtn") && $("micHint")) {
-  const recognition = new SpeechRecognitionCtor();
-  recognition.lang = "zh-TW";
-  recognition.continuous = true;
-  recognition.interimResults = true;
-
-  // 錄音開始當下的文字要記住 —— continuous 模式的 event.results 是
-  // 整段錄音從頭到現在的累積結果,每次都要接在「錄音前」的文字後面,
-  // 不能接在「上一次事件」的文字後面,否則手打的內容會被蓋掉或重複。
-  let baseTextAtStart = "";
-
-  const setListening = (on) => $("micBtn").setAttribute("aria-pressed", String(on));
-
-  const showMicHint = (text) => {
-    $("micHint").textContent = text;
-    $("micHint").hidden = false;
-  };
-
-  recognition.addEventListener("result", (event) => {
-    const { finalText, interimText } = splitFinalAndInterim(event.results);
-    $("question").value = mergeTranscript(baseTextAtStart, finalText + interimText);
-  });
-
-  recognition.addEventListener("end", () => setListening(false));
-
-  recognition.addEventListener("error", (event) => {
-    // no-speech、aborted 這類使用者無法採取行動的狀況靜默重置就好;
-    // 權限或裝置問題才值得中斷並說明,否則使用者只會看到按鈕跳掉卻不知道為什麼。
-    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-      showMicHint("沒有取得麥克風權限,請到瀏覽器設定允許存取麥克風後再試一次。");
-    } else if (event.error === "audio-capture") {
-      showMicHint("找不到可用的麥克風裝置。");
-    }
-  });
-
-  $("micBtn").hidden = false;
-  $("micBtn").addEventListener("click", () => {
-    if ($("micBtn").getAttribute("aria-pressed") === "true") {
-      recognition.stop();
-      return;
-    }
-    $("micHint").hidden = true;
-    baseTextAtStart = $("question").value;
-    try {
-      recognition.start();
-      setListening(true);
-    } catch {
-      // 例如上一段錄音還沒完全結束就被再次觸發,忽略即可,使用者再點一次就好
-    }
-  });
-}
-
-async function ask(question) {
-  setConsultBusy(true);
-  $("consultResult").innerHTML = `
-    <div class="card">
-      <div class="section-label tag-ai">AI 回覆</div>
-      <div class="loading" id="consultLoading"><span class="spinner"></span>顧問思考中…</div>
-      <div class="md" id="consultBody"></div>
-    </div>`;
-
-  let answer = "";
-  try {
-    const res = await fetch("/api/consult", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question,
-        weaknesses: lastWeaknesses,
-        history,   // 送出前的歷史,不含這一題本身
-        // 已登入時伺服器會自己去資料庫拿,送了也會被忽略(見 server.py 的
-        // _drugs_for_consult)—— 不送是為了讓「誰是可信來源」在這裡就看得出來
-        myDrugs: account.loggedIn ? undefined : myDrugs,
-      }),
-    });
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    const parser = new SseParser();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      for (const event of parser.push(decoder.decode(value, { stream: true }))) {
-        handleConsultEvent(event, () => answer, (text) => (answer = text));
-      }
-    }
-  } catch (e) {
-    $("consultBody").innerHTML =
-      `<div class="notice notice-warn">連線失敗:${escapeHtml(String(e))}</div>`;
-  } finally {
-    $("consultLoading")?.remove();
-    if (answer) {
-      $("consultBody").innerHTML = renderMarkdown(answer);
-      // 成功拿到回答才記錄。失敗的請求不進歷史,否則之後的追問會
-      // 帶著一段沒有答案的殘缺對話,反而干擾 AI 判斷。
-      rememberTurn("user", question);
-      rememberTurn("assistant", answer);
-    }
-    setConsultBusy(false);
-  }
-}
-
-function renderDosageReference(entries) {
-  const groups = entries
-    .map((entry) => {
-      const drugs = entry.drugs
-        .map((d) => {
-          const withdrawal = d.withdrawalDays != null
-            ? `<span class="dosage-withdrawal">休藥期 ${d.withdrawalDays} 天</span>`
-            : `<span class="dosage-withdrawal dosage-withdrawal-unknown">休藥期未知,請洽獸醫</span>`;
-          return `
-            <div class="dosage-drug">
-              <div class="dosage-drug-head">
-                <span class="dosage-drug-name">${escapeHtml(d.name)}</span>
-                ${withdrawal}
-              </div>
-              <div class="dosage-drug-detail">${escapeHtml(d.dosage)}</div>
-            </div>`;
-        })
-        .join("");
-      const source = entry.sourceNote
-        ? `<div class="dosage-source">資料來源:${escapeHtml(entry.sourceNote)}</div>`
-        : "";
-      return `
-        <div class="dosage-group">
-          <div class="dosage-disease">${escapeHtml(entry.diseaseName)}</div>
-          ${drugs}${source}
-        </div>`;
-    })
-    .join("");
-  return `
-    <div class="card dosage-card">
-      <div class="section-label tag-computed">官方劑量對照 · 系統查表,非 AI 生成</div>
-      ${groups}
-    </div>`;
-}
-
-function handleConsultEvent(event, getAnswer, setAnswer) {
-  if (event.type === "meta") {
-    // 通報提示是計算出來的,在 AI 開口之前就先呈現(憲法第一條)
-    const parts = [];
-    if (event.escalation) {
-      parts.push(`<div class="notice notice-alert">${escapeHtml(event.escalation.notice)}</div>`);
-    }
-    parts.push(`<div class="notice notice-info">${escapeHtml(event.baselineNotice)}</div>`);
-    // 劑量查表化:這張卡片是伺服器直接算出來的,不是 AI 寫的 ——
-    // 跟下面的 AI 文字分開呈現,使用者才看得出哪些數字是查表來的。
-    if (event.dosageReference && event.dosageReference.length) {
-      parts.push(renderDosageReference(event.dosageReference));
-    }
-    // 醫療免責緊貼在回答上方,使用者不用捲到頁尾才看得到
-    if (event.medicalDisclaimer) {
-      parts.push(
-        `<div class="notice notice-caution">${escapeHtml(event.medicalDisclaimer)}</div>`
-      );
-    }
-    $("consultResult").insertAdjacentHTML("afterbegin", parts.join(""));
-    return;
-  }
-
-  if (event.type === "delta") {
-    $("consultLoading")?.remove();
-    const text = getAnswer() + event.text;
-    setAnswer(text);
-    $("consultBody").innerHTML =
-      renderMarkdown(trimDangling(text)) + '<span class="cursor"></span>';
-    return;
-  }
-
-  if (event.type === "error") {
-    $("consultLoading")?.remove();
-    $("consultBody").innerHTML =
-      `<div class="notice notice-warn">${escapeHtml(event.error)}</div>`;
-  }
-}
-
-init();
-
-// 註冊失敗(舊瀏覽器、非 HTTPS)不影響網站運作,純粹是漸進增強
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("sw.js").catch(() => {});
   });
 }
+
+
+// ── 工作清單 ──
+//
+// 依工作類型分組,不按日期 —— 這個場跑批次生產,一週一批,整批母豬同一週
+// 做同一件事(specs/v2-facts.md 第 7 條)。渲染在 lib/v2.js,那邊有測試。
+let weekStart = null;
+
+async function reloadTasks() {
+  const wrap = $("taskGroups");
+  if (!wrap || !account.loggedIn) return;
+
+  const { ok, data } = await api(`/api/tasks${weekStart ? `?start=${weekStart}` : ""}`);
+  if (!ok) return;
+
+  weekStart = data.weekStart;
+  $("weekLabel").textContent = formatWeek(data.weekStart, data.weekEnd);
+  const total = data.groups.reduce((n, g) => n + g.tasks.length, 0);
+  $("weekSummary").textContent = total
+    ? `${data.groups.length} 類工作 ・ 共 ${total} 頭次`
+    : "這週沒有推算出來的工作";
+
+  wrap.innerHTML = data.groups.map(taskGroup).join("")
+    || '<p class="hint">這週沒有工作。母豬資料還是空的話,可以到「設定」匯入。</p>';
+}
+
+// ── 提醒 ──
+async function reloadAlerts() {
+  const wrap = $("alertList");
+  if (!wrap || !account.loggedIn) return;
+  const { ok, data } = await api("/api/alerts");
+  if (!ok) return;
+
+  const rows = buildAlerts(data);
+  wrap.innerHTML = rows.map(alertRow).join("")
+    || '<p class="hint">目前沒有需要處理的異常。</p>';
+  $("navDot")?.classList.toggle("is-hidden",
+    !rows.some((r) => r.tone === "urgent"));
+}
+
+// ── 母豬 ──
+let sows = [];
+
+async function reloadSows() {
+  if (!$("sowList") || !account.loggedIn) return;
+  const { ok, data } = await api("/api/sows");
+  sows = ok ? data.sows : [];
+  renderSowList();
+}
+
+function renderSowList() {
+  const list = $("sowList");
+  if (!list) return;
+
+  const q = ($("sowSearch")?.value || "").trim().toLowerCase();
+  const shown = q ? sows.filter((s) => s.earTag.toLowerCase().includes(q)) : sows;
+  $("sowCount").textContent = q
+    ? `符合 ${shown.length} 頭 / 在場 ${sows.length} 頭`
+    : `在場 ${sows.length} 頭`;
+
+  if (!shown.length) {
+    list.innerHTML = `<p class="hint">${sows.length
+      ? "沒有符合的耳號。" : "還沒有母豬資料,可以到「設定」匯入 PigCHAMP 檔案。"}</p>`;
+    return;
+  }
+  // 只畫前 100 筆:451 頭全畫會讓搜尋時每次輸入都卡一下。
+  list.innerHTML = shown.slice(0, 100).map(sowRow).join("")
+    + (shown.length > 100 ? `<p class="hint">只顯示前 100 頭,請用搜尋縮小範圍。</p>` : "");
+}
+
+async function openSow(sowId) {
+  const { ok, data } = await api(`/api/sows/${sowId}`);
+  if (!ok) return showBanner(data.error || "讀不到這頭母豬", "warn");
+
+  const s = data.sow;
+  const box = $("sowDetail");
+  box.classList.remove("is-hidden");
+  box.innerHTML = `
+    <div class="card">
+      <div class="head-top">
+        <div>
+          <div class="tag">${escapeHtml(s.earTag)}</div>
+          <div class="breed">${escapeHtml(s.breed || "品種未填")}${
+            s.birthDate ? ` ・ ${s.birthDate} 出生` : ""}</div>
+        </div>
+        <div class="parity"><b>${s.parity}</b><span>胎次</span></div>
+      </div>
+      <div class="meta">
+        <div><span>父系耳號</span><br><b>${escapeHtml(s.sireTag || "—")}</b></div>
+        <div><span>母系耳號</span><br><b>${escapeHtml(s.damTag || "—")}</b></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>事件時間軸</h3>
+      <p class="hint">${timelineCaption(data.events.length, TIMELINE_LIMIT)}</p>
+      <div class="tl" style="margin-top:12px">
+        ${data.events.slice().reverse().slice(0, TIMELINE_LIMIT).map(eventRow).join("")}
+      </div>
+    </div>`;
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ── 匯入 ──
+let importText = "";
+
+async function previewImport(file) {
+  $("importResult").innerHTML = '<p class="hint">解析中…</p>';
+  importText = await file.text();
+
+  const { ok, data } = await api("/api/import/preview", postJson({ content: importText }));
+  if (!ok) {
+    $("importResult").innerHTML =
+      `<div class="notice notice-warn">${escapeHtml(data.error || "解析失敗")}</div>`;
+    return;
+  }
+
+  const codes = Object.entries(data.byCode).sort((a, b) => b[1] - a[1])
+    .map(([c, n]) => `${escapeHtml(eventName(c))} ${n}`).join(" ・ ");
+
+  $("importResult").innerHTML = `
+    <div class="notice notice-info">
+      偵測到 <b>${data.sows}</b> 頭母豬、<b>${data.events}</b> 筆事件
+      ${data.dateRange ? `<br>${data.dateRange[0]} ~ ${data.dateRange[1]}` : ""}
+      <br><span class="hint">${codes}</span>
+      ${data.badLineCount
+        ? `<br><span class="hint">${data.badLineCount} 行無法解析,會略過</span>` : ""}
+    </div>
+    ${data.anomalies.length ? `
+      <div class="label" style="margin-top:16px">可疑記錄 ${data.anomalies.length} 筆</div>
+      <p class="hint">勾起來的不納入統計。<b>資料仍會存起來</b>,之後可以改回來。</p>
+      ${data.anomalies.map((a) => `
+        <label class="mine">
+          <input type="checkbox" class="exclude-line" value="${a.line}" checked>
+          <div class="mine-b">
+            <div class="mine-n">${escapeHtml(a.earTag)} ・ ${escapeHtml(eventName(a.code))} ・ ${a.date}</div>
+            <div class="mine-s">${escapeHtml(a.reason)}(第 ${a.line} 行)</div>
+          </div>
+        </label>`).join("")}` : ""}
+    <button class="submit" id="importConfirm">確認匯入</button>`;
+}
+
+async function commitImport() {
+  const excludeLines = [...document.querySelectorAll(".exclude-line:checked")]
+    .map((el) => Number(el.value));
+  const btn = $("importConfirm");
+  btn.disabled = true;
+  btn.textContent = "匯入中…";
+
+  const { ok, data } = await api("/api/import",
+                                 postJson({ content: importText, excludeLines }));
+  if (!ok) {
+    $("importResult").innerHTML =
+      `<div class="notice notice-warn">${escapeHtml(data.error || "匯入失敗")}</div>`;
+    return;
+  }
+  $("importResult").innerHTML = `
+    <div class="notice notice-good">匯入完成:${data.sows} 頭母豬、${data.events} 筆事件${
+      data.excluded ? `,其中 ${data.excluded} 筆不納入統計` : ""}。</div>`;
+  importText = "";
+  await Promise.all([reloadSows(), reloadTasks(), reloadAlerts()]);
+}
+
+// ── v2 事件接線 ──
+//
+// 一律用事件委派:上面幾個 render 都是整段 innerHTML 重畫,直接綁在元素上
+// 的話重畫後就失效了。
+document.addEventListener("click", (e) => {
+  const fold = e.target.closest("[data-fold]");
+  if (fold) {
+    const box = $(fold.dataset.fold);
+    const nowFolded = box?.classList.toggle("tags-fold");
+    fold.textContent = nowFolded
+      ? `展開全部 ${box.childElementCount} 頭 ›` : "收合 ⌃";
+    return;
+  }
+  const row = e.target.closest(".sow-row");
+  if (row) return openSow(Number(row.dataset.sow));
+
+  const tag = e.target.closest(".etag");
+  if (tag) { showTab("sows"); return openSow(Number(tag.dataset.sow)); }
+
+  if (e.target.id === "importConfirm") return commitImport();
+  if (e.target.id === "weekPrev") { weekStart = shiftDate(weekStart, -7); return reloadTasks(); }
+  if (e.target.id === "weekNext") { weekStart = shiftDate(weekStart, 7); return reloadTasks(); }
+});
+
+$("sowSearch")?.addEventListener("input", renderSowList);
+$("importPick")?.addEventListener("click", () => $("importFile")?.click());
+$("importFile")?.addEventListener("change", (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = "";      // 清空才能連續選同一個檔案
+  if (file) previewImport(file);
+});
+
+// 真的把 App 跑起來。這行漏掉時畫面不會報錯,只是所有標籤停在「載入中…」,
+// 看起來像伺服器沒回應 —— 有測試把關(test_app_bootstraps_itself)。
+// 不必等 DOMContentLoaded:module 本來就是 defer,執行時 DOM 已經齊了。
+init();
