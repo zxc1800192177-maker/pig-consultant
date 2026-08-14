@@ -168,6 +168,7 @@ PERFORMANCE_TEXT = {
     "litters_per_year": ("年產胎數", "胎", 2),
     "stillborn_rate": ("死胎率", "%", 1),
     "lactation_days": ("平均哺乳天數", "天", 1),
+    "repeat_estrus": ("重發情次數", "次", 0),
 }
 
 # 三級。**不是 A~F 五級** —— 已確認改成三級,而且不得由三級反推五級

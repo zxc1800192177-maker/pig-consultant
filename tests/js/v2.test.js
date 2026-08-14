@@ -19,6 +19,7 @@ import {
   performanceGrid,
   shiftDate,
   statusPills,
+  visibleEvents,
   sowRow,
   taskGroup,
   timelineCaption,
@@ -439,5 +440,64 @@ describe("時間軸裡的「還沒驗孕」提示", () => {
   it("文字有跳脫", () => {
     const html = pendingCheckRow(status({ pregCheckNote: "<script>x</script>" }));
     assert.doesNotMatch(html, /<script>/);
+  });
+});
+
+
+describe("時間軸驗孕記錄一律保留", () => {
+  // 實測 1183:47 筆事件、5 次驗孕陰性,已經超過原本的 40 筆上限。
+  const mk = (n, type, dayOffset) => ({
+    id: n, type, date: `2020-${String(1 + (dayOffset % 12)).padStart(2, "0")}-01`,
+    detail: {},
+  });
+
+  it("一般事件超過上限時只留最新的部分", () => {
+    const events = Array.from({ length: 50 }, (_, i) => mk(i, "MT", i));
+    const shown = visibleEvents(events, 40);
+    assert.equal(shown.length, 40);
+  });
+
+  it("驗孕記錄在名額內優先保留,不會被其他事件擠掉", () => {
+    const events = [
+      ...Array.from({ length: 45 }, (_, i) => mk(i, "MT", i)),
+      ...Array.from({ length: 5 }, (_, i) => mk(100 + i, "PD", i)),
+    ];
+    const shown = visibleEvents(events, 40);
+    const pdCount = shown.filter((e) => e.type === "PD").length;
+    assert.equal(pdCount, 5, "5 筆驗孕記錄應該全部保留");
+    assert.equal(shown.length, 40);   // 5 筆 PD + 35 筆其他,總數仍是上限
+  });
+
+  it("驗孕記錄比上限還多時,總數會超過上限 —— 一筆都不能丟", () => {
+    const events = Array.from({ length: 45 }, (_, i) => mk(i, "PD", i));
+    const shown = visibleEvents(events, 40);
+    assert.equal(shown.length, 45);
+  });
+
+  it("其餘事件仍然只留最新的,不是全部混在一起顯示", () => {
+    const events = [
+      ...Array.from({ length: 50 }, (_, i) => ({
+        id: i, type: "MT",
+        date: `20${20 + Math.floor(i / 12)}-${String(1 + (i % 12)).padStart(2, "0")}-01`,
+        detail: {},
+      })),
+    ];
+    const shown = visibleEvents(events, 40);
+    assert.equal(shown.length, 40);
+    // 保留下來的應該是日期最新的 40 筆
+    const kept = new Set(shown.map((e) => e.id));
+    assert.ok(kept.has(49) && kept.has(10) && !kept.has(0));
+  });
+
+  it("由新到舊排序", () => {
+    const events = [mk(1, "MT", 0), mk(2, "PD", 5), mk(3, "MT", 8)];
+    const shown = visibleEvents(events, 40);
+    const dates = shown.map((e) => e.date);
+    assert.deepEqual(dates, [...dates].sort().reverse());
+  });
+
+  it("沒有驗孕記錄時行為跟原本一樣", () => {
+    const events = Array.from({ length: 3 }, (_, i) => mk(i, "MT", i));
+    assert.equal(visibleEvents(events, 40).length, 3);
   });
 });

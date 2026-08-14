@@ -13,7 +13,7 @@ import { addFactor, removeFactor } from "./lib/factors.js";
 import {
   alertRow, buildAlerts, eventName, eventRow, formatWeek, performanceGrid,
   pendingCheckRow, reviewRow, settingRow, shiftDate, sowRow, statusPills, taskGroup,
-  timelineCaption, TIMELINE_LIMIT,
+  timelineCaption, TIMELINE_LIMIT, visibleEvents,
 } from "./lib/v2.js";
 import {
   SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, recordedRow,
@@ -876,6 +876,8 @@ async function openSow(sowId) {
   const s = data.sow;
   const box = $("sowDetail");
   box.classList.remove("is-hidden");
+  // 驗孕記錄一律全部保留,其餘事件只留最新的部分 —— 見 lib/v2.js。
+  const shownEvents = visibleEvents(data.events, TIMELINE_LIMIT);
   box.innerHTML = `
     <div class="card">
       <div class="head-top">
@@ -895,10 +897,10 @@ async function openSow(sowId) {
     ${performanceGrid(data.performance)}
     <div class="card">
       <h3>事件時間軸</h3>
-      <p class="hint">${timelineCaption(data.events.length, TIMELINE_LIMIT)}</p>
+      <p class="hint">${timelineCaption(data.events.length, shownEvents.length)}</p>
       <div class="tl" style="margin-top:12px">
         ${pendingCheckRow(data.status)}
-        ${data.events.slice().reverse().slice(0, TIMELINE_LIMIT).map(eventRow).join("")}
+        ${shownEvents.map(eventRow).join("")}
       </div>
     </div>`;
   box.scrollIntoView({ behavior: "smooth", block: "start" });

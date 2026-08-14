@@ -413,6 +413,7 @@ PERFORMANCE_METRICS = (
     ("litters_per_year", True),
     ("stillborn_rate", False), # 死胎率:越低越好
     ("lactation_days", True),
+    ("repeat_estrus", False),  # 重發情次數:越少越好
 )
 
 # 場內分級至少要幾頭母豬才有意義。頭數太少時三分位只是把三頭豬各給一級,
@@ -507,6 +508,14 @@ def sow_performance(events: List[dict]) -> Optional[dict]:
         if nxt:
             spans.append((nxt - f["event_date"]).days)
     out["lactation_days"] = sum(spans) / len(spans) if spans else None
+
+    # 重發情次數:驗孕結果為陰性的次數(使用者明確定義 —— 陰性一次就算
+    # 一次重發情,不必推論配種批次後面有沒有接著分娩)。用她完整的事件
+    # 記錄算,不是只看目前這一胎,才算得出終身總次數。
+    out["repeat_estrus"] = sum(
+        1 for e in events
+        if e["event_type"] == PREG_CHECK and (e.get("detail") or {}).get("positive") is False
+    )
 
     return out
 

@@ -789,3 +789,53 @@ class TestPendingPregnancyCheck:
         assert recorded != never
         assert "結果未填" in recorded
         assert "尚未驗孕" in never
+
+
+class TestRepeatEstrusCount:
+    """重發情次數。使用者明確定義:驗孕結果陰性一次就算一次重發情,
+    不用推論配種批次後面有沒有接著分娩。
+    """
+
+    @staticmethod
+    def litters(sow_id, alive_list, start=date(2023, 1, 1), gap=145):
+        return [ev(sow_id, "FW", start + timedelta(days=gap * i), {"born_alive": a})
+                for i, a in enumerate(alive_list)]
+
+    def test_no_checks_is_zero(self):
+        p = schedule.sow_performance(self.litters(1, [12, 12, 12]))
+        assert p["repeat_estrus"] == 0
+
+    def test_one_negative_check_counts_once(self):
+        events = self.litters(1, [12, 12, 12]) + [
+            ev(1, "PD", date(2024, 1, 1), {"positive": False})]
+        assert schedule.sow_performance(events)["repeat_estrus"] == 1
+
+    def test_positive_checks_do_not_count(self):
+        events = self.litters(1, [12, 12, 12]) + [
+            ev(1, "PD", date(2024, 1, 1), {"positive": True})]
+        assert schedule.sow_performance(events)["repeat_estrus"] == 0
+
+    def test_unknown_result_does_not_count(self):
+        """結果沒填不等於陰性,不可以算成重發情。"""
+        events = self.litters(1, [12, 12, 12]) + [
+            ev(1, "PD", date(2024, 1, 1), {"positive": None})]
+        assert schedule.sow_performance(events)["repeat_estrus"] == 0
+
+    def test_multiple_negatives_across_her_life_all_count(self):
+        """實測 1183:47 筆事件裡有 5 次驗孕陰性,終身總次數才有意義。"""
+        events = self.litters(1, [12, 12, 12])
+        for i in range(5):
+            events.append(ev(1, "PD", date(2020, 1, 1) + timedelta(days=30 * i),
+                             {"positive": False}))
+        assert schedule.sow_performance(events)["repeat_estrus"] == 5
+
+    def test_tiers_fewer_is_better(self):
+        """越少越好 —— 跟死胎率同一個方向,不是跟總仔數那幾項一樣。"""
+        assert schedule.tier_within_farm(0, list(range(10)), False) == "good"
+        assert schedule.tier_within_farm(9, list(range(10)), False) == "poor"
+
+    def test_label_and_unit(self):
+        from core.labels import performance_label, performance_unit, performance_digits
+        assert performance_label("repeat_estrus") == "重發情次數"
+        assert performance_unit("repeat_estrus") == "次"
+        assert performance_digits("repeat_estrus") == 0      # 次數是整數,不該有小數

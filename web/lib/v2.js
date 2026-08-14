@@ -78,6 +78,24 @@ export function timelineCaption(total, limit = TIMELINE_LIMIT) {
     : `共 ${total} 筆 ・ 最新在上`;
 }
 
+const byDateDesc = (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
+
+/** 決定時間軸實際要顯示哪些事件,由新到舊排序。
+ *
+ * **驗孕記錄一律全部保留,不受顯示上限限制。** 「有沒有驗過、驗了幾次」
+ * 是牧場主特別在意的資訊,若跟其他事件一起被「只留最新 N 筆」的規則
+ * 篩掉,老母豬早期的驗孕記錄會整批消失而不會有人發現 —— 實測 1183 有
+ * 47 筆事件、5 次驗孕陰性,已經超過原本的 40 筆上限。其餘事件仍只留
+ * 最新的部分,不然整張卡會無限長。
+ */
+export function visibleEvents(events, limit = TIMELINE_LIMIT) {
+  const sorted = events.slice().sort(byDateDesc);
+  const checks = sorted.filter((e) => e.type === "PD");
+  const rest = sorted.filter((e) => e.type !== "PD")
+    .slice(0, Math.max(0, limit - checks.length));
+  return [...checks, ...rest].sort(byDateDesc);
+}
+
 /** 事件的年份;格式不對就回空字串,不讓一筆壞資料炸掉整張卡。 */
 function yearOf(event) {
   const text = String(event?.date ?? "");
