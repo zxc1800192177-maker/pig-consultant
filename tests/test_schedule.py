@@ -839,3 +839,89 @@ class TestRepeatEstrusCount:
         assert performance_label("repeat_estrus") == "重發情次數"
         assert performance_unit("repeat_estrus") == "次"
         assert performance_digits("repeat_estrus") == 0      # 次數是整數,不該有小數
+
+
+class TestExitedSowsCountTowardTheComparisonBaseline:
+    """已離群(死亡/淘汰)的母豬要算進場內比較的分母裡。
+
+    只拿在場的當比較基準,表現最差、正是離群原因的那批一離群就從
+    分母消失,活下來的人級距會愈算愈寬鬆 —— 這是使用者實際反映的
+    問題:記錄死亡或淘汰之後,那頭豬就從「母豬資訊」與分析裡完全
+    消失了,兩邊都要修。
+    """
+
+    @staticmethod
+    def farrows(sow_id, alive_list, start=date(2023, 1, 1), gap=145):
+        return [ev(sow_id, "FW", start + timedelta(days=gap * i), {"born_alive": a})
+                for i, a in enumerate(alive_list)]
+
+    def test_performance_tiers_use_exited_peers_too(self):
+        """一頭表現中等的在場母豬,拿掉離群的差母豬當比較基準會被錯誤地
+        評為「待改善」;含入離群母豬之後,墊底的是那些離群的,她才回到
+        中段。
+
+        數值刻意各不相同(不是一堆母豬共用同一個數字)—— 樣本裡九成
+        都是同一個值時,三分位的上下界會疊在一起變成分不出高下(回
+        None),不是這條測試想驗證的東西。
+        """
+        subject = sow(1, "0001", status="active")
+        # 在場 9 頭,活仔數 11~19 各不相同;subject 是 10,墊底
+        good_peers = [sow(i, f"{i:04d}", status="active") for i in range(2, 11)]
+        # 離群 5 頭,活仔數 1~5,比 subject 差很多
+        poor_exited = [sow(90 + i, f"9{i:03d}", status="culled") for i in range(5)]
+
+        events = self.farrows(1, [10, 10, 10])
+        for p, n in zip(good_peers, range(11, 20)):
+            events += self.farrows(p["id"], [n, n, n])
+        for p, n in zip(poor_exited, range(1, 6)):
+            events += self.farrows(p["id"], [n, n, n])
+
+        grouped = schedule._by_sow(events)
+
+        without_exited = schedule.performance_with_tiers(1, [subject] + good_peers, grouped)
+        with_exited = schedule.performance_with_tiers(
+            1, [subject] + good_peers + poor_exited, grouped)
+
+        tier_without = next(m["tier"] for m in without_exited["metrics"]
+                            if m["key"] == "born_alive")
+        tier_with = next(m["tier"] for m in with_exited["metrics"] if m["key"] == "born_alive")
+        assert tier_without == "poor"      # 只跟 9 頭好母豬比,10 隻墊底
+        assert tier_with != "poor"         # 加入離群的 5 頭之後,10 隻不再墊底
+
+    def test_review_cutoff_uses_exited_peers_too(self):
+        """值得檢視的百分位門檻含離群母豬,不是只看在場的。"""
+        subject = sow(1, "0001", status="active")
+        good_peers = [sow(i, f"{i:04d}", status="active") for i in range(2, 11)]
+        poor_exited = sow(99, "9999", status="culled")
+
+        events = self.farrows(1, [10, 10, 10])
+        for p in good_peers:
+            events += self.farrows(p["id"], [14, 14, 14])
+        events += self.farrows(99, [4, 4, 4])
+
+        without_exited = schedule.sows_worth_review(
+            [subject] + good_peers, events, date(2026, 1, 1))
+        with_exited = schedule.sows_worth_review(
+            [subject] + good_peers + [poor_exited], events, date(2026, 1, 1))
+
+        flagged_without = any(x["code"] == "low_alive"
+                              for r in without_exited for x in r["reasons"])
+        flagged_with = any(x["code"] == "low_alive"
+                           for r in with_exited for x in r["reasons"])
+        assert flagged_without           # 只跟在場比,10 隻墊底被標
+        assert not flagged_with          # 加入離群的 4 隻之後,10 隻不再墊底
+
+    def test_exited_sows_never_appear_in_the_flagged_list(self):
+        """離群母豬本身不該出現在值得檢視名單裡 —— 她已經沒有「要不要
+        繼續留」這個決定可做,列出來沒有意義。
+        """
+        exited = sow(1, "0001", status="culled")
+        events = self.farrows(1, [14, 12, 10])       # 這組數字在場的話會被標
+        rows = schedule.sows_worth_review([exited], events, date(2026, 1, 1))
+        assert rows == []
+
+    def test_dead_status_also_counts_as_exited(self):
+        """死亡跟淘汰是同一類 —— 都不進最終名單,都算進比較基準。"""
+        dead = sow(1, "0001", status="dead")
+        events = self.farrows(1, [14, 12, 10])
+        assert schedule.sows_worth_review([dead], events, date(2026, 1, 1)) == []

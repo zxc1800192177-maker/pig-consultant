@@ -161,6 +161,26 @@ describe("胎次色階", () => {
   });
 });
 
+describe("母豬清單裡的離群標記", () => {
+  // 死亡/淘汰後這頭母豬還是要看得到、找得到,不能整個從畫面上消失,
+  // 但也不能讓她看起來跟在場的母豬一樣正常。
+  const row = (status) => sowRow({ id: 1, earTag: "019-D115", breed: "LY", parity: 3, status });
+
+  it("在場母豬不帶標記", () => {
+    assert.doesNotMatch(row("active"), /sow-exited-badge/);
+    assert.doesNotMatch(row(undefined), /sow-exited-badge/);
+  });
+
+  it("淘汰的母豬帶「已淘汰」標記", () => {
+    assert.match(row("culled"), /已淘汰/);
+    assert.match(row("culled"), /class="sow-row is-exited"/);
+  });
+
+  it("死亡的母豬帶「已死亡」標記", () => {
+    assert.match(row("dead"), /已死亡/);
+  });
+});
+
 describe("跳脫", () => {
   // 匯入檔裡真的有帶中文字的耳號,誰知道別的牧場會匯入什麼
   it("耳號裡的角括號不會變成標籤", () => {

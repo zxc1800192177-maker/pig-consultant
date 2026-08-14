@@ -53,11 +53,17 @@ export function parityTone(parity) {
   return "par-g";
 }
 
+// 母豬清單裡非在場狀態的標籤。死亡/淘汰的耳號雖然會多一段民國年
+// 後綴,但列表這裡還是明講狀態,不能只讓使用者自己從耳號猜。
+const SOW_LIST_STATUS = { culled: "已淘汰", dead: "已死亡" };
+
 export function sowRow(sow) {
+  const badge = SOW_LIST_STATUS[sow.status];
   return `
-    <div class="sow-row" data-sow="${sow.id}">
+    <div class="sow-row${badge ? " is-exited" : ""}" data-sow="${sow.id}">
       <div class="sow-tag">${escapeHtml(sow.earTag)}</div>
       <div class="sow-mid"><div class="sow-st">${escapeHtml(sow.breed || "—")}</div></div>
+      ${badge ? `<span class="sow-exited-badge">${badge}</span>` : ""}
       <span class="par ${parityTone(sow.parity)}">${sow.parity} 胎</span>
       <span class="chev">›</span>
     </div>`;

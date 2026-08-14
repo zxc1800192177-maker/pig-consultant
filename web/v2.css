@@ -197,6 +197,16 @@ body { padding-bottom: 96px; }
 .par-r { background: var(--critical-bg); color: var(--critical); }
 .chev { color: var(--ink-faint); font-size: 16px; }
 
+/* 已離群(死亡/淘汰)的母豬混在清單裡,靠這個標籤跟胎次色階分開 ——
+   耳號雖然帶著民國年後綴,不能只讓使用者自己從耳號猜狀態。整列淡化,
+   一眼就看得出跟在場的母豬不是同一類。 */
+.sow-row.is-exited { opacity: .55; }
+.sow-exited-badge {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; background: var(--surface-2); color: var(--ink-faint);
+  border: 1px solid var(--border);
+}
+
 /* ── 母豬卡 ── */
 .head-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .tag { font-size: 30px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; }

@@ -553,15 +553,20 @@ def tier_within_farm(value: Optional[float], peers: List[float],
 
 def performance_with_tiers(sow_id: int, sows: Iterable[dict],
                            grouped: Dict[int, List[dict]]) -> Optional[dict]:
-    """一頭母豬的生產表現,附上她在場內的級距。"""
+    """一頭母豬的生產表現,附上她在場內的級距。
+
+    比較基準包含**已離群(死亡/淘汰)的母豬**,不是只看目前在場的。
+    只拿在場母豬當比較基準的話,表現最差的那批（往往正是被淘汰的原因）
+    一離群就從分母消失,活下來的人會顯得比實際情況好看,級距因此愈算
+    愈寬鬆。要比多少頭由呼叫端決定(見 server.py `_sow_detail`),這裡
+    不再自己過濾狀態。
+    """
     mine = sow_performance(grouped.get(sow_id, []))
     if mine is None:
         return None
 
     others = {}
     for sow in sows:
-        if sow.get("status") not in (None, "active"):
-            continue
         stats = sow_performance(grouped.get(sow["id"], []))
         if stats:
             for key, _ in PERFORMANCE_METRICS:
@@ -594,6 +599,12 @@ def sows_worth_review(sows: Iterable[dict], events: Iterable[dict], today: date,
     活仔數用**場內百分位**而不是固定數字:已確認的設計是母豬與同場其他
     母豬比,而且門檻寫死就只為這一場服務,別的牧場匯進來會全軍覆沒或
     一頭都不列。
+
+    百分位的比較基準包含**已離群(死亡/淘汰)的母豬**:她們往往正是
+    表現差才離群的,拿掉她們只留下場面較好的在場母豬,門檻會愈墊愈高,
+    愈來愈難有人被標出來。**但只有在場的母豬會被列進最終名單** ——
+    她才有「接下來要不要繼續留」這個決定可做,已經離群的母豬列出來
+    也沒有意義。
     """
     cfg = settings_with_defaults(settings)
     grouped = _by_sow(events)
@@ -602,8 +613,9 @@ def sows_worth_review(sows: Iterable[dict], events: Iterable[dict], today: date,
 
     # 先算出全場的活仔數分布,才有得比。每頭母豬取她自己的平均,
     # 不是把所有窩混在一起 —— 否則多產的母豬會主導整個分布。
+    # 用 `sows`(含離群的)而非 `live`,理由見上。
     averages: Dict[int, float] = {}
-    for sow in live:
+    for sow in sows:
         series = _born_alive_series(grouped.get(sow["id"], []))
         if len(series) >= cfg["review_min_litters"]:
             averages[sow["id"]] = sum(series) / len(series)

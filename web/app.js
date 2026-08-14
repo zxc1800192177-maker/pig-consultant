@@ -840,12 +840,27 @@ async function reloadAlerts() {
 }
 
 // ── 母豬 ──
+//
+// 兩份陣列刻意分開:
+// `sows` 只有在場的,紀錄表單的耳號選單用這份 —— 死亡/淘汰的母豬不該
+//   出現在「配種」之類新事件的選單裡,選了送出去也只會被伺服器拒絕。
+// `allSows` 含已離群的,母豬頁的清單/搜尋用這份 —— 死亡/淘汰後這頭
+//   母豬還是要看得到、找得到,不能整個從畫面上消失(實際踩過的問題:
+//   記成死亡後原本的預設列表跟搜尋都找不到她了)。
 let sows = [];
+let allSows = [];
 
 async function reloadSows() {
   if (!$("sowList") || !account.loggedIn) return;
-  const { ok, data } = await api("/api/sows");
-  sows = ok ? data.sows : [];
+  const [active, all] = await Promise.all([api("/api/sows"), api("/api/sows?all=1")]);
+  sows = active.ok ? active.data.sows : [];
+  // 在場的排前面:大多數瀏覽情境還是想先看到目前在場的,而且這個場
+  // 光在場就有 451 頭,早就超過下面的 100 筆顯示上限 —— 已離群的
+  // 排到後面,靠搜尋找得到,不會擠掉原本就看得到的在場母豬。
+  allSows = all.ok
+    ? [...all.data.sows].sort((a, b) => (a.status === "active") === (b.status === "active")
+        ? 0 : a.status === "active" ? -1 : 1)
+    : [];
   renderSowList();
 }
 
@@ -854,13 +869,13 @@ function renderSowList() {
   if (!list) return;
 
   const q = ($("sowSearch")?.value || "").trim().toLowerCase();
-  const shown = q ? sows.filter((s) => s.earTag.toLowerCase().includes(q)) : sows;
+  const shown = q ? allSows.filter((s) => s.earTag.toLowerCase().includes(q)) : allSows;
   $("sowCount").textContent = q
     ? `符合 ${shown.length} 頭 / 在場 ${sows.length} 頭`
-    : `在場 ${sows.length} 頭`;
+    : `在場 ${sows.length} 頭 ・ 歷史共 ${allSows.length} 頭`;
 
   if (!shown.length) {
-    list.innerHTML = `<p class="hint">${sows.length
+    list.innerHTML = `<p class="hint">${allSows.length
       ? "沒有符合的耳號。" : "還沒有母豬資料,可以到「設定」匯入 PigCHAMP 檔案。"}</p>`;
     return;
   }

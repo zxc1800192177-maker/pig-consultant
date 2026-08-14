@@ -694,9 +694,13 @@ class Application:
 
         # 場內比較要撈全場的事件。母豬卡的級距是「與同場其他母豬比」
         # (已確認的設計決定),只看這一頭是比不出來的。
+        #
+        # 比較基準含已離群(死亡/淘汰)的母豬 —— 只拿在場的當分母,
+        # 表現最差、正是離群原因的那批一離群就從比較基準消失,活著的
+        # 級距會愈算愈寬鬆(見 schedule.performance_with_tiers)。
         all_events = self.store.list_sow_events(farm_id)
         grouped = schedule._by_sow(all_events)
-        sows = self.store.list_sows(farm_id, "active")
+        sows = self.store.list_sows(farm_id, None)
 
         status = schedule.sow_status(sow, grouped.get(sow_id, []), _today(), cfg)
         performance = schedule.performance_with_tiers(sow_id, sows, grouped)
@@ -939,7 +943,9 @@ class Application:
         if deny:
             return deny
 
-        sows = self.store.list_sows(farm_id, "active")
+        # 含已離群的母豬 —— sows_worth_review 只把離群的納入比較基準,
+        # 最終名單仍然只列在場的(她才有「要不要繼續留」這個決定可做)。
+        sows = self.store.list_sows(farm_id, None)
         events = self.store.list_sow_events(farm_id)
         cfg = self._farm_settings(farm_id)
 

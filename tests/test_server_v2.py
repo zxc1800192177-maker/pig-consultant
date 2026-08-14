@@ -795,3 +795,95 @@ class TestBoarsAreImported:
         body = _post(app, "/api/import/preview", {"content": self.ROWS}, token)[1]
         assert body["boarEvents"] == 3
         assert body["boarEventsImported"] is False
+
+
+class TestExitedSowsStayVisibleAndCountInAnalysis:
+    """使用者實際反映的問題:記成死亡或淘汰後,那頭母豬從母豬資訊跟
+    分析裡都消失了。這裡驗證伺服器層真的把 server.py 的兩處查詢
+    (_sow_detail、_review)接到含離群母豬的清單,不是只有 schedule.py
+    的純函式邏輯是對的。
+    """
+
+    def test_exited_sow_disappears_from_default_list(self, farm):
+        """預設(不帶 all=1)的列表本來就只該有在場的 —— 這是既有行為,
+        不是這次要改的部分,順便釘住避免以後不小心跟下面那條混在一起改。
+        """
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "DTH", "date": "2026-07-01"}, token)
+        assert app.handle_get("/api/sows", token)[1]["sows"] == []
+
+    def test_exited_sow_is_still_reachable_with_all_1(self, farm):
+        """但 ?all=1 要找得到她,而且耳號已經帶上民國年後綴。"""
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "DTH", "date": "2026-07-01"}, token)
+        rows = app.handle_get("/api/sows?all=1", token)[1]["sows"]
+        assert rows[0]["earTag"] == "1183-D115"
+        assert rows[0]["status"] == "dead"
+
+    def test_exited_sow_still_has_a_detail_card(self, farm):
+        """卡片本身要開得起來,不能因為離群就 404。"""
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "DTH", "date": "2026-07-01"}, token)
+        status, body = app.handle_get(f"/api/sows/{sow_id}", token)
+        assert status == 200
+        assert body["sow"]["status"] == "dead"
+
+    def test_exited_peer_shifts_an_active_sows_tier(self, farm):
+        """伺服器層驗證:_sow_detail 傳給 performance_with_tiers 的清單
+        真的含離群母豬,不是只在 schedule.py 的單元測試裡對。
+        """
+        app, token, _ = farm
+        subject_id = _post(app, "/api/sows", {"earTag": "0001"}, token)[1]["id"]
+        peer_ids = [_post(app, "/api/sows", {"earTag": f"{i:04d}"}, token)[1]["id"]
+                    for i in range(2, 11)]
+
+        def farrow(sid, values):
+            for i, n in enumerate(values):
+                _post(app, "/api/sow-events",
+                     {"sowId": sid, "type": "FW",
+                      "date": (date(2023, 1, 1) + timedelta(days=145 * i)).isoformat(),
+                      "detail": {"born_alive": n}}, token)
+
+        farrow(subject_id, [10, 10, 10])
+        for pid, n in zip(peer_ids, range(11, 20)):
+            farrow(pid, [n, n, n])
+
+        without = app.handle_get(f"/api/sows/{subject_id}", token)[1]
+        tier_without = next(m["tier"] for m in without["performance"]["metrics"]
+                            if m["key"] == "born_alive")
+        assert tier_without == "poor"
+
+        # 5 頭表現更差的離群母豬加進來
+        poor_ids = [_post(app, "/api/sows", {"earTag": f"9{i:03d}"}, token)[1]["id"]
+                    for i in range(5)]
+        for pid, n in zip(poor_ids, range(1, 6)):
+            farrow(pid, [n, n, n])
+            _post(app, "/api/sow-events",
+                 {"sowId": pid, "type": "SAL", "date": "2026-07-01"}, token)
+
+        with_exited = app.handle_get(f"/api/sows/{subject_id}", token)[1]
+        tier_with = next(m["tier"] for m in with_exited["performance"]["metrics"]
+                         if m["key"] == "born_alive")
+        assert tier_with != "poor"
+
+
+class TestExitedSowsInReview:
+    def test_exited_sow_never_appears_in_the_flagged_list(self, farm):
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        for i, n in enumerate([14, 12, 10]):
+            _post(app, "/api/sow-events",
+                 {"sowId": sow_id, "type": "FW",
+                  "date": (date(2023, 1, 1) + timedelta(days=145 * i)).isoformat(),
+                  "detail": {"born_alive": n}}, token)
+        _post(app, "/api/sow-events",
+             {"sowId": sow_id, "type": "SAL", "date": "2026-07-01"}, token)
+
+        body = app.handle_get("/api/review", token)[1]
+        assert body["sows"] == []
