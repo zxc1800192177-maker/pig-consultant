@@ -438,6 +438,14 @@ class Application:
             return self._alerts(token)
         if route == "/api/pens":
             return self._pens(token)
+        if route == "/api/review":
+            return self._review(token)
+        if route == "/api/settings":
+            return self._get_settings(token)
+        if route == "/api/boars":
+            return self._list_boars(token)
+        if route == "/api/recent-events":
+            return self._recent_events(token, path)
         if path == "/api/metrics":
             return 200, {
                 "metrics": [
@@ -488,6 +496,10 @@ class Application:
             return self._add_event(payload, token)
         if path == "/api/pens":
             return self._add_pen(payload, token)
+        if path == "/api/boars":
+            return self._add_boar(payload, token)
+        if path == "/api/settings":
+            return self._put_settings(payload, token)
         if path == "/api/import/preview":
             return self._import_preview(payload, token)
         if path == "/api/import":
@@ -710,6 +722,17 @@ class Application:
         detail = detail if isinstance(detail, dict) else {}
         detail = {k: v for k, v in list(detail.items())[:config.MAX_EVENT_FIELDS]}
 
+        # 離乳仔豬評分由牧場主自評,1~5 分,**可以不評**。
+        # 沒評分時不可以補一個中間值 —— 那會讓「沒人看過」與「看過覺得
+        # 普通」變成同一件事(憲法第三條第 6 款)。
+        if "wean_score" in detail:
+            score = detail["wean_score"]
+            if score in (None, ""):
+                detail.pop("wean_score")
+            elif isinstance(score, bool) or not isinstance(score, int) \
+                    or not 1 <= score <= 5:
+                return 400, {"error": "離乳評分請填 1 到 5,或留空不評"}
+
         event_id = self.store.add_sow_event(
             farm_id, sow_id, code, when, detail, recorded_by=user.id)
 
@@ -807,8 +830,88 @@ class Application:
         }
 
     def _farm_settings(self, farm_id) -> dict:
-        """牧場自訂的生產參數。目前先用預設值,設定畫面做好後從這裡讀。"""
-        return schedule.settings_with_defaults(None)
+        """牧場自訂的生產參數,補上未設定項目的預設值。"""
+        return schedule.settings_with_defaults(self.store.get_farm_settings(farm_id))
+
+    def _get_settings(self, token) -> Tuple[int, dict]:
+        """設定畫面的內容。
+
+        一起回傳預設值與範圍,前端才不必自己維護一份 —— 兩邊各存一份的話,
+        改了後端而忘了改前端,畫面上的「預設 114 天」會變成謊話。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        saved = self.store.get_farm_settings(farm_id)
+        return 200, {
+            "settings": schedule.settings_with_defaults(saved),
+            "defaults": dict(schedule.DEFAULTS),
+            "custom": sorted(saved.keys()),      # 哪幾項被改過,畫面要標出來
+            "fields": [
+                {"key": key, "label": labels.setting_label(key),
+                 "hint": labels.setting_hint(key),
+                 "min": low, "max": high, "unit": labels.setting_unit(key)}
+                for key, (low, high) in schedule.SETTING_RANGES.items()
+            ],
+        }
+
+    def _put_settings(self, payload, token) -> Tuple[int, dict]:
+        """儲存設定。
+
+        **只存與預設值不同的項目**(見 db.Store.get_farm_settings)。
+        整份存下來的話,日後量到更好的預設值不會生效在任何既有牧場。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        incoming = payload.get("settings")
+        if not isinstance(incoming, dict):
+            return 400, {"error": "設定格式錯誤"}
+
+        cleaned, problems = schedule.clean_settings(incoming)
+        if problems:
+            return 400, {"error": problems[0], "problems": problems}
+
+        self.store.set_farm_settings(farm_id, cleaned)
+        return 200, {
+            "settings": schedule.settings_with_defaults(cleaned),
+            "custom": sorted(cleaned.keys()),
+        }
+
+    def _review(self, token) -> Tuple[int, dict]:
+        """值得檢視的母豬。**不是淘汰建議** —— 見 core/labels.review_caveat。"""
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        sows = self.store.list_sows(farm_id, "active")
+        events = self.store.list_sow_events(farm_id)
+        cfg = self._farm_settings(farm_id)
+
+        rows = schedule.sows_worth_review(sows, events, _today(), cfg)
+        return 200, {
+            "caveat": labels.review_caveat(),
+            "sows": [
+                {"sowId": r["sow_id"], "earTag": r["ear_tag"],
+                 "parity": r["parity"], "litters": r["litters"],
+                 "reasons": [{"code": x["code"],
+                              "label": labels.review_label(x["code"]),
+                              "detail": x["detail"]}
+                             for x in r["reasons"]]}
+                for r in rows
+            ],
+        }
 
     def _import_preview(self, payload, token) -> Tuple[int, dict]:
         farm_id, user, err = self._need_farm(token)
@@ -867,6 +970,74 @@ class Application:
             return 400, {"error": f"產房欄位最多 {config.MAX_PENS_PER_FARM} 個"}
         return 200, {"id": self.store.add_pen(
             farm_id, name.strip()[:config.MAX_PEN_NAME_CHARS])}
+
+    def _list_boars(self, token) -> Tuple[int, dict]:
+        """公豬清單。配種記錄要選公豬,所以員工也讀得到。"""
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        return 200, {"boars": [{"id": b["id"], "earTag": b["ear_tag"],
+                                "breed": b.get("breed") or ""}
+                               for b in self.store.list_boars(farm_id)]}
+
+    def _add_boar(self, payload, token) -> Tuple[int, dict]:
+        """種豬進場。公豬走這裡,母豬走 /api/sows —— 兩者是不同的實體。"""
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        tag = payload.get("earTag")
+        if not isinstance(tag, str) or not tag.strip():
+            return 400, {"error": "請填寫耳號"}
+        tag = tag.strip()[:config.MAX_EAR_TAG_CHARS]
+
+        if self.store.find_boar_by_tag(farm_id, tag):
+            return 409, {"error": f"耳號 {tag} 已經在場,不能重複"}
+
+        boar_id = self.store.add_boar(
+            farm_id, tag,
+            entry_date=_date(payload.get("entryDate")) or _today(),
+            breed=_text(payload.get("breed"), config.MAX_BREED_CHARS),
+        )
+        return 200, {"id": boar_id, "earTag": tag}
+
+    def _recent_events(self, token, path) -> Tuple[int, dict]:
+        """最近記錄的事件,給紀錄頁的「已記錄」清單用。
+
+        帶上 `canUndo`:能不能收回是**伺服器判定**的,不是前端自己算。
+        前端只用它決定要不要畫按鈕;真正的把關在 _delete_event
+        (員工只能改自己記的、且是最新一筆)。兩邊各判一次是刻意的 ——
+        前端那次是為了不給使用者一個按了必定失敗的按鈕。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        days = 1
+        raw = _query(path, "days")
+        if raw and raw.isdigit():
+            days = min(int(raw), config.MAX_RECENT_EVENT_DAYS)
+
+        since = _today() - timedelta(days=days - 1)
+        events = self.store.list_sow_events(farm_id)
+        tags = {s["id"]: s["ear_tag"] for s in self.store.list_sows(farm_id, None)}
+
+        newest = max(events, key=lambda e: (e["event_date"], e["id"]), default=None)
+        recent = [e for e in events if e["event_date"] >= since]
+        recent.sort(key=lambda e: (e["event_date"], e["id"]), reverse=True)
+        recent = recent[:config.MAX_RECENT_EVENTS]
+
+        return 200, {
+            "events": [
+                {**self._event_payload(e),
+                 "earTag": tags.get(e["sow_id"], ""),
+                 "canUndo": bool(user.is_owner
+                                 or (e["recorded_by"] == user.id
+                                     and newest is not None
+                                     and e["id"] == newest["id"]))}
+                for e in recent
+            ],
+        }
 
 
     def _grade(self, payload: dict) -> Tuple[int, dict]:

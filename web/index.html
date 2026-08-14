@@ -132,6 +132,15 @@
       </div>
       <p class="hint" style="margin-top:16px">記錄下去就算完成,不必另外勾選。</p>
     </div>
+
+    <div class="card is-hidden" id="recForm"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>已記錄</h3><span class="cnt" id="recDoneCount"></span>
+      </div>
+      <div id="recDone"><p class="hint">最近 7 天還沒有記錄。</p></div>
+    </div>
   </section>
 
   <!-- ══ 母豬 ══ -->
@@ -148,6 +157,20 @@
 
   <!-- ══ 分析 ══ -->
   <section id="panel-stats" class="panel is-hidden" role="tabpanel">
+
+    <div class="card" id="reviewCard">
+      <div class="card-head">
+        <div>
+          <h2>值得檢視</h2>
+          <p class="hint">生產記錄上看得出異狀的母豬</p>
+        </div>
+        <span class="cnt" id="reviewCount"></span>
+      </div>
+      <!-- 但書由後端提供(core/labels.review_caveat),前端不自己維護一份措辭。
+           這段不可以拿掉:少了它,這份名單讀起來就是淘汰建議。 -->
+      <p class="rv-caveat" id="reviewCaveat"></p>
+      <div id="reviewList"></div>
+    </div>
 
     <div class="card">
       <div class="card-head">
@@ -211,19 +234,18 @@
       <div id="importResult"></div>
     </div>
 
-    <div class="card">
-      <div class="label">生產參數</div>
-      <div class="set"><div><div class="set-l">懷孕天數</div>
-        <div class="set-d">配種 → 預產期</div></div><div class="set-v">114 天</div></div>
-      <div class="set"><div><div class="set-l">催產提醒</div>
-        <div class="set-d">懷孕第幾天</div></div><div class="set-v">113 天</div></div>
-      <div class="set"><div><div class="set-l">移入產房</div>
-        <div class="set-d">預產前幾天</div></div><div class="set-v">14 天</div></div>
-      <div class="set"><div><div class="set-l">泌乳天數</div>
-        <div class="set-d">分娩 → 離乳</div></div><div class="set-v">22 天</div></div>
-      <p class="hint" style="margin-top:12px">
-        這些預設值量自實際生產記錄的中位數,之後會開放自行調整。
-      </p>
+    <div class="card" id="setCard">
+      <div class="card-head">
+        <div>
+          <h2>生產參數</h2>
+          <p class="hint">
+            預設值量自你的實際生產記錄中位數。改了之後,工作清單、提醒與
+            「值得檢視」都會依新的數字重算。
+          </p>
+        </div>
+      </div>
+      <div id="setFields"></div>
+      <button class="btn-primary" id="setSave">儲存設定</button>
     </div>
   </section>
 

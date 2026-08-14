@@ -505,3 +505,293 @@ class TestRequestLimits:
     def test_import_still_has_a_ceiling(self):
         from server import too_large
         assert too_large(config.MAX_IMPORT_BYTES + 1, "/api/import") is True
+
+
+class TestSettings:
+    """牧場設定。只有牧場主能改 —— 這些參數會改變全場的工作清單。"""
+
+    def test_defaults_come_back_before_anything_is_saved(self, farm):
+        app, token, _ = farm
+        body = app.handle_get("/api/settings", token)[1]
+        assert body["settings"]["gestation_days"] == schedule.DEFAULTS["gestation_days"]
+        assert body["custom"] == []
+
+    def test_saved_value_is_used_by_the_task_list(self, farm):
+        """設定要真的影響推算,不是存起來好看的。"""
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        farrowed = date.today() - timedelta(days=15)
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "FW", "date": farrowed.isoformat()}, token)
+
+        # 預設泌乳 22 天 → 這週還不用離乳
+        kinds = {g["kind"] for g in app.handle_get("/api/tasks", token)[1]["groups"]}
+        assert "wean" not in kinds
+
+        _post(app, "/api/settings", {"settings": {"lactation_days": 15}}, token)
+        kinds = {g["kind"] for g in app.handle_get("/api/tasks", token)[1]["groups"]}
+        assert "wean" in kinds, "改了泌乳天數,離乳工作卻沒跟著提前"
+
+    def test_only_non_default_values_are_stored(self, farm):
+        """整份存下來的話,日後調整預設值不會生效在任何既有牧場。"""
+        app, token, farm_id = farm
+        _post(app, "/api/settings", {"settings": dict(schedule.DEFAULTS)}, token)
+        assert app.store.get_farm_settings(farm_id) == {}
+
+    def test_changed_values_are_marked_as_custom(self, farm):
+        app, token, _ = farm
+        body = _post(app, "/api/settings", {"settings": {"lactation_days": 25}}, token)[1]
+        assert body["custom"] == ["lactation_days"]
+
+    def test_out_of_range_is_rejected_not_clamped(self, farm):
+        """夾到邊界的話,使用者填 999 卻被存成 130,畫面顯示 130 而他
+        以為是 999 —— 那比報錯還糟。
+        """
+        app, token, farm_id = farm
+        status, body = _post(app, "/api/settings",
+                             {"settings": {"gestation_days": 999}}, token)
+        assert status == 400
+        assert app.store.get_farm_settings(farm_id) == {}
+
+    def test_zero_gestation_is_rejected(self, farm):
+        """0 天懷孕會讓整個工作清單瞬間爆量。"""
+        app, token, _ = farm
+        assert _post(app, "/api/settings",
+                     {"settings": {"gestation_days": 0}}, token)[0] == 400
+
+    def test_unknown_keys_are_ignored_not_stored(self, farm):
+        app, token, farm_id = farm
+        status, _ = _post(app, "/api/settings",
+                          {"settings": {"lactation_days": 25, "whatever": 1}}, token)
+        assert status == 200
+        assert app.store.get_farm_settings(farm_id) == {"lactation_days": 25}
+
+    def test_non_integer_is_rejected(self, farm):
+        app, token, _ = farm
+        for bad in ("22", 22.5, [22]):
+            assert _post(app, "/api/settings",
+                         {"settings": {"lactation_days": bad}}, token)[0] == 400, bad
+
+    def test_true_is_not_accepted_as_one(self, farm):
+        """bool 是 int 的子類別,不擋掉的話 True 會被當成 1 存進去。"""
+        app, token, _ = farm
+        assert _post(app, "/api/settings",
+                     {"settings": {"review_min_litters": True}}, token)[0] == 400
+
+    def test_worker_cannot_read_or_change_settings(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        assert app.handle_get("/api/settings", worker)[0] == 403
+        assert _post(app, "/api/settings",
+                     {"settings": {"lactation_days": 25}}, worker)[0] == 403
+
+    def test_settings_do_not_leak_across_farms(self, farm):
+        app, a_token, _ = farm
+        b_token = _owner(app, "otherfarm")
+        _post(app, "/api/settings", {"settings": {"lactation_days": 25}}, a_token)
+        body = app.handle_get("/api/settings", b_token)[1]
+        assert body["settings"]["lactation_days"] == schedule.DEFAULTS["lactation_days"]
+
+    def test_field_list_carries_labels_and_ranges(self, farm):
+        """前端不自己維護一份文字與範圍,否則兩邊會各說各話。"""
+        app, token, _ = farm
+        fields = {f["key"]: f
+                  for f in app.handle_get("/api/settings", token)[1]["fields"]}
+        assert fields["gestation_days"]["label"] == "懷孕天數"
+        assert fields["gestation_days"]["min"] < fields["gestation_days"]["max"]
+        assert fields["gestation_days"]["unit"] == "天"
+
+
+class TestWorthReviewEndpoint:
+    def test_lists_sows_with_reasons(self, farm):
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        for i, alive in enumerate([14, 12, 10]):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": "FW",
+                   "date": (date(2023, 1, 1) + timedelta(days=145 * i)).isoformat(),
+                   "detail": {"born_alive": alive}}, token)
+
+        body = app.handle_get("/api/review", token)[1]
+        assert [s["earTag"] for s in body["sows"]] == ["1183"]
+        assert body["sows"][0]["reasons"][0]["label"] == "產仔數連續下滑"
+
+    def test_caveat_always_travels_with_the_list(self, farm):
+        """名單與但書不可分開送 —— 前端漏畫但書就變成淘汰建議了。"""
+        app, token, _ = farm
+        assert app.handle_get("/api/review", token)[1]["caveat"]
+
+    def test_worker_cannot_see_it(self, farm):
+        app, _, farm_id = farm
+        assert app.handle_get("/api/review", _worker(app, farm_id))[0] == 403
+
+
+class TestRecordPage:
+    """紀錄頁需要的東西:公豬清單、最近記錄、離乳評分。"""
+
+    def test_boar_can_be_added_and_listed(self, farm):
+        app, token, _ = farm
+        assert _post(app, "/api/boars",
+                     {"earTag": "D6", "breed": "Duroc"}, token)[0] == 200
+        boars = app.handle_get("/api/boars", token)[1]["boars"]
+        assert [b["earTag"] for b in boars] == ["D6"]
+
+    def test_duplicate_boar_tag_is_rejected(self, farm):
+        app, token, _ = farm
+        _post(app, "/api/boars", {"earTag": "D6"}, token)
+        assert _post(app, "/api/boars", {"earTag": "D6"}, token)[0] == 409
+
+    def test_worker_can_add_a_boar(self, farm):
+        """種豬進場是記錄動作,員工做得到(憲法第十一條第 5 款)。"""
+        app, _, farm_id = farm
+        assert _post(app, "/api/boars",
+                     {"earTag": "D7"}, _worker(app, farm_id))[0] == 200
+
+    def test_boars_do_not_leak_across_farms(self, farm):
+        app, a_token, _ = farm
+        b_token = _owner(app, "otherfarm")
+        _post(app, "/api/boars", {"earTag": "D6"}, a_token)
+        assert app.handle_get("/api/boars", b_token)[1]["boars"] == []
+
+    def test_recent_events_carry_the_ear_tag(self, farm):
+        """清單上要看得到是哪一頭,不能只有一個 sowId。"""
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat()}, token)
+        events = app.handle_get("/api/recent-events", token)[1]["events"]
+        assert events[0]["earTag"] == "1183"
+
+    def test_owner_can_undo_anything(self, farm):
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        for day in (2, 1, 0):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": "MT",
+                   "date": (date.today() - timedelta(days=day)).isoformat()}, token)
+        events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
+        assert all(e["canUndo"] for e in events)
+
+    def test_worker_can_only_undo_own_latest(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
+
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT",
+               "date": (date.today() - timedelta(days=1)).isoformat()}, owner)
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat()}, worker)
+
+        events = app.handle_get("/api/recent-events?days=7", worker)[1]["events"]
+        undoable = [e for e in events if e["canUndo"]]
+        assert len(undoable) == 1
+
+    def test_can_undo_matches_what_delete_actually_allows(self, farm):
+        """畫面上畫得出按鈕,按下去就必須成功 —— 兩邊判斷不一致的話,
+        使用者會看到一個按了必定失敗的按鈕。
+        """
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
+        for day, who in ((2, owner), (1, worker), (0, worker)):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": "MT",
+                   "date": (date.today() - timedelta(days=day)).isoformat()}, who)
+
+        events = app.handle_get("/api/recent-events?days=7", worker)[1]["events"]
+        for e in events:
+            status, _ = app.handle_delete("/api/sow-events/" + str(e["id"]), worker)
+            assert (status == 200) == e["canUndo"], (
+                "canUndo=" + str(e["canUndo"]) + " 但實際刪除回 " + str(status))
+            if status == 200:
+                break      # 刪掉之後「最新一筆」就換人了,不能繼續比
+
+    def test_wean_score_is_stored(self, farm):
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "WN", "date": date.today().isoformat(),
+               "detail": {"weaned": 11, "wean_score": 4}}, token)
+        detail = app.handle_get("/api/sows/" + str(sow_id), token)[1]["events"][0]["detail"]
+        assert detail["wean_score"] == 4
+
+    def test_wean_score_out_of_range_is_rejected(self, farm):
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        for bad in (0, 6, -1, "5", True):
+            status, _ = _post(app, "/api/sow-events",
+                              {"sowId": sow_id, "type": "WN",
+                               "date": date.today().isoformat(),
+                               "detail": {"wean_score": bad}}, token)
+            assert status == 400, bad
+
+    def test_missing_wean_score_is_left_empty_not_filled_in(self, farm):
+        """未評分不補值 —— 補一個中間值會讓「沒人看過」與「看過覺得普通」
+        變成同一件事(憲法第三條第 6 款)。
+        """
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "WN", "date": date.today().isoformat(),
+               "detail": {"weaned": 11, "wean_score": None}}, token)
+        detail = app.handle_get("/api/sows/" + str(sow_id), token)[1]["events"][0]["detail"]
+        assert "wean_score" not in detail
+
+
+class TestBoarsAreImported:
+    """匯入要把公豬建起來。
+
+    踩過的實情:預覽畫面報「公豬 154 頭、275 筆事件」,確認匯入後
+    /api/boars 一頭都沒有 —— import_into 從來沒碰過 boar_rows。
+    後果是匯入完資料的牧場打開配種表單,公豬選單是空的。
+    """
+
+    ROWS = "\n".join([
+        "1183|GA|20230519|LY",
+        "1183|MT|20260203|D6",
+        "D6|BA|20200301",           # 公豬自己的事件:採精
+        "D6|SC|20200302",
+        "D7|BA|20210715",
+    ])
+
+    def test_boars_exist_after_import(self, farm):
+        app, token, _ = farm
+        _post(app, "/api/import", {"content": self.ROWS}, token)
+        tags = {b["earTag"] for b in app.handle_get("/api/boars", token)[1]["boars"]}
+        assert tags == {"D6", "D7"}
+
+    def test_boars_are_not_created_as_sows(self, farm):
+        """公豬與母豬是不同的實體,混在一起母豬清單會多出一堆公豬。"""
+        app, token, _ = farm
+        _post(app, "/api/import", {"content": self.ROWS}, token)
+        tags = {s["earTag"] for s in app.handle_get("/api/sows?all=1", token)[1]["sows"]}
+        assert "D6" not in tags and "D7" not in tags
+
+    def test_entry_date_is_the_earliest_event_not_today(self, farm):
+        """檔案沒有公豬的進場記錄。用今天當進場日的話,2020 年就在的
+        公豬會看起來是今天剛到的。
+        """
+        app, token, farm_id = farm
+        _post(app, "/api/import", {"content": self.ROWS}, token)
+        d6 = app.store.find_boar_by_tag(farm_id, "D6")
+        assert d6["entry_date"] == date(2020, 3, 1)
+
+    def test_reimport_does_not_duplicate_boars(self, farm):
+        """匯入必須冪等,公豬也一樣。"""
+        app, token, _ = farm
+        _post(app, "/api/import", {"content": self.ROWS}, token)
+        stats = _post(app, "/api/import", {"content": self.ROWS}, token)[1]
+        assert stats["boars"] == 0
+        assert len(app.handle_get("/api/boars", token)[1]["boars"]) == 2
+
+    def test_commit_reports_how_many_boars_were_added(self, farm):
+        app, token, _ = farm
+        assert _post(app, "/api/import", {"content": self.ROWS}, token)[1]["boars"] == 2
+
+    def test_preview_admits_boar_events_are_not_written(self, farm):
+        """報一個「275 筆」然後什麼都不寫,使用者會以為資料已經進去了。"""
+        app, token, _ = farm
+        body = _post(app, "/api/import/preview", {"content": self.ROWS}, token)[1]
+        assert body["boarEvents"] == 3
+        assert body["boarEventsImported"] is False

@@ -182,5 +182,10 @@ MAX_BREED_CHARS = 30
 MAX_PEN_NAME_CHARS = 30
 MAX_EVENT_FIELDS = 12          # 單筆事件的 detail 最多幾個欄位
 
+# 紀錄頁的「已記錄」清單。批次生產一週一批,整批同一天記完 —— 一天記
+# 三四十筆是常態,所以上限不能只給十幾筆,否則剛記的那批自己會被截掉。
+MAX_RECENT_EVENTS = 200
+MAX_RECENT_EVENT_DAYS = 14     # 補登前幾天的記錄時要看得到那幾天
+
 # 匯入的檔案上限。32,814 筆的實際檔案是 1.45 MB,10 MB 已很寬裕。
 MAX_IMPORT_BYTES = int(os.environ.get("MAX_IMPORT_BYTES", str(10 * 1024 * 1024)))

@@ -39,8 +39,14 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS farms (
   id SERIAL PRIMARY KEY,
   name TEXT NOT NULL,
+  -- 只存與預設值不同的項目(見 Store.get_farm_settings)。用 JSONB 的
+  -- 理由跟 sow_events.detail 一樣:欄位會隨功能增減,而且從不單獨查詢。
+  settings JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 既有資料庫沒有這一欄,建表語句對它們不生效。
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
@@ -273,6 +279,17 @@ class Store:
     def set_user_farm(self, user_id: int, farm_id: int, role: str = "owner") -> None:
         raise NotImplementedError
 
+    # --- 牧場設定 ---
+    #
+    # 只存**與預設值不同**的項目。整份存下來的話,日後調整預設值(例如
+    # 量到更好的中位數)不會生效在任何既有牧場 —— 他們都被凍結在舊值,
+    # 而且沒有人會知道。
+    def get_farm_settings(self, farm_id: int) -> dict:
+        raise NotImplementedError
+
+    def set_farm_settings(self, farm_id: int, settings: dict) -> None:
+        raise NotImplementedError
+
     # --- 產房欄位 ---
     def add_pen(self, farm_id: int, name: str) -> int:
         raise NotImplementedError
@@ -363,6 +380,7 @@ class InMemoryStore(Store):
         self.health_checks = []
         self.drugs = []
         self.farms = {}
+        self.farm_settings = {}
         self.pens = []
         self.sows = []
         self.boars = []
@@ -523,6 +541,14 @@ class InMemoryStore(Store):
         if user:
             user["farm_id"] = farm_id
             user["role"] = role
+
+    def get_farm_settings(self, farm_id) -> dict:
+        # 回複本:呼叫端改了回傳值不該影響儲存的內容
+        # (PostgresStore 每次都從 JSONB 重建,行為必須一致)
+        return dict(self.farm_settings.get(farm_id, {}))
+
+    def set_farm_settings(self, farm_id, settings) -> None:
+        self.farm_settings[farm_id] = dict(settings)
 
     def add_pen(self, farm_id, name) -> int:
         pen_id = self._new_id("pen")
@@ -914,6 +940,17 @@ class PostgresStore(Store):
             row = conn.execute("SELECT id, name FROM farms WHERE id = %s",
                                (farm_id,)).fetchone()
         return {"id": row[0], "name": row[1]} if row else None
+
+    def get_farm_settings(self, farm_id) -> dict:
+        with self._connect() as conn:
+            row = conn.execute("SELECT settings FROM farms WHERE id = %s",
+                               (farm_id,)).fetchone()
+        return dict(row[0]) if row and row[0] else {}
+
+    def set_farm_settings(self, farm_id, settings) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE farms SET settings = %s WHERE id = %s",
+                         (Jsonb(dict(settings)), farm_id))
 
     def set_user_farm(self, user_id, farm_id, role="owner") -> None:
         with self._connect() as conn:

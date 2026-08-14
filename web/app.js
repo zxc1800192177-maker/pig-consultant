@@ -11,9 +11,12 @@ import {
 import { SseParser } from "./lib/sse.js";
 import { addFactor, removeFactor } from "./lib/factors.js";
 import {
-  alertRow, buildAlerts, eventName, eventRow, formatWeek,
-  shiftDate, sowRow, taskGroup, timelineCaption, TIMELINE_LIMIT,
+  alertRow, buildAlerts, eventName, eventRow, formatWeek, reviewRow,
+  settingRow, shiftDate, sowRow, taskGroup, timelineCaption, TIMELINE_LIMIT,
 } from "./lib/v2.js";
+import {
+  SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, recordedRow,
+} from "./lib/record.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -59,7 +62,12 @@ async function refreshAccount() {
   account = ok && data.loggedIn ? data : LOGGED_OUT;
   renderAuthBar();
   applyLoginGate();
-  await Promise.all([reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows()]);
+  // 登入/登出後全部重讀。少列一項的話,換帳號後那一區會留著上一個
+  // 使用者的資料 —— 跨牧場的資料外洩就是這樣發生的。
+  await Promise.all([
+    reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
+    reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(),
+  ]);
 }
 
 // 未登入時把功能畫面換成登入引導。
@@ -449,7 +457,10 @@ async function init() {
     account = me.ok && me.data.loggedIn ? me.data : LOGGED_OUT;
     renderAuthBar();
     applyLoginGate();
-    await Promise.all([reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows()]);
+    await Promise.all([
+      reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
+      reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(),
+    ]);
   }
 }
 
@@ -908,12 +919,24 @@ async function previewImport(file) {
 
   $("importResult").innerHTML = `
     <div class="notice notice-info">
-      偵測到 <b>${data.sows}</b> 頭母豬、<b>${data.events}</b> 筆事件
+      偵測到 <b>${data.sows}</b> 頭母豬、<b>${data.boars}</b> 頭公豬、
+      <b>${data.events}</b> 筆事件
       ${data.dateRange ? `<br>${data.dateRange[0]} ~ ${data.dateRange[1]}` : ""}
       <br><span class="hint">${codes}</span>
       ${data.badLineCount
         ? `<br><span class="hint">${data.badLineCount} 行無法解析,會略過</span>` : ""}
+      ${data.boarEvents && !data.boarEventsImported ? `<br><span class="hint">
+        公豬會建起來(配種記錄要選),但採精與精液品質那
+        ${data.boarEvents} 筆事件目前還不會匯入</span>` : ""}
     </div>
+    ${data.oddBoarTags?.length ? `
+      <div class="notice notice-warn" style="margin-top:12px">
+        有 <b>${data.oddBoarTags.length}</b> 個公豬耳號看起來像日期,
+        可能是原始檔案填錯欄位。<b>資料照樣匯入不會改動</b>,
+        但它們會出現在配種記錄的公豬選單裡。
+        <br><span class="hint">${escapeHtml(data.oddBoarTags.slice(0, 6).join("、"))}${
+          data.oddBoarTags.length > 6 ? " …" : ""}</span>
+      </div>` : ""}
     ${data.anomalies.length ? `
       <div class="label" style="margin-top:16px">可疑記錄 ${data.anomalies.length} 筆</div>
       <p class="hint">勾起來的不納入統計。<b>資料仍會存起來</b>,之後可以改回來。</p>
@@ -979,6 +1002,283 @@ $("importFile")?.addEventListener("change", (e) => {
   const file = e.target.files?.[0];
   e.target.value = "";      // 清空才能連續選同一個檔案
   if (file) previewImport(file);
+});
+
+// ── 紀錄頁 ──
+
+let boars = [];
+let recordCode = null;      // 目前開著的表單是哪一種事件
+
+async function reloadBoars() {
+  // 未登入就別發這個請求。少了這道守衛,登入畫面上會固定丟一個 401 到
+  // console —— 假錯誤最麻煩的地方是它會蓋掉真的錯誤,這次就是這樣多花了
+  // 很多時間在追一個早就不存在的變數。
+  if (!account.loggedIn) { boars = []; return; }
+  const { ok, data } = await api("/api/boars");
+  boars = ok ? data.boars : [];
+}
+
+function closeRecordForm() {
+  recordCode = null;
+  $("recForm").classList.add("is-hidden");
+  $("recForm").innerHTML = "";
+}
+
+function openRecordForm(code) {
+  const spec = formFor(code);
+  if (!spec) return;
+  recordCode = code;
+
+  const box = $("recForm");
+  box.classList.remove("is-hidden");
+  box.innerHTML = `
+    <div class="rec-head">
+      <h3>${escapeHtml(spec.label)}</h3>
+      <button type="button" class="btn-ghost" id="recCancel">取消</button>
+    </div>
+    ${SIDE_EFFECTS[code]
+      ? `<p class="rec-warn-note">送出後:${escapeHtml(SIDE_EFFECTS[code])}</p>` : ""}
+    ${createsNewAnimal(code) ? newAnimalFields() : sowPickerField()}
+    <label class="fld"><span>日期</span>
+      <input type="date" id="recDate" value="${todayIso()}"></label>
+    ${spec.fields.map(fieldMarkup).join("")}
+    <p class="rec-err is-hidden" id="recErr"></p>
+    <button type="button" class="btn-primary" id="recSubmit">記錄</button>`;
+
+  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function sowPickerField() {
+  // datalist 讓耳號可以直接打也可以選 —— 451 頭的下拉選單捲不完,
+  // 而牧場主記得住耳號,打字比找快。
+  return `
+    <label class="fld"><span>母豬耳號</span>
+      <input list="sowTags" id="recSow" inputmode="numeric"
+             placeholder="輸入或選擇耳號" autocomplete="off"></label>
+    <datalist id="sowTags">
+      ${sows.map((s) => `<option value="${escapeHtml(s.earTag)}"></option>`).join("")}
+    </datalist>`;
+}
+
+function newAnimalFields() {
+  return `
+    <div class="seg" id="recKind">
+      <button type="button" class="seg-b is-active" data-kind="sow">母豬</button>
+      <button type="button" class="seg-b" data-kind="boar">公豬</button>
+    </div>`;
+}
+
+function fieldMarkup(field) {
+  const hint = field.hint ? `<em class="fld-h">${escapeHtml(field.hint)}</em>` : "";
+
+  if (field.type === "boar") {
+    return `
+      <label class="fld"><span>${escapeHtml(field.label)}</span>
+        <input list="boarTags" id="f_${field.key}" placeholder="輸入或選擇耳號"
+               autocomplete="off"></label>
+      <datalist id="boarTags">
+        ${boars.map((b) => `<option value="${escapeHtml(b.earTag)}"></option>`).join("")}
+      </datalist>`;
+  }
+  if (field.type === "bool") {
+    return `
+      <div class="fld"><span>${escapeHtml(field.label)}</span>
+        <div class="seg" data-field="${field.key}">
+          <button type="button" class="seg-b" data-val="true">${escapeHtml(field.yes)}</button>
+          <button type="button" class="seg-b" data-val="false">${escapeHtml(field.no)}</button>
+        </div>
+      </div>`;
+  }
+  if (field.type === "score") {
+    // 1~5 的按鈕而不是輸入框:巡欄時單手操作,而且按鈕本身就說明了範圍
+    return `
+      <div class="fld"><span>${escapeHtml(field.label)}</span>
+        <div class="seg score" data-field="${field.key}">
+          ${[1, 2, 3, 4, 5].map((n) =>
+            `<button type="button" class="seg-b" data-val="${n}">${n}</button>`).join("")}
+        </div>${hint}
+      </div>`;
+  }
+  if (field.type === "choice") {
+    return `
+      <div class="fld"><span>${escapeHtml(field.label)}</span>
+        <div class="chips" data-field="${field.key}">
+          ${field.options.map((o) =>
+            `<button type="button" class="chip" data-val="${escapeHtml(o)}"
+             >${escapeHtml(o)}</button>`).join("")}
+        </div>${hint}
+      </div>`;
+  }
+  const type = field.type === "date" ? "date"
+             : field.type === "int" ? "number" : "text";
+  return `
+    <label class="fld"><span>${escapeHtml(field.label)}</span>
+      <input type="${type}" id="f_${field.key}"
+             ${field.type === "int" ? 'inputmode="numeric"' : ""}></label>${hint}`;
+}
+
+function todayIso() {
+  // 本地時區的今天。toISOString() 會先轉 UTC,台灣的凌晨 8 點前會退成昨天
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** 從表單讀出使用者填的值。分段按鈕與 chip 的值存在 .is-active 上。 */
+function readRecordFields(spec) {
+  const raw = {};
+  for (const field of spec.fields) {
+    if (["bool", "score", "choice"].includes(field.type)) {
+      const picked = document.querySelector(
+        `[data-field="${field.key}"] .is-active`);
+      raw[field.key] = picked ? picked.dataset.val : "";
+    } else {
+      raw[field.key] = $(`f_${field.key}`)?.value ?? "";
+    }
+  }
+  return raw;
+}
+
+function showRecordError(message) {
+  const box = $("recErr");
+  box.textContent = message;
+  box.classList.remove("is-hidden");
+}
+
+async function submitRecord() {
+  const spec = formFor(recordCode);
+  if (!spec) return;
+
+  const when = $("recDate")?.value;
+  if (!when) return showRecordError("請選擇日期");
+
+  const raw = readRecordFields(spec);
+  const { detail, problems } = buildDetail(recordCode, raw);
+  if (problems.length) return showRecordError(problems[0]);
+
+  if (createsNewAnimal(recordCode)) {
+    const kind = document.querySelector("#recKind .is-active")?.dataset.kind || "sow";
+    const path = kind === "boar" ? "/api/boars" : "/api/sows";
+    const { ok, data } = await api(path, postJson({
+      earTag: detail.earTag, breed: detail.breed,
+      birthDate: detail.birthDate, entryDate: when,
+    }));
+    if (!ok) return showRecordError(data.error || "記錄失敗");
+    closeRecordForm();
+    showBanner(`${detail.earTag} 已進場`, "ok");
+    await Promise.all([reloadSows(), reloadBoars(), reloadRecent()]);
+    return;
+  }
+
+  const tag = ($("recSow")?.value || "").trim();
+  const sow = sows.find((s) => s.earTag === tag);
+  if (!sow) return showRecordError(tag ? `找不到耳號 ${tag}` : "請選擇母豬");
+
+  const { ok, data } = await api("/api/sow-events", postJson({
+    sowId: sow.id, type: recordCode, date: when, detail,
+  }));
+  if (!ok) return showRecordError(data.error || "記錄失敗");
+
+  closeRecordForm();
+  showBanner(`${tag} ${spec.label}已記錄`, "ok");
+  // 記錄會改變狀態(胎次、產房、耳號),所以整批重讀而不是只補一列
+  await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
+}
+
+async function reloadRecent() {
+  const box = $("recDone");
+  if (!box || !account.loggedIn) return;
+  const { ok, data } = await api("/api/recent-events?days=7");
+  if (!ok) return;
+
+  $("recDoneCount").textContent = data.events.length
+    ? `最近 7 天 ${data.events.length} 筆` : "";
+  box.innerHTML = data.events.map(recordedRow).join("")
+    || '<p class="hint">最近 7 天還沒有記錄。</p>';
+}
+
+async function undoRecord(eventId) {
+  const { ok, data } = await api(`/api/sow-events/${eventId}`, { method: "DELETE" });
+  if (!ok) return showBanner(data.error || "收不回來", "warn");
+  await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
+}
+
+// ── 值得檢視 ──
+
+async function reloadReview() {
+  const box = $("reviewList");
+  if (!box || !account.loggedIn) return;
+
+  const { ok, data, status } = await api("/api/review");
+  if (!ok) {
+    // 員工看不到這份名單(憲法第十一條),整張卡收起來而不是留一個錯誤訊息
+    $("reviewCard")?.classList.toggle("is-hidden", status === 403);
+    return;
+  }
+
+  $("reviewCaveat").textContent = data.caveat;
+  $("reviewCount").textContent = `${data.sows.length} 頭`;
+  box.innerHTML = data.sows.map(reviewRow).join("")
+    || '<p class="hint">目前沒有需要特別看一眼的母豬。</p>';
+}
+
+// ── 設定 ──
+
+async function reloadSettings() {
+  const box = $("setFields");
+  if (!box || !account.loggedIn) return;
+
+  const { ok, data, status } = await api("/api/settings");
+  if (!ok) {
+    $("setCard")?.classList.toggle("is-hidden", status === 403);
+    return;
+  }
+  settingFields = data.fields;
+  box.innerHTML = data.fields
+    .map((f) => settingRow(f, data.settings[f.key], data.defaults[f.key]))
+    .join("");
+}
+
+async function saveSettings() {
+  const payload = {};
+  for (const field of settingFields) {
+    const raw = $(`set_${field.key}`)?.value;
+    if (raw !== undefined && raw !== "") payload[field.key] = Number(raw);
+  }
+
+  const { ok, data } = await api("/api/settings", postJson({ settings: payload }));
+  if (!ok) return showBanner(data.error || "設定沒有存起來", "warn");
+
+  showBanner("設定已儲存", "ok");
+  // 參數變了,推算出來的東西全部要重算
+  await Promise.all([reloadSettings(), reloadTasks(), reloadAlerts(), reloadReview()]);
+}
+
+let settingFields = [];
+
+// 分段按鈕、chip、收回、記錄 —— 全部走事件委派,因為這些元素是動態畫的。
+document.addEventListener("click", (e) => {
+  const seg = e.target.closest(".seg-b");
+  if (seg) {
+    seg.parentElement.querySelectorAll(".seg-b")
+      .forEach((b) => b.classList.toggle("is-active", b === seg));
+    return;
+  }
+  const chip = e.target.closest(".chip");
+  if (chip) {
+    chip.parentElement.querySelectorAll(".chip")
+      .forEach((c) => c.classList.toggle("is-active", c === chip));
+    return;
+  }
+  const rec = e.target.closest("[data-rec]");
+  if (rec) return openRecordForm(rec.dataset.rec);
+
+  const undo = e.target.closest("[data-undo]");
+  if (undo) return undoRecord(Number(undo.dataset.undo));
+
+  if (e.target.id === "recCancel") return closeRecordForm();
+  if (e.target.id === "recSubmit") return submitRecord();
+  if (e.target.id === "setSave") return saveSettings();
 });
 
 // 真的把 App 跑起來。這行漏掉時畫面不會報錯,只是所有標籤停在「載入中…」,

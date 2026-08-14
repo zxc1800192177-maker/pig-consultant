@@ -308,3 +308,164 @@ class TestNegativePregnancyCheck:
                   ev(1, "PD", mated + timedelta(days=26), {"positive": False})]
         r = pen_pressure([sow()], events, [{"id": 1, "name": "A-01"}], date(2026, 3, 1))
         assert r["incoming"] == 0
+
+
+class TestWorthReview:
+    """「值得檢視」名單。
+
+    門檻量自這個牧場 451 頭在場母豬的實際分布(見 schedule.DEFAULTS),
+    不是憑感覺挑的:連續下滑 2 胎有 20 頭、3 胎只有 2 頭,取 3 等於這份
+    名單永遠是空的。
+
+    最重要的一條在 TestReviewWordingIsNotACullRecommendation ——
+    措辭不得變成淘汰建議。
+    """
+
+    @staticmethod
+    def farrows(sow_id, alive, start=date(2023, 1, 1), gap=145):
+        """依序幾胎,每胎活仔數如 alive 所列。"""
+        return [ev(sow_id, "FW", start + timedelta(days=gap * i), {"born_alive": n})
+                for i, n in enumerate(alive)]
+
+    def test_steady_sow_is_not_listed(self):
+        rows = schedule.sows_worth_review(
+            [sow()], self.farrows(1, [12, 12, 13]), date(2026, 1, 1))
+        assert rows == []
+
+    def test_consecutive_decline_is_listed(self):
+        rows = schedule.sows_worth_review(
+            [sow()], self.farrows(1, [14, 12, 10]), date(2026, 1, 1))
+        assert [r["ear_tag"] for r in rows] == ["1183"]
+        assert {x["code"] for x in rows[0]["reasons"]} >= {"decline"}
+
+    def test_one_bad_litter_is_not_a_trend(self):
+        """單胎掉下來不算,下滑要連續 —— 否則名單會塞滿正常波動。"""
+        rows = schedule.sows_worth_review(
+            [sow()], self.farrows(1, [12, 13, 11]), date(2026, 1, 1))
+        assert not any(x["code"] == "decline"
+                       for r in rows for x in r["reasons"])
+
+    def test_too_few_litters_is_never_judged(self):
+        """一兩胎看不出趨勢。新母豬不該因為第二胎少一隻就被列出來。"""
+        rows = schedule.sows_worth_review(
+            [sow()], self.farrows(1, [14, 10]), date(2026, 1, 1))
+        assert rows == []
+
+    def test_reason_states_the_actual_numbers(self):
+        """只說「連續下滑」而不給數字,使用者無從判斷該不該採信。"""
+        rows = schedule.sows_worth_review(
+            [sow()], self.farrows(1, [14, 12, 10]), date(2026, 1, 1))
+        detail = next(x["detail"] for x in rows[0]["reasons"] if x["code"] == "decline")
+        assert "14" in detail and "12" in detail and "10" in detail
+
+    def test_long_non_productive_days_is_listed(self):
+        """胎間隔拉長 = 非生產天數多。114+22=136 天是正常間隔。"""
+        rows = schedule.sows_worth_review(
+            [sow()], self.farrows(1, [12, 12, 12], gap=200), date(2026, 1, 1))
+        assert any(x["code"] == "npd" for x in rows[0]["reasons"])
+
+    def test_normal_interval_is_not_flagged_for_npd(self):
+        rows = schedule.sows_worth_review(
+            [sow()], self.farrows(1, [12, 12, 12], gap=140), date(2026, 1, 1))
+        assert not any(x["code"] == "npd" for r in rows for x in r["reasons"])
+
+    def test_low_alive_is_measured_against_the_same_farm(self):
+        """與同場其他母豬比,不與全國常模比(已確認的設計決定)。
+
+        同樣是平均 8 隻,在一個平均 12 隻的場裡是墊底,在平均 8 隻的場裡
+        很普通 —— 門檻寫死就只為某一場服務。
+        """
+        weak = sow(1, "0001")
+        peers = [sow(i, f"{i:04d}") for i in range(2, 12)]
+        events = self.farrows(1, [8, 8, 8])
+        for p in peers:
+            events += self.farrows(p["id"], [14, 14, 14])
+
+        rows = schedule.sows_worth_review([weak] + peers, events, date(2026, 1, 1))
+        listed = {r["ear_tag"] for r in rows}
+        assert "0001" in listed
+        assert any(x["code"] == "low_alive"
+                   for r in rows if r["ear_tag"] == "0001" for x in r["reasons"])
+
+    def test_same_numbers_are_fine_in_a_weaker_herd(self):
+        """整場都是 8 隻時,8 隻的那頭不該因為「低」被列出來。"""
+        herd = [sow(i, f"{i:04d}") for i in range(1, 12)]
+        events = []
+        for s in herd:
+            events += self.farrows(s["id"], [8, 8, 8])
+        rows = schedule.sows_worth_review(herd, events, date(2026, 1, 1))
+        assert not any(x["code"] == "low_alive"
+                       for r in rows for x in r["reasons"])
+
+    def test_missing_litter_size_is_not_counted_as_zero(self):
+        """PigCHAMP 的分娩記錄偶爾沒有仔數欄位。當成 0 會憑空造出一次
+        「活仔 0」的慘況,讓她被誤判成表現崩壞。
+        """
+        events = [ev(1, "FW", date(2023, 1, 1), {"born_alive": 12}),
+                  ev(1, "FW", date(2023, 6, 1), {}),          # 沒填
+                  ev(1, "FW", date(2023, 11, 1), {"born_alive": 12}),
+                  ev(1, "FW", date(2024, 4, 1), {"born_alive": 12})]
+        rows = schedule.sows_worth_review([sow()], events, date(2026, 1, 1))
+        assert not any(x["code"] == "decline" for r in rows for x in r["reasons"])
+
+    def test_culled_sows_are_not_listed(self):
+        """已經離群的不必再檢視。"""
+        rows = schedule.sows_worth_review(
+            [sow(status="culled")], self.farrows(1, [14, 12, 10]), date(2026, 1, 1))
+        assert rows == []
+
+    def test_excluded_events_are_ignored(self):
+        """匯入時判定為離群值的記錄不納入統計,也不該影響這份名單。"""
+        events = self.farrows(1, [14, 12, 10])
+        events.append(ev(1, "FW", date(2024, 6, 1), {"born_alive": 1}, excluded=True))
+        rows = schedule.sows_worth_review([sow()], events, date(2026, 1, 1))
+        assert not any("1" == x["detail"][-1] for x in rows[0]["reasons"])
+
+    def test_more_reasons_sort_first(self):
+        """理由多的先看。"""
+        many = sow(1, "0001")
+        one = sow(2, "0002")
+        events = (self.farrows(1, [14, 12, 10], gap=250)
+                  + self.farrows(2, [14, 12, 10], gap=140))
+        rows = schedule.sows_worth_review([many, one], events, date(2026, 1, 1))
+        assert rows[0]["ear_tag"] == "0001"
+        assert len(rows[0]["reasons"]) > len(rows[-1]["reasons"])
+
+    def test_thresholds_are_configurable(self):
+        """別的牧場的分布不會一樣,寫死等於只為這一場服務。"""
+        events = self.farrows(1, [12, 13, 11])
+        loose = schedule.sows_worth_review(
+            [sow()], events, date(2026, 1, 1), {"review_decline_litters": 1})
+        assert any(x["code"] == "decline" for r in loose for x in r["reasons"])
+
+    def test_no_sows_no_crash(self):
+        assert schedule.sows_worth_review([], [], date(2026, 1, 1)) == []
+
+
+class TestReviewWordingIsNotACullRecommendation:
+    """措辭把關。
+
+    這個場實際的淘汰原因裡「年齡太大」佔 48.0%,「生產性能差」只佔 2.9%
+    (specs/v2-facts.md 第 10 條)—— 系統算得出來的正好是最少被拿來當決策
+    依據的那一項。名單只能陳述事實,決定權在牧場主(憲法第三條第 6 款)。
+    """
+
+    def test_labels_never_say_cull(self):
+        from core.labels import REVIEW_LABELS
+        for text in REVIEW_LABELS.values():
+            assert "淘汰" not in text, f"「值得檢視」的理由不可寫成淘汰建議:{text}"
+            assert "建議" not in text, text
+
+    def test_reason_details_never_say_cull(self):
+        rows = schedule.sows_worth_review(
+            [sow()], TestWorthReview.farrows(1, [14, 12, 10], gap=250),
+            date(2026, 1, 1))
+        for reason in rows[0]["reasons"]:
+            assert "淘汰" not in reason["detail"]
+
+    def test_caveat_states_the_gap(self):
+        """但書要講明白系統看得到的不是主要決策依據。"""
+        from core.labels import review_caveat
+        text = review_caveat()
+        assert "48" in text and "2.9" in text, "但書要帶上實際的淘汰原因佔比"
+        assert "不是淘汰建議" in text

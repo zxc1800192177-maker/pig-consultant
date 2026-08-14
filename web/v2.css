@@ -102,6 +102,77 @@ body { padding-bottom: 96px; }
 .rec-hot { background: var(--accent); border-color: var(--accent); color: #fff; }
 .rec-warn { border-color: var(--critical); color: var(--critical); }
 
+/* ── 紀錄表單 ── */
+.rec-head { display: flex; justify-content: space-between; align-items: center; }
+.rec-warn-note {
+  margin: 10px 0 0; padding: 9px 12px; font-size: 12.5px;
+  color: var(--critical); background: var(--critical-bg, rgba(220, 80, 80, .1));
+  border-radius: var(--radius-sm);
+}
+.fld { display: block; margin-top: 14px; }
+.fld > span { display: block; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 6px; }
+.fld input {
+  width: 100%; padding: 11px 13px; font-size: 15px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--ink);
+}
+.fld-h { display: block; margin-top: 5px; font-size: 11.5px;
+         color: var(--ink-faint); font-style: normal; }
+
+/* 分段按鈕。巡欄時單手操作,所以做成大目標而不是下拉選單。 */
+.seg { display: flex; gap: 8px; flex-wrap: wrap; }
+.seg-b {
+  flex: 1; min-width: 64px; min-height: 44px; padding: 10px 12px;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--ink);
+}
+.seg-b.is-active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.seg.score .seg-b { min-width: 44px; }
+
+.chips { display: flex; gap: 8px; flex-wrap: wrap; }
+/* 觸控目標至少 44px。豬舍裡是戴著手套單手操作,34px 的按鈕按不準,
+   而按錯的代價是一筆錯的生產記錄。 */
+.chip {
+  min-height: 44px; padding: 11px 14px; font-size: 13.5px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-2); color: var(--ink);
+}
+.rec-head .btn-ghost { min-height: 44px; padding: 10px 14px; }
+.chip.is-active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.rec-err { margin-top: 12px; font-size: 13px; color: var(--critical); }
+
+/* ── 已記錄 ── */
+.done-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 11px 0; border-bottom: 1px solid var(--border-light);
+}
+.done-row:last-child { border-bottom: none; }
+.done-t { font-size: 14px; font-weight: 600; }
+.done-s { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+.done-b { flex: 1; min-width: 0; }
+.undo { flex-shrink: 0; min-height: 44px; padding: 10px 14px; }
+
+/* ── 值得檢視 ── */
+/* 但書要看得見,不能做成小到沒人讀的註腳 —— 沒有它,這份名單讀起來
+   就是淘汰建議,而系統算得出來的並不是這個場主要的淘汰依據。 */
+.rv-caveat {
+  margin: 12px 0 0; padding: 11px 13px; font-size: 12.5px; line-height: 1.65;
+  color: var(--ink-soft); background: var(--surface-2);
+  border-left: 3px solid var(--warn, var(--accent)); border-radius: var(--radius-sm);
+}
+.rv { padding: 13px 0; border-bottom: 1px solid var(--border-light); }
+.rv:last-child { border-bottom: none; }
+.rv-h { display: flex; align-items: center; gap: 10px; }
+.rv-m { font-size: 12px; color: var(--ink-faint); }
+.rv-r { display: flex; gap: 8px; align-items: baseline; margin-top: 7px; }
+.rv-tag {
+  flex-shrink: 0; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; background: var(--surface-2); color: var(--ink-soft);
+}
+.rv-d { font-size: 12.5px; color: var(--ink-soft); line-height: 1.55; }
+
 /* ── 母豬清單 ── */
 .search {
   width: 100%; padding: 11px 14px; margin-bottom: 12px;
@@ -188,6 +259,28 @@ body { padding-bottom: 96px; }
 .set-l { font-size: 14px; }
 .set-d { font-size: 12px; color: var(--ink-faint); margin-top: 1px; }
 .set-v { font-size: 13.5px; color: var(--accent); font-weight: 600; flex-shrink: 0; }
+
+/* 可編輯的設定列。 */
+.set-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 14px;
+  padding: 13px 0; border-bottom: 1px solid var(--border-light);
+}
+.set-row:last-of-type { border-bottom: none; }
+.set-b { flex: 1; min-width: 0; }
+.set-in { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.set-in input {
+  width: 74px; padding: 9px 10px; font-size: 15px; text-align: right;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.set-u { font-size: 12.5px; color: var(--ink-faint); min-width: 16px; }
+/* 標出哪幾項被改過 —— 否則牧場主看不出自己動過什麼、哪些還是預設值 */
+.set-chg {
+  margin-left: 7px; font-size: 10.5px; font-weight: 700; padding: 1px 7px;
+  border-radius: 999px; background: var(--accent); color: #fff;
+}
+.set-row.is-changed .set-in input { border-color: var(--accent); }
 
 /* ── 匯入 ── */
 .mine {

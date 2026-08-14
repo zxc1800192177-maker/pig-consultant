@@ -219,7 +219,7 @@ class TestImportIntoStore:
         result = importer.parse("\n".join([MATE, FARROW, WEAN]))
         stats = importer.import_into(store, farm_id, result)
 
-        assert stats == {"sows": 1, "events": 3, "excluded": 0}
+        assert stats == {"sows": 1, "events": 3, "excluded": 0, "boars": 0}
         assert len(store.list_sows(farm_id)) == 1
         assert len(store.list_sow_events(farm_id)) == 3
 
@@ -413,3 +413,41 @@ class TestSameDayDifferentContent:
         importer.import_into(store, farm_id, result)
         importer.import_into(store, farm_id, result)
         assert len(store.list_sow_events(farm_id)) == 2
+
+
+class TestOddBoarTagsAreReported:
+    """來源檔案把日期填進了公豬 ID 欄位(實測 25/154 個)。
+
+    **不修正也不丟掉** —— 那是使用者的資料。但一定要講出來:配種記錄
+    要從公豬清單裡選,不講的話那些會混在選單裡,使用者只會覺得系統壞了。
+    """
+
+    ROWS = "\n".join([
+        "1183|GA|20230519|LY",
+        "D6|BA|20200301",
+        "109/09/28|BA|20200915",
+        "110/07/06|SC|20210706",
+        "D-111/08/23|BA|20220823",     # 前面帶字母的也算
+    ])
+
+    def _preview(self):
+        return importer.summarize(importer.parse(self.ROWS))
+
+    def test_date_like_tags_are_listed(self):
+        odd = self._preview()["oddBoarTags"]
+        assert set(odd) == {"109/09/28", "110/07/06", "D-111/08/23"}
+
+    def test_real_ear_tags_are_not_flagged(self):
+        assert "D6" not in self._preview()["oddBoarTags"]
+
+    def test_they_are_still_imported_unchanged(self):
+        """只是提醒,不是過濾 —— 少匯一頭公豬,那些配種記錄就對不上了。"""
+        store = InMemoryStore()
+        farm_id = store.create_farm("HYD")
+        importer.import_into(store, farm_id, importer.parse(self.ROWS))
+        tags = {b["ear_tag"] for b in store.list_boars(farm_id)}
+        assert "109/09/28" in tags
+
+    def test_clean_file_reports_nothing(self):
+        clean = importer.summarize(importer.parse("D6|BA|20200301"))
+        assert clean["oddBoarTags"] == []

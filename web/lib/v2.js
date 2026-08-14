@@ -157,6 +157,47 @@ export function buildAlerts(data) {
   return rows;
 }
 
+/** 「值得檢視」的一列。
+ *
+ * **一定要把理由畫出來**,不是只列耳號 —— 只給名單而不給依據,使用者
+ * 無從判斷該不該採信,而這份名單看的東西恰好不是這個場主要的淘汰依據
+ * (specs/v2-facts.md 第 10 條)。
+ */
+export function reviewRow(sow) {
+  const reasons = sow.reasons.map((r) => `
+    <div class="rv-r">
+      <span class="rv-tag">${escapeHtml(r.label)}</span>
+      <span class="rv-d">${escapeHtml(r.detail)}</span>
+    </div>`).join("");
+
+  return `
+    <div class="rv">
+      <div class="rv-h">
+        <button class="etag" data-sow="${sow.sowId}">${escapeHtml(sow.earTag)}</button>
+        <span class="rv-m">${sow.parity} 胎 ・ ${sow.litters} 窩有記錄</span>
+      </div>
+      ${reasons}
+    </div>`;
+}
+
+/** 設定的一列。標題、說明、範圍全由後端給,前端不自己維護一份文字。 */
+export function settingRow(field, value, fallback) {
+  const changed = value !== fallback;
+  return `
+    <label class="set-row${changed ? " is-changed" : ""}">
+      <div class="set-b">
+        <div class="set-l">${escapeHtml(field.label)}
+          ${changed ? `<span class="set-chg">已調整</span>` : ""}</div>
+        <div class="set-d">${escapeHtml(field.hint)}</div>
+      </div>
+      <div class="set-in">
+        <input type="number" id="set_${field.key}" value="${value}"
+               min="${field.min}" max="${field.max}" inputmode="numeric">
+        <span class="set-u">${escapeHtml(field.unit)}</span>
+      </div>
+    </label>`;
+}
+
 export function alertRow(row) {
   const icon = { urgent: "!", soon: "⏱", ok: "✓" }[row.tone] || "!";
   return `

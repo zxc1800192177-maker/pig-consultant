@@ -31,6 +31,19 @@ DEFAULTS = {
     "service_after_wean_days": 5, # 離乳 → 配種
     "preg_check_days": 26,        # 配種 → 驗孕
     "open_sow_alert_days": 30,    # 離乳/驗孕陰性後多久沒動作要提醒
+
+    # 「值得檢視」的判準。門檻量自這個牧場的實際分布(451 頭在場母豬):
+    #
+    #   連續下滑胎數   下滑 2 胎 20 頭、3 胎 2 頭 → 取 2 才有意義的名單長度
+    #   每胎非生產天數 中位數 8.3 天、第 90 百分位 39 天 → 取 40
+    #   活仔數         用場內百分位而非固定數字,見 review_low_alive_pct
+    #
+    # 全部可調:別的牧場的分布不會一樣,寫死等於只為這一場服務。
+    "review_decline_litters": 2,   # 連續幾胎活仔數下滑才列入
+    "review_npd_days": 40,         # 每胎非生產天數超過幾天才列入
+    "review_low_alive_pct": 10,    # 活仔數落在場內後幾 % 才列入
+    "review_min_litters": 3,       # 至少幾胎才判斷 —— 一兩胎看不出趨勢
+    "review_min_herd": 10,         # 全場不足這個頭數就不比活仔數(見下)
 }
 
 # 事件代碼(沿用 PigCHAMP,匯入才對得起來)
@@ -61,11 +74,60 @@ class Task(NamedTuple):
     why: str
 
 
+# 每一項的合理範圍。上下限都刻意寬鬆 —— 這是防呆與防惡意,不是替牧場主
+# 決定怎麼養豬。但一定要有:懷孕天數設成 0 會讓整個工作清單瞬間爆量,
+# 設成 100000 則是永遠沒有工作,兩種都是「畫面壞掉」而不是「設定特別」。
+SETTING_RANGES = {
+    "gestation_days": (100, 130),
+    "pre_farrow_move_days": (0, 40),
+    "induction_day": (100, 130),
+    "lactation_days": (10, 45),
+    "service_after_wean_days": (0, 60),
+    "preg_check_days": (14, 60),
+    "open_sow_alert_days": (7, 180),
+    "review_decline_litters": (1, 10),
+    "review_npd_days": (10, 200),
+    "review_low_alive_pct": (1, 50),
+    "review_min_litters": (1, 12),
+    "review_min_herd": (2, 200),
+}
+
+
 def settings_with_defaults(settings: Optional[dict] = None) -> dict:
     merged = dict(DEFAULTS)
     if settings:
         merged.update({k: v for k, v in settings.items() if v is not None})
     return merged
+
+
+def clean_settings(incoming: dict) -> tuple:
+    """驗證前端送來的設定,回 (只含非預設值的 dict, 問題清單)。
+
+    三件事在這裡一起做完:
+
+    1. **不認得的鍵直接丟掉。** 前端送什麼都不可信(憲法第四條)。
+    2. **超出範圍就拒絕**,不是默默夾到邊界 —— 使用者填了 999 卻被存成
+       130,畫面顯示 130 而他以為是 999,那比報錯還糟。
+    3. **與預設值相同的項目不存。** 存下來的話,日後調整預設值不會生效
+       在任何既有牧場,而且沒有人會發現(見 db.Store.get_farm_settings)。
+    """
+    cleaned, problems = {}, []
+
+    for key, value in incoming.items():
+        if key not in SETTING_RANGES:
+            continue                          # 不認得的鍵:忽略,不報錯
+        if isinstance(value, bool) or not isinstance(value, int):
+            # bool 是 int 的子類別,不擋掉的話 True 會被當成 1 存進去
+            problems.append(f"{key} 必須是整數")
+            continue
+        low, high = SETTING_RANGES[key]
+        if not low <= value <= high:
+            problems.append(f"{key} 必須介於 {low} 到 {high} 之間")
+            continue
+        if value != DEFAULTS[key]:
+            cleaned[key] = value
+
+    return cleaned, problems
 
 
 def _by_sow(events: Iterable[dict]) -> Dict[int, List[dict]]:
@@ -227,6 +289,144 @@ def overdue_sows(sows: Iterable[dict], events: Iterable[dict], today: date,
                         "days": days, "since": last})
 
     out.sort(key=lambda r: -r["days"])
+    return out
+
+
+def _born_alive_series(rows: List[dict]) -> List[int]:
+    """這頭母豬歷次分娩的活仔數,依時間排列。
+
+    只取有填的:PigCHAMP 的分娩記錄偶爾沒有仔數欄位,把缺值當 0 會憑空
+    造出一次「活仔 0」的慘況,讓她被誤判成表現崩壞。
+    """
+    out = []
+    for e in rows:
+        if e["event_type"] != FARROW:
+            continue
+        value = (e.get("detail") or {}).get("born_alive")
+        if isinstance(value, int):
+            out.append(value)
+    return out
+
+
+def _decline_streak(series: List[int]) -> int:
+    """從最後一胎往回數,連續嚴格下滑幾次。"""
+    streak = 0
+    for i in range(len(series) - 1, 0, -1):
+        if series[i] < series[i - 1]:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def _npd_per_litter(rows: List[dict], cfg: dict) -> Optional[float]:
+    """每胎的非生產天數(估)。
+
+    用「首末胎間隔 ÷ 胎數 − 懷孕 − 哺乳」回推,而不是逐段累加:逐段累加
+    需要每一次配種與離乳都完整,而實際記錄常有缺漏,缺一筆就整個算歪。
+    間隔法只需要頭尾兩次分娩,對缺漏穩健得多。
+
+    不足兩胎回 None —— 沒有間隔可算,不可以拿 0 充數。
+    """
+    farrows = [e["event_date"] for e in rows if e["event_type"] == FARROW]
+    if len(farrows) < 2:
+        return None
+    span = (farrows[-1] - farrows[0]).days
+    interval = span / (len(farrows) - 1)
+    return interval - cfg["gestation_days"] - cfg["lactation_days"]
+
+
+def _percentile(values: List[float], pct: float) -> Optional[float]:
+    """第 pct 百分位(最近排名法)。空清單回 None,不回 0。"""
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int(len(ordered) * pct / 100)))
+    return ordered[index]
+
+
+def sows_worth_review(sows: Iterable[dict], events: Iterable[dict], today: date,
+                      settings: Optional[dict] = None) -> List[dict]:
+    """**值得檢視**的母豬 —— 措辭刻意不是「建議淘汰」。
+
+    這個場實際的淘汰原因裡,「年齡太大」佔 48.0%,而「生產性能差」只佔
+    2.9%(specs/v2-facts.md 第 10 條)。系統算得出來的正好是最少被拿來
+    當決策依據的那一項,所以這份名單只陳述事實與依據,決定權在牧場主
+    (憲法第三條第 6 款)。
+
+    每一頭都附上 `reasons`,講明白是憑什麼列進來的 —— 只給一份名單而不
+    給理由,使用者無從判斷該不該採信。
+
+    活仔數用**場內百分位**而不是固定數字:已確認的設計是母豬與同場其他
+    母豬比,而且門檻寫死就只為這一場服務,別的牧場匯進來會全軍覆沒或
+    一頭都不列。
+    """
+    cfg = settings_with_defaults(settings)
+    grouped = _by_sow(events)
+
+    live = [s for s in sows if s.get("status") in (None, "active")]
+
+    # 先算出全場的活仔數分布,才有得比。每頭母豬取她自己的平均,
+    # 不是把所有窩混在一起 —— 否則多產的母豬會主導整個分布。
+    averages: Dict[int, float] = {}
+    for sow in live:
+        series = _born_alive_series(grouped.get(sow["id"], []))
+        if len(series) >= cfg["review_min_litters"]:
+            averages[sow["id"]] = sum(series) / len(series)
+    cutoff = _percentile(list(averages.values()), cfg["review_low_alive_pct"])
+
+    out = []
+    for sow in live:
+        rows = grouped.get(sow["id"], [])
+        series = _born_alive_series(rows)
+        if len(series) < cfg["review_min_litters"]:
+            continue          # 一兩胎看不出趨勢,列出來只是雜訊
+
+        reasons = []
+
+        streak = _decline_streak(series)
+        if streak >= cfg["review_decline_litters"]:
+            reasons.append({
+                "code": "decline",
+                "detail": f"活仔數連續 {streak} 胎下滑({'→'.join(map(str, series[-streak - 1:]))})",
+            })
+
+        npd = _npd_per_litter(rows, cfg)
+        if npd is not None and npd >= cfg["review_npd_days"]:
+            reasons.append({
+                "code": "npd",
+                "detail": f"每胎非生產天數約 {round(npd)} 天,超過 {cfg['review_npd_days']} 天",
+            })
+
+        # **嚴格小於**,而且全場要夠多頭才比。
+        #
+        # 百分位天生會標出後 N% —— 就算全場一模一樣、或全部都很優秀,
+        # 照樣有人被列出來。測試抓到兩種情況:整場都是 8 隻時 11 頭全被
+        # 標(average <= cutoff 對每一頭都成立),以及只有一頭母豬時她自己
+        # 就是後 10%。改成嚴格小於,兩種情況都自然消失:分不出高下時
+        # 就不分。頭數太少時百分位只是「最小值」,標出來沒有意義。
+        average = averages.get(sow["id"])
+        if (cutoff is not None and average is not None
+                and len(averages) >= cfg["review_min_herd"]
+                and average < cutoff):
+            reasons.append({
+                "code": "low_alive",
+                "detail": f"平均活仔 {average:.1f} 隻,落在全場最低 "
+                          f"{cfg['review_low_alive_pct']}%(場內門檻 {cutoff:.1f} 隻)",
+            })
+
+        if reasons:
+            out.append({
+                "sow_id": sow["id"],
+                "ear_tag": sow.get("ear_tag", ""),
+                "parity": sow.get("parity") or 0,
+                "litters": len(series),
+                "reasons": reasons,
+            })
+
+    # 理由多的排前面;同樣多則胎次高的排前面(年齡本來就是最常見的
+    # 淘汰原因,牧場主會想先看那幾頭)。
+    out.sort(key=lambda r: (-len(r["reasons"]), -r["parity"], r["ear_tag"]))
     return out
 
 

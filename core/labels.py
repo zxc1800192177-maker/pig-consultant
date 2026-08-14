@@ -101,3 +101,72 @@ TASK_LABELS = {
 
 def task_label(kind: str) -> str:
     return TASK_LABELS.get(kind, kind)
+
+
+# 「值得檢視」的理由。**措辭不得出現「淘汰」** —— 這個場實際的淘汰原因
+# 裡「年齡太大」佔 48.0%,「生產性能差」只佔 2.9%,系統算得出來的正好是
+# 最少被拿來當決策依據的那一項(憲法第三條第 6 款)。
+REVIEW_LABELS = {
+    "decline": "產仔數連續下滑",
+    "npd": "非生產天數偏長",
+    "low_alive": "活仔數低於場內多數",
+}
+
+
+def review_label(code: str) -> str:
+    return REVIEW_LABELS.get(code, code)
+
+
+# 設定畫面的文字。跟工作類型同樣的道理:使用者看得到的字只該有一份定義。
+# `hint` 要講清楚這個數字**影響什麼**,不然牧場主無從判斷該不該改。
+SETTING_TEXT = {
+    "gestation_days":
+        ("懷孕天數", "配種 → 預產期。移入產房、催產、分娩三項工作都由它推算", "天"),
+    "pre_farrow_move_days":
+        ("移入產房", "預產前幾天移入。也決定產房空間提醒的預估範圍", "天"),
+    "induction_day":
+        ("催產提醒", "懷孕第幾天提醒。系統只提醒時機,不提供藥名與劑量", "天"),
+    "lactation_days":
+        ("泌乳天數", "分娩 → 離乳。決定離乳工作出現在哪一週", "天"),
+    "service_after_wean_days":
+        ("離乳後配種", "離乳 → 配種的間隔", "天"),
+    "preg_check_days":
+        ("驗孕時機", "配種後幾天驗孕", "天"),
+    "open_sow_alert_days":
+        ("空胎提醒", "離乳或驗孕陰性後多久沒動作就提醒", "天"),
+    "review_decline_litters":
+        ("連續下滑胎數", "活仔數連續下滑幾胎才列入「值得檢視」", "胎"),
+    "review_npd_days":
+        ("非生產天數門檻", "每胎非生產天數超過幾天才列入「值得檢視」", "天"),
+    "review_low_alive_pct":
+        ("活仔數偏低門檻", "活仔數落在全場最低幾 % 才列入。與同場其他母豬比,不與全國常模比", "%"),
+    "review_min_litters":
+        ("最少判斷胎數", "至少幾胎才納入「值得檢視」判斷。一兩胎看不出趨勢", "胎"),
+    "review_min_herd":
+        ("最少比較頭數", "全場不足這個頭數就不比活仔數 —— 頭數太少時百分位只是最小值", "頭"),
+}
+
+
+def setting_label(key: str) -> str:
+    return SETTING_TEXT.get(key, (key, "", ""))[0]
+
+
+def setting_hint(key: str) -> str:
+    return SETTING_TEXT.get(key, (key, "", ""))[1]
+
+
+def setting_unit(key: str) -> str:
+    return SETTING_TEXT.get(key, (key, "", ""))[2]
+
+
+def review_caveat() -> str:
+    """這份名單一定要一起顯示的但書。
+
+    只列名單而不講清楚它看的是什麼,使用者會以為系統在替他做淘汰決定。
+    """
+    return (
+        "這份名單只看得到生產記錄算得出來的東西。"
+        "本場實際的淘汰原因裡,年齡太大佔 48.0%、生產性能差只佔 2.9% —— "
+        "系統算得出來的正好不是主要依據。請當成「值得看一眼」的提示,"
+        "不是淘汰建議。"
+    )

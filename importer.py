@@ -21,6 +21,7 @@ ID 含中文字(`L文`、`L鄭`、`D謝-112/10/02`),誤讀時中文字被拆壞�
 
 import collections
 import json
+import re
 from datetime import date
 from typing import Dict, Iterable, List, NamedTuple, Optional
 
@@ -257,6 +258,24 @@ def _find_anomalies(rows: List[Row], today: Optional[date]) -> List[Anomaly]:
     return found
 
 
+def odd_boar_tags(result: ParseResult) -> List[str]:
+    """看起來不像耳號的公豬 ID。
+
+    實測這個場的檔案裡有 25 個(共 154 個)長得像民國日期:`109/09/28`、
+    `110/07/06` —— 有人把日期填進了公豬 ID 欄位。
+
+    **不修正也不丟掉**,那是使用者的資料。只是講出來:配種記錄要從公豬
+    清單裡選,不講的話那 25 個會混在選單裡,使用者只會覺得系統壞了。
+    """
+    odd = set()
+    for row in result.boar_rows:
+        tag = row.ear_tag
+        # 民國年/月/日,前面可能還帶一兩個字母
+        if re.match(r"^[A-Za-z-]{0,2}\d{3}/\d{1,2}/\d{1,2}", tag):
+            odd.add(tag)
+    return sorted(odd)
+
+
 def summarize(result: ParseResult) -> dict:
     """給匯入預覽畫面的統計。**上傳後先看這個再確認**,尤其是別的牧場的
     檔案格式可能不同 —— 預覽能在寫入前就看出解析錯誤。
@@ -265,7 +284,12 @@ def summarize(result: ParseResult) -> dict:
         "sows": len({r.ear_tag for r in result.rows}),
         "boars": len({r.ear_tag for r in result.boar_rows}),
         "events": len(result.rows),
+        # 公豬的**身分**會建起來(配種記錄要選公豬),但採精與精液品質那些
+        # 事件本身還沒有地方放。預覽必須講清楚差別 —— 報一個「275 筆」
+        # 然後什麼都不寫,使用者會以為資料已經進去了。
         "boarEvents": len(result.boar_rows),
+        "boarEventsImported": False,
+        "oddBoarTags": odd_boar_tags(result),
         "byCode": dict(collections.Counter(r.code for r in result.rows)),
         "dateRange": (
             [min(r.when for r in result.rows).isoformat(),
@@ -321,6 +345,26 @@ def import_into(store, farm_id: int, result: ParseResult,
             dam_tag=detail.get("dam_tag", ""),
         )
 
+    # 公豬的身分。事件(BA 採精、SC/SP 精液品質)還沒有地方放,但**豬要先
+    # 建起來** —— 配種記錄要從公豬清單裡選,少了這一步,匯入完資料的牧場
+    # 打開配種表單會看到一個空的選單。
+    #
+    # 進場日期取她自己最早那筆事件的日期:檔案沒有公豬的進場記錄,而用
+    # 今天當進場日會讓一頭 2020 年就在的公豬看起來是今天剛到的。
+    existing_boars = {b["ear_tag"] for b in store.list_boars(farm_id)}
+    first_seen: Dict[str, date] = {}
+    for row in result.boar_rows:
+        seen = first_seen.get(row.ear_tag)
+        if seen is None or row.when < seen:
+            first_seen[row.ear_tag] = row.when
+
+    boars_added = 0
+    for tag, when in sorted(first_seen.items()):
+        if tag in existing_boars:
+            continue                    # 重跑匯入不重複建(冪等)
+        store.add_boar(farm_id, tag, entry_date=when)
+        boars_added += 1
+
     # 同一頭豬、同一天、同樣內容的重複行編號。
     #
     # 來源檔案裡合法地存在一模一樣的連續兩行 —— 實測 153 組,其中 101 組是
@@ -361,4 +405,5 @@ def import_into(store, farm_id: int, result: ParseResult,
             fields["status"] = "culled" if exits[-1]["event_type"] == "SAL" else "dead"
         store.update_sow(farm_id, sow_id, **fields)
 
-    return {"sows": len(tag_to_id), "events": written, "excluded": len(excluded)}
+    return {"sows": len(tag_to_id), "events": written, "excluded": len(excluded),
+            "boars": boars_added}
