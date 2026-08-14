@@ -165,7 +165,8 @@ export function recordedRow(event) {
         <div class="done-s">${escapeHtml(extra || event.date)}</div>
       </div>
       ${event.canUndo
-        ? `<button class="btn-ghost undo" data-undo="${event.id}">收回</button>`
+        ? `<button class="btn-ghost undo" data-undo="${event.id}" data-sow="${event.sowId}"
+           >收回</button>`
         : ""}
     </div>`;
 }

@@ -869,9 +869,16 @@ function renderSowList() {
     + (shown.length > 100 ? `<p class="hint">只顯示前 100 頭,請用搜尋縮小範圍。</p>` : "");
 }
 
+// 目前開著的是哪一頭母豬的卡片。記錄或收回事件之後,若剛好是這一頭,
+// 要重新整理卡片 —— 不然耳號、狀態、生產表現都會停在記錄之前的舊資料
+// (實際踩到的情形:記成死亡或淘汰後,卡片上的耳號沒有變,因為原本只
+// 重讀列表跟提醒,沒有重讀已經開著的這張卡)。
+let openSowId = null;
+
 async function openSow(sowId) {
   const { ok, data } = await api(`/api/sows/${sowId}`);
   if (!ok) return showBanner(data.error || "讀不到這頭母豬", "warn");
+  openSowId = sowId;
 
   const s = data.sow;
   const box = $("sowDetail");
@@ -1189,6 +1196,9 @@ async function submitRecord() {
   showBanner(`${tag} ${spec.label}已記錄`, "ok");
   // 記錄會改變狀態(胎次、產房、耳號),所以整批重讀而不是只補一列
   await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
+  // 剛記的這頭若正好是開著的那張卡,一併重新整理 —— 否則死亡/淘汰後
+  // 耳號的民國年後綴、狀態、生產表現都會停在記錄之前的樣子。
+  if (openSowId === sow.id) await openSow(sow.id);
 }
 
 async function reloadRecent() {
@@ -1203,10 +1213,13 @@ async function reloadRecent() {
     || '<p class="hint">最近 7 天還沒有記錄。</p>';
 }
 
-async function undoRecord(eventId) {
+async function undoRecord(eventId, sowId) {
   const { ok, data } = await api(`/api/sow-events/${eventId}`, { method: "DELETE" });
   if (!ok) return showBanner(data.error || "收不回來", "warn");
   await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
+  // 收回的若是目前開著的那張卡的事件,同樣要重新整理 —— 理由跟
+  // submitRecord() 那邊一樣。
+  if (openSowId === sowId) await openSow(sowId);
 }
 
 // ── 值得檢視 ──
@@ -1280,7 +1293,7 @@ document.addEventListener("click", (e) => {
   if (rec) return openRecordForm(rec.dataset.rec);
 
   const undo = e.target.closest("[data-undo]");
-  if (undo) return undoRecord(Number(undo.dataset.undo));
+  if (undo) return undoRecord(Number(undo.dataset.undo), Number(undo.dataset.sow));
 
   if (e.target.id === "recCancel") return closeRecordForm();
   if (e.target.id === "recSubmit") return submitRecord();

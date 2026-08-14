@@ -142,7 +142,7 @@ describe("離乳仔豬評分", () => {
 
 describe("已記錄清單", () => {
   const ev = (over = {}) => ({
-    id: 1, type: "MT", date: "2026-08-13", earTag: "1183",
+    id: 1, sowId: 42, type: "MT", date: "2026-08-13", earTag: "1183",
     detail: {}, canUndo: false, ...over,
   });
 
@@ -166,6 +166,13 @@ describe("已記錄清單", () => {
   it("可以收回時才畫收回按鈕", () => {
     assert.match(recordedRow(ev({ canUndo: true })), /data-undo="1"/);
     assert.doesNotMatch(recordedRow(ev({ canUndo: false })), /data-undo/);
+  });
+
+  it("收回按鈕帶著母豬 id,收回後才知道該重新整理哪一張卡", () => {
+    // 實際踩過的 bug:記成死亡或淘汰後,已經開著的母豬卡耳號沒有更新,
+    // 因為送出記錄後只重讀了列表跟提醒,沒有重讀開著的那張卡。收回
+    // 同樣需要知道是哪一頭,才能對應著重新整理。
+    assert.match(recordedRow(ev({ canUndo: true, sowId: 42 })), /data-sow="42"/);
   });
 
   it("耳號有跳脫", () => {
