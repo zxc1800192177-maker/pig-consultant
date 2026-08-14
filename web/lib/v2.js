@@ -95,9 +95,21 @@ function yearOf(event) {
  * 單獨呼叫(拿不到 index)時一律補上年份:寧可多印,也不要顯示一個
  * 看不出年份的日期。
  */
+/** 這一列的燈號。
+ *
+ * PL/DTH/AB 是真的損失,紅點。驗孕陰性不是損失,但也不是好消息 ——
+ * 原本跟正常事件同一個綠點,讀起來像順利的事,漏掉了「配種失敗、
+ * 需要重新配種」這個訊號,所以獨立成 warn(黃)。
+ */
+function eventTone(event) {
+  if (event.type === "PL" || event.type === "DTH" || event.type === "AB") return "loss";
+  if (event.type === "PD" && event.detail?.positive === false) return "warn";
+  return "ok";
+}
+
 export function eventRow(event, index, all) {
   const detail = describeEvent(event);
-  const tone = (event.type === "PL" || event.type === "DTH") ? "loss" : "ok";
+  const tone = eventTone(event);
   const year = yearOf(event);
 
   const previous = Array.isArray(all) && index > 0 ? all[index - 1] : undefined;
@@ -155,6 +167,84 @@ export function buildAlerts(data) {
                 right: `${pens.free.length} 欄` });
   }
   return rows;
+}
+
+/** 日期縮成 M/D。同一頭母豬的狀態列都是近期的事,年份是雜訊。 */
+function shortDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ""));
+  return m ? `${Number(m[2])}/${Number(m[3])}` : "";
+}
+
+/** 母豬目前狀態的膠囊列:狀態、第幾天、預產期。
+ *
+ * 文字全部由後端給(core/labels.py)—— 前端自己組一份的話,「配種待驗孕」
+ * 這種有分寸的措辭遲早會被簡化成「懷孕」,而那是在宣稱一件還沒確認的事。
+ */
+export function statusPills(status) {
+  if (!status) return "";
+  const pills = [
+    `<span class="pill pill-${escapeHtml(status.state)}">${escapeHtml(status.label)}</span>`,
+  ];
+  if (status.dayLabel) {
+    pills.push(`<span class="pill">${escapeHtml(status.dayLabel)}</span>`);
+  }
+  if (status.due) {
+    // 預產日已過就不能還寫「預產」—— 那是把一個過去的日期講成未來的計畫。
+    const overdue = Boolean(status.overdueLabel);
+    pills.push(overdue
+      ? `<span class="pill pill-overdue">${escapeHtml(status.overdueLabel)}</span>`
+      : `<span class="pill pill-due">預產 ${shortDate(status.due)}</span>`);
+  }
+  if (status.weanDue) {
+    pills.push(`<span class="pill pill-due">預計離乳 ${shortDate(status.weanDue)}</span>`);
+  }
+  return `<div class="status-row">${pills.join("")}</div>`;
+}
+
+/** 時間軸裡「還沒驗孕」的提示,插在最上方。
+ *
+ * 這是原本缺席的資訊:「配種待驗孕」只出現在狀態列,時間軸裡完全看不
+ * 出來 —— 2580 配種 143 天、從沒驗孕過,時間軸就是少了一列「驗孕」,
+ * 使用者得自己數才會發現。這裡不是一筆真的事件(不能收回、沒有 id),
+ * 所以獨立成一個提示區塊而不是塞進 eventRow。
+ *
+ * 文字全部由後端給(core/labels.pending_check_note)—— 判斷邏輯只有一份。
+ */
+export function pendingCheckRow(status) {
+  if (!status || status.state !== "mated" || !status.pregCheckNote) return "";
+  return `<div class="tl-pending"><b>驗孕</b>${escapeHtml(status.pregCheckNote)}</div>`;
+}
+
+/** 生產表現。分不出級距時只顯示數字,不畫級距標籤 —— 空白比一個
+ *  猜出來的「中等」誠實。
+ */
+export function performanceGrid(performance) {
+  if (!performance) return "";
+
+  const stats = performance.metrics.map((m) => {
+    const value = m.value == null
+      ? '<span class="v v-none">—</span>'
+      : `<span class="v">${m.value.toFixed(m.digits)}<span class="u">${
+          escapeHtml(m.unit)}</span></span>`;
+    const tier = m.tier
+      ? `<span class="tier t-${escapeHtml(m.tier)}">${escapeHtml(m.tierLabel)}</span>`
+      : "";
+    return `
+      <div class="stat">
+        <span class="k">${escapeHtml(m.label)}</span>
+        ${value}${tier}
+      </div>`;
+  }).join("");
+
+  return `
+    <div class="card">
+      <h3>生產表現</h3>
+      <p class="hint">${performance.litters} 胎累計</p>
+      <div class="perf">${stats}</div>
+      ${performance.note
+        ? `<div class="flag">${escapeHtml(performance.note)}</div>` : ""}
+      <p class="src">${escapeHtml(performance.basis)}</p>
+    </div>`;
 }
 
 /** 「值得檢視」的一列。

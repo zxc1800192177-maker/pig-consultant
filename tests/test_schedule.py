@@ -469,3 +469,323 @@ class TestReviewWordingIsNotACullRecommendation:
         text = review_caveat()
         assert "48" in text and "2.9" in text, "但書要帶上實際的淘汰原因佔比"
         assert "不是淘汰建議" in text
+
+
+class TestSowStatus:
+    """母豬目前狀態與預產期。"""
+
+    MATED = date(2026, 3, 1)
+    TODAY = date(2026, 5, 1)
+
+    def test_mated_but_unchecked_is_not_called_pregnant(self):
+        """配種了不等於懷孕。這個場目前有 50 頭驗孕陰性 —— 一律當懷孕
+        會讓畫面宣稱一件還沒確認的事。
+        """
+        s = schedule.sow_status(sow(), [ev(1, "MT", self.MATED)], self.TODAY)
+        assert s["state"] == "mated"
+
+    def test_positive_check_makes_her_pregnant(self):
+        events = [ev(1, "MT", self.MATED),
+                  ev(1, "PD", self.MATED + timedelta(days=26), {"positive": True})]
+        assert schedule.sow_status(sow(), events, self.TODAY)["state"] == "pregnant"
+
+    def test_negative_check_puts_her_back_to_open(self):
+        events = [ev(1, "MT", self.MATED),
+                  ev(1, "PD", self.MATED + timedelta(days=26), {"positive": False})]
+        assert schedule.sow_status(sow(), events, self.TODAY)["state"] == "open"
+
+    def test_due_date_is_mating_plus_gestation(self):
+        s = schedule.sow_status(sow(), [ev(1, "MT", self.MATED)], self.TODAY)
+        assert s["due"] == self.MATED + timedelta(days=D["gestation_days"])
+
+    def test_due_date_is_given_even_before_the_check(self):
+        """還沒驗孕的那幾天照樣要準備產房,所以預產期兩種狀態都要給。"""
+        assert schedule.sow_status(sow(), [ev(1, "MT", self.MATED)], self.TODAY)["due"]
+
+    def test_due_date_uses_the_first_day_of_a_batch(self):
+        """這個場一次配種連續 2~3 天。用最後一天算預產期會一路短算。"""
+        events = [ev(1, "MT", self.MATED), ev(1, "MT", self.MATED + timedelta(days=1))]
+        s = schedule.sow_status(sow(), events, self.TODAY)
+        assert s["due"] == self.MATED + timedelta(days=D["gestation_days"])
+
+    def test_day_counts_from_mating(self):
+        s = schedule.sow_status(sow(), [ev(1, "MT", self.MATED)], self.TODAY)
+        assert s["day"] == 61
+
+    def test_lactating_after_farrowing(self):
+        farrowed = date(2026, 4, 20)
+        s = schedule.sow_status(sow(), [ev(1, "FW", farrowed)], self.TODAY)
+        assert s["state"] == "lactating"
+        assert s["day"] == 11
+        assert s["wean_due"] == farrowed + timedelta(days=D["lactation_days"])
+
+    def test_no_due_date_once_she_has_farrowed(self):
+        """已經生了就沒有預產期。留著會讓畫面顯示一個過去的日期。"""
+        events = [ev(1, "MT", self.MATED), ev(1, "FW", date(2026, 4, 20))]
+        assert schedule.sow_status(sow(), events, self.TODAY)["due"] is None
+
+    def test_open_after_weaning_counts_empty_days(self):
+        weaned = date(2026, 4, 1)
+        s = schedule.sow_status(sow(), [ev(1, "FW", date(2026, 3, 10)),
+                                        ev(1, "WN", weaned)], self.TODAY)
+        assert s["state"] == "open"
+        assert s["day"] == 30
+
+    def test_culled_sow_reports_exited(self):
+        s = schedule.sow_status(sow(), [ev(1, "SAL", date(2026, 4, 1))], self.TODAY)
+        assert s["state"] == "exited"
+
+    def test_status_field_on_the_sow_is_respected(self):
+        """事件還沒補登、但母豬已標成淘汰時,不該顯示成待配種。"""
+        s = schedule.sow_status(sow(status="culled"), [], self.TODAY)
+        assert s["state"] == "exited"
+
+    def test_no_events_does_not_crash(self):
+        s = schedule.sow_status(sow(), [], self.TODAY)
+        assert s["state"] == "open"
+        assert s["day"] is None
+
+
+class TestSowPerformance:
+    """母豬卡的生產表現。"""
+
+    @staticmethod
+    def litters(sow_id, specs, start=date(2023, 1, 1), gap=145):
+        """specs: [(活仔, 死胎, 離乳)] 依序幾胎。"""
+        out = []
+        for i, (alive, still, weaned) in enumerate(specs):
+            day = start + timedelta(days=gap * i)
+            out.append(ev(sow_id, "FW", day,
+                          {"born_alive": alive, "stillborn": still, "mummified": 0}))
+            out.append(ev(sow_id, "WN", day + timedelta(days=22), {"weaned": weaned}))
+        return out
+
+    def test_no_farrowings_returns_none(self):
+        """沒生過就沒有表現可談。補一組 0 會把場內比較一起拉歪。"""
+        assert schedule.sow_performance([ev(1, "MT", date(2026, 1, 1))]) is None
+
+    def test_averages(self):
+        p = schedule.sow_performance(self.litters(1, [(12, 1, 11), (10, 1, 9)]))
+        assert p["born_alive"] == 11
+        assert p["weaned"] == 10
+        assert p["total_born"] == 12          # (12+1 + 10+1) / 2
+
+    def test_stillborn_rate_is_a_percentage_of_total_born(self):
+        p = schedule.sow_performance(self.litters(1, [(9, 1, 9)]))
+        assert p["stillborn_rate"] == 10.0
+
+    def test_missing_counts_are_not_treated_as_zero(self):
+        """缺欄位當 0 會少算,而少算的窩看起來只是「比較小窩」,
+        沒有人會發現數字是壞的。
+        """
+        events = [ev(1, "FW", date(2023, 1, 1), {"born_alive": 12}),
+                  ev(1, "FW", date(2023, 6, 1), {})]
+        p = schedule.sow_performance(events)
+        assert p["born_alive"] == 12          # 只有一窩有數字
+        assert p["total_born"] is None        # 沒有死胎欄位就不宣稱總仔數
+
+    def test_litters_per_year_uses_the_interval_not_time_on_farm(self):
+        """用「胎數 ÷ 在場年數」會把進場後還沒配種的那段也算進去,
+        新母豬因此永遠很難看。
+        """
+        p = schedule.sow_performance(self.litters(1, [(12, 0, 11)] * 3, gap=146))
+        assert 2.4 < p["litters_per_year"] < 2.6
+
+    def test_single_litter_has_no_annual_rate(self):
+        p = schedule.sow_performance(self.litters(1, [(12, 0, 11)]))
+        assert p["litters_per_year"] is None
+
+    def test_lactation_days_pair_each_farrowing_with_its_wean(self):
+        p = schedule.sow_performance(self.litters(1, [(12, 0, 11), (11, 0, 10)]))
+        assert p["lactation_days"] == 22
+
+    def test_there_is_no_per_sow_pre_weaning_mortality(self):
+        """仔豬會在窩間流動(25.3% 的配對離乳數大於活仔數),
+        (活仔−離乳)/活仔 對個別母豬無意義。這個坑踩過一次。
+        """
+        p = schedule.sow_performance(self.litters(1, [(12, 0, 11)]))
+        assert not any("mortal" in k or "死亡" in k for k in p)
+
+
+class TestTierWithinFarm:
+    """場內三級。與同場其他母豬比,不與全國常模比(已確認的設計決定)。"""
+
+    HERD = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+
+    def test_top_third_is_good(self):
+        assert schedule.tier_within_farm(17, self.HERD, True) == "good"
+
+    def test_bottom_third_is_poor(self):
+        assert schedule.tier_within_farm(8, self.HERD, True) == "poor"
+
+    def test_middle_is_mid(self):
+        assert schedule.tier_within_farm(12, self.HERD, True) == "mid"
+
+    def test_direction_flips_for_lower_is_better(self):
+        """死胎率跟其他項相反 —— 漏掉的話最會生的那幾頭會被標成待改善。"""
+        assert schedule.tier_within_farm(8, self.HERD, False) == "good"
+        assert schedule.tier_within_farm(17, self.HERD, False) == "poor"
+
+    def test_small_herd_is_not_graded(self):
+        """頭數太少時三分位只是把母豬排名,那不是評價。"""
+        assert schedule.tier_within_farm(12, [10, 12, 14], True) is None
+
+    def test_identical_herd_is_not_graded(self):
+        """全場一模一樣就分不出高下,不該硬給一級。"""
+        assert schedule.tier_within_farm(12, [12] * 20, True) is None
+
+    def test_missing_value_is_not_graded(self):
+        assert schedule.tier_within_farm(None, self.HERD, True) is None
+
+
+class TestStillbornConcentratedInFirstLitter:
+    """死胎全部集中在最早那一胎。
+
+    實測 2580:整體 17.1%,排除最早那胎只有 3.2% —— 14 隻裡 11 隻死胎都在
+    那一窩,之後六胎再無死胎。不講的話那會被當成長期問題,但它是一次性的。
+    """
+
+    # 2580 的真實七胎(活仔, 死胎)
+    REAL = [(3, 11), (3, 2), (14, 0), (15, 0), (16, 0), (7, 0), (5, 0)]
+
+    @staticmethod
+    def farrows(specs, start=date(2023, 1, 1), gap=145):
+        return [ev(1, "FW", start + timedelta(days=gap * i),
+                   {"born_alive": a, "stillborn": s, "mummified": 0})
+                for i, (a, s) in enumerate(specs)]
+
+    def test_matches_the_real_numbers(self):
+        p = schedule.sow_performance(self.farrows(self.REAL))
+        assert round(p["stillborn_rate"], 1) == 17.1
+        note = p["stillborn_note"]
+        assert note is not None
+        assert round(note["without_first"], 1) == 3.2
+
+    def test_evenly_spread_stillbirths_get_no_note(self):
+        """每一胎都有死胎就是長期問題,不該說成「集中在最早那一胎」。"""
+        p = schedule.sow_performance(self.farrows([(10, 2), (10, 2), (10, 2), (10, 2)]))
+        assert p["stillborn_note"] is None
+
+    def test_low_overall_rate_gets_no_note(self):
+        """整體本來就不高時再拆解只是雜訊。"""
+        p = schedule.sow_performance(self.farrows([(14, 1), (15, 0), (16, 0), (15, 0)]))
+        assert p["stillborn_note"] is None
+
+    def test_too_few_litters_gets_no_note(self):
+        """兩胎時「排除第一胎」只剩一胎,那不是趨勢。"""
+        p = schedule.sow_performance(self.farrows([(3, 11), (14, 0)]))
+        assert p["stillborn_note"] is None
+
+    def test_wording_does_not_claim_it_was_parity_one(self):
+        """匯入的歷史不保證從她的頭胎開始 —— 宣稱是第 1 胎會是編的。"""
+        from core.labels import stillborn_note
+        text = stillborn_note(17.1, 3.2)
+        assert "最早記錄" in text
+        assert "第 1 胎" not in text
+
+
+class TestOverdueFarrowing:
+    """預產日過了卻沒有分娩記錄。
+
+    她要嘛生了沒登記,要嘛沒保住 —— 兩種都要有人去看。實測 200 頭裡有
+    88 頭的預產日已過,最久的過了 611 天,所以這不是邊緣案例。
+    """
+
+    MATED = date(2026, 1, 1)
+
+    def _status(self, today):
+        return schedule.sow_status(sow(), [ev(1, "MT", self.MATED)], today)
+
+    def test_before_the_due_date_there_is_no_overdue(self):
+        due = self.MATED + timedelta(days=D["gestation_days"])
+        assert self._status(due - timedelta(days=1))["overdue_days"] is None
+
+    def test_on_the_due_date_it_is_not_yet_overdue(self):
+        due = self.MATED + timedelta(days=D["gestation_days"])
+        assert self._status(due)["overdue_days"] is None
+
+    def test_past_the_due_date_counts_the_days(self):
+        due = self.MATED + timedelta(days=D["gestation_days"])
+        assert self._status(due + timedelta(days=30))["overdue_days"] == 30
+
+    def test_farrowed_sows_are_never_overdue(self):
+        """生完就沒有預產期,自然也不會逾期。"""
+        events = [ev(1, "MT", self.MATED),
+                  ev(1, "FW", self.MATED + timedelta(days=114))]
+        s = schedule.sow_status(sow(), events, date(2026, 8, 14))
+        assert s["due"] is None
+        assert s.get("overdue_days") is None
+
+    def test_label_states_both_the_days_and_the_reason(self):
+        from core.labels import overdue_farrow_label
+        text = overdue_farrow_label(611)
+        assert "611" in text
+        assert "尚無分娩記錄" in text
+
+
+class TestPendingPregnancyCheck:
+    """時間軸裡「還沒驗孕」的提示。
+
+    這是原本缺席的資訊:2580 配種 143 天、從沒驗孕過,時間軸裡完全看不
+    出這件事 —— 使用者得自己數有沒有一列「驗孕」才會發現。
+    """
+
+    MATED = date(2026, 1, 1)
+
+    def test_no_check_yet_is_flagged(self):
+        s = schedule.sow_status(sow(), [ev(1, "MT", self.MATED)],
+                                self.MATED + timedelta(days=10))
+        assert s["preg_checked"] is False
+
+    def test_check_recorded_is_not_flagged_as_missing(self):
+        events = [ev(1, "MT", self.MATED),
+                  ev(1, "PD", self.MATED + timedelta(days=26), {"positive": None})]
+        s = schedule.sow_status(sow(), events, self.MATED + timedelta(days=30))
+        # 有記錄但結果不明,跟「根本沒驗」是不同的問題
+        assert s["preg_checked"] is True
+        assert s["state"] == "mated"       # 結果不明,還是算未確認懷孕
+
+    def test_no_overdue_before_the_check_window(self):
+        s = schedule.sow_status(sow(), [ev(1, "MT", self.MATED)],
+                                self.MATED + timedelta(days=10))
+        assert s["preg_check_overdue_days"] is None
+
+    def test_overdue_after_the_check_window(self):
+        due = self.MATED + timedelta(days=D["preg_check_days"])
+        s = schedule.sow_status(sow(), [ev(1, "MT", self.MATED)],
+                                due + timedelta(days=15))
+        assert s["preg_check_overdue_days"] == 15
+
+    def test_confirmed_pregnant_has_no_pending_fields(self):
+        """已經確認懷孕就沒有「還沒驗孕」這件事,不該出現這些欄位。"""
+        events = [ev(1, "MT", self.MATED),
+                  ev(1, "PD", self.MATED + timedelta(days=26), {"positive": True})]
+        s = schedule.sow_status(sow(), events, self.MATED + timedelta(days=40))
+        assert "preg_checked" not in s
+
+    def test_open_state_has_no_pending_fields(self):
+        """驗孕陰性後回到待配種,不該再顯示「還沒驗孕」——她已經驗過了。"""
+        events = [ev(1, "MT", self.MATED),
+                  ev(1, "PD", self.MATED + timedelta(days=26), {"positive": False})]
+        s = schedule.sow_status(sow(), events, self.MATED + timedelta(days=40))
+        assert s["state"] == "open"
+        assert "preg_checked" not in s
+
+    def test_note_names_the_real_gap_when_never_checked(self):
+        from core.labels import pending_check_note
+        text = pending_check_note(False, 10, 26, None)
+        assert "尚未驗孕" in text
+        assert "26" in text and "10" in text
+
+    def test_note_flags_overdue_with_the_day_count(self):
+        from core.labels import pending_check_note
+        text = pending_check_note(False, 143, 26, 117)
+        assert "117" in text
+
+    def test_note_distinguishes_recorded_but_blank_from_never_checked(self):
+        from core.labels import pending_check_note
+        recorded = pending_check_note(True, 30, 26, 4)
+        never = pending_check_note(False, 30, 26, 4)
+        assert recorded != never
+        assert "結果未填" in recorded
+        assert "尚未驗孕" in never

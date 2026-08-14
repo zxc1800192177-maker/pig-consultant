@@ -690,8 +690,52 @@ class Application:
         if sow is None:
             return 404, {"error": "找不到這頭母豬"}
         events = self.store.list_sow_events(farm_id, sow_id)
+        cfg = self._farm_settings(farm_id)
+
+        # 場內比較要撈全場的事件。母豬卡的級距是「與同場其他母豬比」
+        # (已確認的設計決定),只看這一頭是比不出來的。
+        all_events = self.store.list_sow_events(farm_id)
+        grouped = schedule._by_sow(all_events)
+        sows = self.store.list_sows(farm_id, "active")
+
+        status = schedule.sow_status(sow, grouped.get(sow_id, []), _today(), cfg)
+        performance = schedule.performance_with_tiers(sow_id, sows, grouped)
+
         return 200, {
             "sow": self._sow_payload(sow),
+            "status": {
+                "state": status["state"],
+                "label": labels.sow_state_label(status["state"]),
+                "dayLabel": labels.sow_day_label(status["state"], status["day"]),
+                "since": _iso(status.get("since")),
+                "due": _iso(status.get("due")),
+                "weanDue": _iso(status.get("wean_due")),
+                "moveInDue": _iso(status.get("move_in_due")),
+                "overdueLabel": labels.overdue_farrow_label(status["overdue_days"])
+                                if status.get("overdue_days") else "",
+                "pregCheckNote": labels.pending_check_note(
+                    status["preg_checked"], status["day"],
+                    cfg["preg_check_days"], status["preg_check_overdue_days"],
+                ) if "preg_checked" in status else "",
+            },
+            "performance": performance and {
+                "litters": performance["litters"],
+                "basis": labels.performance_basis(),
+                "note": labels.stillborn_note(
+                    performance["stillborn_note"]["overall"],
+                    performance["stillborn_note"]["without_first"],
+                ) if performance["stillborn_note"] else "",
+                "metrics": [
+                    {"key": m["key"],
+                     "label": labels.performance_label(m["key"]),
+                     "unit": labels.performance_unit(m["key"]),
+                     "digits": labels.performance_digits(m["key"]),
+                     "value": m["value"],
+                     "tier": m["tier"],
+                     "tierLabel": labels.tier_label(m["tier"]) if m["tier"] else ""}
+                    for m in performance["metrics"]
+                ],
+            },
             "events": [self._event_payload(e) for e in events],
         }
 

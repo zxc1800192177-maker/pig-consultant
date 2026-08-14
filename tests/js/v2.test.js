@@ -15,7 +15,10 @@ import {
   eventRow,
   formatWeek,
   parityTone,
+  pendingCheckRow,
+  performanceGrid,
   shiftDate,
+  statusPills,
   sowRow,
   taskGroup,
   timelineCaption,
@@ -247,5 +250,194 @@ describe("提醒排序與內容", () => {
   it("提醒列的文字有跳脫", () => {
     const html = alertRow({ tone: "urgent", title: "<b>x</b>", sub: "", right: "" });
     assert.doesNotMatch(html, /<b>/);
+  });
+});
+
+
+describe("母豬目前狀態", () => {
+  const status = (over = {}) => ({
+    state: "pregnant", label: "懷孕中", dayLabel: "懷孕第 79 天",
+    since: "2026-03-24", due: "2026-07-17", weanDue: null, moveInDue: null, ...over,
+  });
+
+  it("狀態、天數、預產期都畫出來", () => {
+    const html = statusPills(status());
+    assert.ok(html.includes("懷孕中"));
+    assert.ok(html.includes("懷孕第 79 天"));
+    assert.ok(html.includes("預產 7/17"));
+  });
+
+  it("預產日期縮成 M/D,不帶年份", () => {
+    // 同一頭母豬的狀態都是近期的事,年份是雜訊
+    assert.doesNotMatch(statusPills(status()), /2026-07-17/);
+  });
+
+  it("沒有預產期就不畫那顆膠囊", () => {
+    assert.doesNotMatch(statusPills(status({ due: null })), /預產/);
+  });
+
+  it("哺乳中顯示預計離乳日", () => {
+    const html = statusPills(status({
+      state: "lactating", label: "哺乳中", dayLabel: "哺乳第 11 天",
+      due: null, weanDue: "2026-05-12",
+    }));
+    assert.ok(html.includes("預計離乳 5/12"));
+  });
+
+  it("狀態帶自己的 class,配種待驗孕與懷孕中分得開", () => {
+    // 兩者用同一個顏色的話,畫面等於宣稱一件還沒確認的事
+    assert.match(statusPills(status()), /pill-pregnant/);
+    assert.match(statusPills(status({ state: "mated", label: "配種待驗孕" })), /pill-mated/);
+  });
+
+  it("沒有狀態就什麼都不畫", () => {
+    assert.equal(statusPills(null), "");
+  });
+
+  it("文字有跳脫", () => {
+    assert.doesNotMatch(statusPills(status({ label: "<img src=x>" })), /<img/);
+  });
+});
+
+describe("生產表現", () => {
+  const metric = (over = {}) => ({
+    key: "born_alive", label: "窩均活仔數", unit: "隻", digits: 1,
+    value: 9.04, tier: "poor", tierLabel: "待改善", ...over,
+  });
+  const perf = (metrics) => ({
+    litters: 7, basis: "由事件記錄計算,非 AI 生成 ・ 級距是與本場其他母豬比較,不是全國常模",
+    metrics,
+  });
+
+  it("數值依 digits 取位", () => {
+    assert.ok(performanceGrid(perf([metric()])).includes("9.0"));
+    assert.ok(performanceGrid(perf([metric({
+      key: "litters_per_year", digits: 2, value: 2.383 })])).includes("2.38"));
+  });
+
+  it("級距標籤畫出來", () => {
+    const html = performanceGrid(perf([metric()]));
+    assert.ok(html.includes("待改善"));
+    assert.match(html, /t-poor/);
+  });
+
+  it("分不出級距時只顯示數字,不畫標籤", () => {
+    // 空白比一個猜出來的「中等」誠實
+    const html = performanceGrid(perf([metric({ tier: null, tierLabel: "" })]));
+    assert.ok(html.includes("9.0"));
+    assert.doesNotMatch(html, /class="tier/);
+  });
+
+  it("沒有數值顯示破折號,不顯示 0", () => {
+    const html = performanceGrid(perf([metric({ value: null, tier: null, tierLabel: "" })]));
+    assert.ok(html.includes("—"));
+    assert.doesNotMatch(html, />0\.0</);
+  });
+
+  it("一定要印出級距的比較基準", () => {
+    // 不寫的話讀起來就像系統在說這頭豬「全國待改善」
+    assert.ok(performanceGrid(perf([metric()])).includes("不是全國常模"));
+  });
+
+  it("沒有表現資料就整區不畫", () => {
+    assert.equal(performanceGrid(null), "");
+  });
+
+  it("標籤有跳脫", () => {
+    const html = performanceGrid(perf([metric({ label: "<script>x</script>" })]));
+    assert.doesNotMatch(html, /<script>/);
+  });
+});
+
+
+describe("死胎集中在最早一胎的說明", () => {
+  const perf = (note) => ({
+    litters: 7, basis: "由事件記錄計算", note,
+    metrics: [{ key: "stillborn_rate", label: "死胎率", unit: "%", digits: 1,
+                value: 17.1, tier: "poor", tierLabel: "待改善" }],
+  });
+
+  it("有說明時畫出來", () => {
+    const html = performanceGrid(perf("死胎幾乎全來自最早記錄的那一胎。"));
+    assert.match(html, /class="flag"/);
+    assert.ok(html.includes("最早記錄的那一胎"));
+  });
+
+  it("沒有說明就不畫空框", () => {
+    assert.doesNotMatch(performanceGrid(perf("")), /class="flag"/);
+  });
+
+  it("說明文字有跳脫", () => {
+    assert.doesNotMatch(performanceGrid(perf("<script>x</script>")), /<script>/);
+  });
+});
+
+
+describe("預產日已過", () => {
+  const status = (over = {}) => ({
+    state: "mated", label: "配種待驗孕", dayLabel: "配種後 143 天",
+    since: "2026-03-24", due: "2026-07-16", weanDue: null,
+    overdueLabel: "", ...over,
+  });
+
+  it("還沒到期時照常顯示預產日", () => {
+    assert.ok(statusPills(status()).includes("預產 7/16"));
+  });
+
+  it("已過期就不再寫「預產」—— 那是把過去的日期講成未來的計畫", () => {
+    const html = statusPills(status({ overdueLabel: "預產日已過 29 天,尚無分娩記錄" }));
+    assert.doesNotMatch(html, /預產 7\/16/);
+    assert.ok(html.includes("預產日已過 29 天"));
+    assert.match(html, /pill-overdue/);
+  });
+});
+
+
+describe("驗孕事件的燈號", () => {
+  const ev2 = (over = {}) => ({ type: "PD", date: "2026-05-30", detail: {}, ...over });
+
+  it("陰性不是損失(紅),也不是好消息(綠) —— 獨立成 warn", () => {
+    const html = eventRow(ev2({ detail: { positive: false } }));
+    assert.match(html, /class="ev warn"/);
+  });
+
+  it("陽性算好消息,跟正常事件同一個綠點", () => {
+    const html = eventRow(ev2({ detail: { positive: true } }));
+    assert.match(html, /class="ev ok"/);
+  });
+
+  it("流產跟仔豬死亡、母豬死亡同樣是損失", () => {
+    assert.match(eventRow({ type: "AB", date: "2026-05-30", detail: {} }), /class="ev loss"/);
+  });
+});
+
+describe("時間軸裡的「還沒驗孕」提示", () => {
+  const status = (over = {}) => ({
+    state: "mated", label: "配種待驗孕", dayLabel: "配種後 143 天",
+    pregCheckNote: "尚未驗孕,已超過建議驗孕時間(配種後 26 天)共 117 天",
+    ...over,
+  });
+
+  it("配種待驗孕時畫出提示", () => {
+    const html = pendingCheckRow(status());
+    assert.match(html, /class="tl-pending"/);
+    assert.ok(html.includes("117"));
+  });
+
+  it("已確認懷孕就不畫 —— 沒有這件事可提示", () => {
+    assert.equal(pendingCheckRow(status({ state: "pregnant", pregCheckNote: "" })), "");
+  });
+
+  it("待配種狀態也不畫 —— 她已經驗過了", () => {
+    assert.equal(pendingCheckRow(status({ state: "open", pregCheckNote: "" })), "");
+  });
+
+  it("沒有狀態就不畫", () => {
+    assert.equal(pendingCheckRow(null), "");
+  });
+
+  it("文字有跳脫", () => {
+    const html = pendingCheckRow(status({ pregCheckNote: "<script>x</script>" }));
+    assert.doesNotMatch(html, /<script>/);
   });
 });

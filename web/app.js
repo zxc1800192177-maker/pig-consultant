@@ -11,8 +11,9 @@ import {
 import { SseParser } from "./lib/sse.js";
 import { addFactor, removeFactor } from "./lib/factors.js";
 import {
-  alertRow, buildAlerts, eventName, eventRow, formatWeek, reviewRow,
-  settingRow, shiftDate, sowRow, taskGroup, timelineCaption, TIMELINE_LIMIT,
+  alertRow, buildAlerts, eventName, eventRow, formatWeek, performanceGrid,
+  pendingCheckRow, reviewRow, settingRow, shiftDate, sowRow, statusPills, taskGroup,
+  timelineCaption, TIMELINE_LIMIT,
 } from "./lib/v2.js";
 import {
   SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, recordedRow,
@@ -885,15 +886,18 @@ async function openSow(sowId) {
         </div>
         <div class="parity"><b>${s.parity}</b><span>胎次</span></div>
       </div>
+      ${statusPills(data.status)}
       <div class="meta">
         <div><span>父系耳號</span><br><b>${escapeHtml(s.sireTag || "—")}</b></div>
         <div><span>母系耳號</span><br><b>${escapeHtml(s.damTag || "—")}</b></div>
       </div>
     </div>
+    ${performanceGrid(data.performance)}
     <div class="card">
       <h3>事件時間軸</h3>
       <p class="hint">${timelineCaption(data.events.length, TIMELINE_LIMIT)}</p>
       <div class="tl" style="margin-top:12px">
+        ${pendingCheckRow(data.status)}
         ${data.events.slice().reverse().slice(0, TIMELINE_LIMIT).map(eventRow).join("")}
       </div>
     </div>`;

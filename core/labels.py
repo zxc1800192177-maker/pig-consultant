@@ -103,6 +103,116 @@ def task_label(kind: str) -> str:
     return TASK_LABELS.get(kind, kind)
 
 
+# 母豬目前狀態。「配種待驗孕」與「懷孕中」刻意分開 —— 配種了不等於懷孕,
+# 這個場目前有 50 頭驗孕陰性。混為一談會讓畫面宣稱一件還沒確認的事。
+SOW_STATE_LABELS = {
+    "pregnant": "懷孕中",
+    "mated": "配種待驗孕",
+    "lactating": "哺乳中",
+    "open": "待配種",
+    "exited": "已離群",
+}
+
+# 狀態旁邊那個「第幾天」要說清楚是從哪天算起,不然只是一個沒有意義的數字。
+SOW_DAY_LABELS = {
+    "pregnant": "懷孕第 {n} 天",
+    "mated": "配種後 {n} 天",
+    "lactating": "哺乳第 {n} 天",
+    "open": "已空 {n} 天",
+}
+
+
+def sow_state_label(state: str) -> str:
+    return SOW_STATE_LABELS.get(state, state)
+
+
+def sow_day_label(state: str, days) -> str:
+    template = SOW_DAY_LABELS.get(state)
+    return template.format(n=days) if template and days is not None else ""
+
+
+def pending_check_note(checked: bool, day: int, check_days: int,
+                       overdue_days) -> str:
+    """時間軸裡「還沒驗孕」的提示。
+
+    這是缺席的資訊 —— 配種後沒有驗孕記錄,原本得自己數時間軸裡有沒有
+    一筆「驗孕」才看得出來。2580 配種 143 天、從沒驗孕過,原本的時間軸
+    完全看不出這件事。
+
+    `checked` 為真時代表**有**驗孕記錄但結果沒填(匯入資料裡存在這種
+    情形)—— 跟「根本沒驗」是不同的問題,不可以用同一句話帶過。
+    """
+    if checked:
+        return "已記錄驗孕,但結果未填,建議補登"
+    if overdue_days:
+        return (f"尚未驗孕,已超過建議驗孕時間"
+                f"(配種後 {check_days} 天)共 {overdue_days} 天")
+    return f"尚未驗孕(建議配種後 {check_days} 天內,目前第 {day} 天)"
+
+
+def overdue_farrow_label(days: int) -> str:
+    """預產日已過卻沒有分娩記錄。
+
+    她要嘛生了沒登記,要嘛沒保住 —— 兩種都要有人去看。把已經過去的日期
+    當成未來的「預產」顯示,畫面等於在說謊(實測 200 頭裡有 88 頭的預產日
+    已過,最久的過了 611 天)。
+    """
+    return f"預產日已過 {days} 天,尚無分娩記錄"
+
+
+# 母豬卡的生產表現項目。單位分開放,畫面才能把數字放大、單位縮小。
+PERFORMANCE_TEXT = {
+    "total_born": ("窩均總仔數", "隻", 1),
+    "born_alive": ("窩均活仔數", "隻", 1),
+    "weaned": ("平均離乳數", "隻", 1),
+    "litters_per_year": ("年產胎數", "胎", 2),
+    "stillborn_rate": ("死胎率", "%", 1),
+    "lactation_days": ("平均哺乳天數", "天", 1),
+}
+
+# 三級。**不是 A~F 五級** —— 已確認改成三級,而且不得由三級反推五級
+# (憲法第三條第 5 款:不推導未公布的級距)。
+TIER_LABELS = {"good": "優秀", "mid": "中等", "poor": "待改善"}
+
+
+def performance_label(key: str) -> str:
+    return PERFORMANCE_TEXT.get(key, (key, "", 1))[0]
+
+
+def performance_unit(key: str) -> str:
+    return PERFORMANCE_TEXT.get(key, (key, "", 1))[1]
+
+
+def performance_digits(key: str) -> int:
+    return PERFORMANCE_TEXT.get(key, (key, "", 1))[2]
+
+
+def tier_label(tier: str) -> str:
+    return TIER_LABELS.get(tier, "")
+
+
+def stillborn_note(overall: float, without_first: float) -> str:
+    """死胎全部集中在最早那一胎時的說明。
+
+    措辭是「最早記錄的那一胎」而非「第 1 胎」—— 匯入的歷史不保證從她的
+    頭胎開始,宣稱是第 1 胎會是編出來的(憲法第三條)。
+    """
+    return (
+        f"死胎幾乎全來自最早記錄的那一胎。排除該胎後為 {without_first:.1f}%,"
+        f"整體 {overall:.1f}% 主要反映的是那一次,不是長期表現。"
+    )
+
+
+def performance_basis() -> str:
+    """生產表現這一區一定要一起顯示的說明。
+
+    **與同場其他母豬比,不與全國常模比。** 全國常模是場級指標,拿一頭母豬
+    去對照整場的年報數字是拿不同單位的東西相比 —— 母豬卡的設計初稿寫成
+    「對照全國常模」,那是錯的。
+    """
+    return "由事件記錄計算,非 AI 生成 ・ 級距是與本場其他母豬比較,不是全國常模"
+
+
 # 「值得檢視」的理由。**措辭不得出現「淘汰」** —— 這個場實際的淘汰原因
 # 裡「年齡太大」佔 48.0%,「生產性能差」只佔 2.9%,系統算得出來的正好是
 # 最少被拿來當決策依據的那一項(憲法第三條第 6 款)。

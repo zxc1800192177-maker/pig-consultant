@@ -188,6 +188,65 @@ def current_cycle(events: List[dict]) -> dict:
     return state
 
 
+def sow_status(sow: dict, events: List[dict], today: date,
+               settings: Optional[dict] = None) -> dict:
+    """母豬現在處於哪個階段,以及預產期。
+
+    回傳 `state`(給程式判斷)與 `day`/`due`/`since`(給畫面顯示)。
+    文字一律不在這裡組 —— 那在 core/labels.py(憲法:使用者看得到的字
+    只該有一份定義)。
+
+    **配種後未驗孕不等於懷孕。** 分成「配種待驗孕」與「懷孕中」兩種狀態:
+    這個場目前有 50 頭驗孕陰性,把她們一律當懷孕會排出永遠不會發生的
+    分娩工作(先前分娩預測平均誤差被拉到 +8.9 天就是這個原因)。
+    但預產期兩種狀態都給 —— 還沒驗孕的那幾天照樣要準備產房。
+    """
+    cfg = settings_with_defaults(settings)
+    c = current_cycle(events)
+
+    if c["exited"] or sow.get("status") not in (None, "active"):
+        return {"state": "exited", "since": c["exited"], "day": None, "due": None}
+
+    if c["farrow"] and not c["wean"]:
+        return {"state": "lactating", "since": c["farrow"],
+                "day": (today - c["farrow"]).days, "due": None,
+                "wean_due": c["farrow"] + timedelta(days=cfg["lactation_days"])}
+
+    if c["mate"] and not c["farrow"]:
+        due = c["mate"] + timedelta(days=cfg["gestation_days"])
+        state = "pregnant" if c["preg_positive"] else "mated"
+        # 預產日過了卻沒有分娩記錄:她要嘛生了沒登記,要嘛沒保住。
+        # 兩種都需要有人去看,所以不能把一個已經過去的日期當成未來的
+        # 「預產」顯示 —— 實測 200 頭裡有 88 頭的預產日已過,最久的過了
+        # 611 天,那樣的畫面等於在說謊。
+        overdue = (today - due).days
+        result = {"state": state, "since": c["mate"],
+                  "day": (today - c["mate"]).days, "due": due,
+                  "overdue_days": overdue if overdue > 0 else None,
+                  "move_in_due": due - timedelta(days=cfg["pre_farrow_move_days"])}
+
+        # 「配種待驗孕」本身就代表還沒確認懷孕 —— 但這件事原本只出現在
+        # 狀態列,時間軸裡完全看不出來:2580 配種 143 天、從沒驗孕過,
+        # 時間軸裡就是少了一列「驗孕」,使用者得自己數才會發現。
+        # 這裡把「該驗孕了」這件事變成明確的資料,畫面才有東西可以顯示。
+        if state == "mated":
+            check_due = c["mate"] + timedelta(days=cfg["preg_check_days"])
+            check_overdue = (today - check_due).days
+            result["preg_checked"] = c["preg_check"] is not None
+            result["preg_check_due"] = check_due
+            result["preg_check_overdue_days"] = check_overdue if check_overdue > 0 else None
+
+        return result
+
+    # 待配種。since 取最後一次離乳或驗孕陰性 —— 「空了幾天」是這個階段
+    # 唯一有意義的數字,而這個場有 44 頭超過 30 天沒有下一步動作。
+    since = max([d for d in (c["wean"], c["preg_check"]) if d], default=None)
+    if since is None and events:
+        since = events[-1]["event_date"]
+    return {"state": "open", "since": since, "due": None,
+            "day": (today - since).days if since else None}
+
+
 def tasks_for_sow(sow: dict, events: List[dict], cfg: dict) -> List[Task]:
     """一頭母豬目前該做的事。每頭在同一時間點只會有一件主要工作。"""
     if sow.get("status") not in (None, "active"):
@@ -343,6 +402,172 @@ def _percentile(values: List[float], pct: float) -> Optional[float]:
     ordered = sorted(values)
     index = min(len(ordered) - 1, max(0, int(len(ordered) * pct / 100)))
     return ordered[index]
+
+
+# 母豬卡的生產表現項目。`higher_better` 決定分級方向 —— 死胎率跟其他項
+# 相反,漏掉的話最會生的那幾頭會被標成待改善。
+PERFORMANCE_METRICS = (
+    ("total_born", True),      # 窩均總仔數
+    ("born_alive", True),      # 窩均活仔數
+    ("weaned", True),          # 平均離乳數
+    ("litters_per_year", True),
+    ("stillborn_rate", False), # 死胎率:越低越好
+    ("lactation_days", True),
+)
+
+# 場內分級至少要幾頭母豬才有意義。頭數太少時三分位只是把三頭豬各給一級,
+# 那不是評價,是排名(值得檢視的活仔數判準踩過同一個坑)。
+MIN_HERD_FOR_TIERS = 10
+
+
+# 死胎率要先高到這個程度,才值得提「集中在最早那一胎」。低於這個數字時
+# 整體本來就不算問題,再拆解只是雜訊。
+FIRST_LITTER_NOTE_MIN_RATE = 10.0
+
+
+def _stillborn_rate(farrows: List[dict]) -> Optional[float]:
+    """這幾窩的死胎率(%)。缺欄位的窩不計入,不當成 0。"""
+    alive = still = mummy = 0
+    counted = 0
+    for e in farrows:
+        d = e.get("detail") or {}
+        if not isinstance(d.get("stillborn"), int) or not isinstance(d.get("born_alive"), int):
+            continue
+        alive += d["born_alive"]
+        still += d["stillborn"]
+        mummy += d.get("mummified") if isinstance(d.get("mummified"), int) else 0
+        counted += 1
+    total = alive + still + mummy
+    return still / total * 100 if counted and total else None
+
+
+def sow_performance(events: List[dict]) -> Optional[dict]:
+    """一頭母豬的累計生產表現。沒有分娩記錄回 None —— 沒生過就沒有表現
+    可談,補一組 0 會讓她在場內比較裡把別人的分級一起拉歪。
+
+    **不算離乳前死亡率。** 仔豬會在窩間流動(5,190 組分娩→離乳配對裡有
+    25.3% 離乳數大於活仔數),`(活仔−離乳)/活仔` 對個別母豬無意義。
+    這個坑已經踩過一次,有測試把關(specs/v2-facts.md 第 1 條)。
+    """
+    farrows = [e for e in events if e["event_type"] == FARROW]
+    if not farrows:
+        return None
+
+    def total(key):
+        return sum(v for e in farrows
+                   if isinstance(v := (e.get("detail") or {}).get(key), int))
+
+    def counted(key):
+        return sum(1 for e in farrows
+                   if isinstance((e.get("detail") or {}).get(key), int))
+
+    alive_n, still_n, mummy_n = counted("born_alive"), counted("stillborn"), counted("mummified")
+    alive, still, mummy = total("born_alive"), total("stillborn"), total("mummified")
+
+    out = {"litters": len(farrows)}
+    out["born_alive"] = alive / alive_n if alive_n else None
+
+    # 總仔數只在活仔與死胎都有記錄時才算 —— 缺一項就當 0 會少算,
+    # 而少算的窩看起來只是「比較小窩」,沒有人會發現數字是壞的。
+    out["total_born"] = ((alive + still + mummy) / alive_n) if alive_n and still_n else None
+    out["stillborn_rate"] = (still / (alive + still + mummy) * 100
+                             if (alive + still + mummy) and still_n else None)
+
+    weans = [e for e in events if e["event_type"] == WEAN]
+    weaned = [v for e in weans
+              if isinstance(v := (e.get("detail") or {}).get("weaned"), int)]
+    out["weaned"] = sum(weaned) / len(weaned) if weaned else None
+
+    # 年產胎數:用首末胎的間隔回推,不用「胎數 ÷ 在場年數」——
+    # 後者會把她進場後還沒配種的那段也算進去,新母豬因此永遠很難看。
+    if len(farrows) >= 2:
+        span = (farrows[-1]["event_date"] - farrows[0]["event_date"]).days
+        out["litters_per_year"] = (len(farrows) - 1) * 365 / span if span else None
+    else:
+        out["litters_per_year"] = None
+
+    # 死胎全部集中在最早那一胎的情形。實測 2580:整體 17.1%,排除最早那胎
+    # 只有 3.2%(14 隻裡 11 隻死胎都在那一窩,之後六胎再無死胎)。不講的話
+    # 她的死胎率會被當成長期問題,但那其實是一次性的難產。
+    #
+    # 措辭是「最早記錄的那一胎」而不是「第 1 胎」—— 匯入的歷史不保證從
+    # 她的頭胎開始,宣稱是第 1 胎會是編的。
+    out["stillborn_note"] = None
+    if len(farrows) >= 3 and out["stillborn_rate"] is not None:
+        rest = _stillborn_rate(farrows[1:])
+        if (out["stillborn_rate"] >= FIRST_LITTER_NOTE_MIN_RATE
+                and rest is not None and rest * 2 < out["stillborn_rate"]):
+            out["stillborn_note"] = {"overall": out["stillborn_rate"], "without_first": rest}
+
+    # 哺乳天數:逐次配對分娩與其後的第一次離乳
+    spans = []
+    for f in farrows:
+        nxt = next((w["event_date"] for w in weans
+                    if w["event_date"] >= f["event_date"]), None)
+        if nxt:
+            spans.append((nxt - f["event_date"]).days)
+    out["lactation_days"] = sum(spans) / len(spans) if spans else None
+
+    return out
+
+
+def tier_within_farm(value: Optional[float], peers: List[float],
+                     higher_better: bool) -> Optional[str]:
+    """把一個數字放進場內的三級:good / mid / poor。
+
+    **與同場其他母豬比,不與全國常模比**(已確認的設計決定)。全國常模是
+    場級指標 —— 拿一頭母豬去對照整場的年報數字,是拿不同單位的東西相比。
+    而且門檻寫死就只為某一場服務,別的牧場匯進來不是全綠就是全紅。
+
+    分不出高下時回 None 而不是硬給一級:全場數字一模一樣、或頭數太少時,
+    三分位只是把母豬排名,那不是評價。
+    """
+    if value is None or len(peers) < MIN_HERD_FOR_TIERS:
+        return None
+
+    ordered = sorted(peers)
+    low = _percentile(ordered, 100 / 3)
+    high = _percentile(ordered, 200 / 3)
+    if low is None or high is None or low == high:
+        return None                # 分布沒有差異,不分級
+
+    if not higher_better:
+        low, high = high, low
+        if value <= low:
+            return "good"
+        return "poor" if value > high else "mid"
+
+    if value >= high:
+        return "good"
+    return "poor" if value < low else "mid"
+
+
+def performance_with_tiers(sow_id: int, sows: Iterable[dict],
+                           grouped: Dict[int, List[dict]]) -> Optional[dict]:
+    """一頭母豬的生產表現,附上她在場內的級距。"""
+    mine = sow_performance(grouped.get(sow_id, []))
+    if mine is None:
+        return None
+
+    others = {}
+    for sow in sows:
+        if sow.get("status") not in (None, "active"):
+            continue
+        stats = sow_performance(grouped.get(sow["id"], []))
+        if stats:
+            for key, _ in PERFORMANCE_METRICS:
+                if stats.get(key) is not None:
+                    others.setdefault(key, []).append(stats[key])
+
+    return {
+        "litters": mine["litters"],
+        "stillborn_note": mine.get("stillborn_note"),
+        "metrics": [
+            {"key": key, "value": mine.get(key),
+             "tier": tier_within_farm(mine.get(key), others.get(key, []), higher)}
+            for key, higher in PERFORMANCE_METRICS
+        ],
+    }
 
 
 def sows_worth_review(sows: Iterable[dict], events: Iterable[dict], today: date,

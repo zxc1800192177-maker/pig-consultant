@@ -231,6 +231,9 @@ body { padding-bottom: 96px; }
 }
 .ev.ok::before { background: var(--good); }
 .ev.loss::before { background: var(--critical); }
+/* 驗孕陰性:不是損失(紅),但也不是好消息 —— 跟正常事件同一個綠點
+   會讀起來像順利的事,漏掉「配種失敗、需要重新配種」這個訊號。 */
+.ev.warn::before { background: var(--warn); }
 .ev .d {
   color: var(--ink-faint); font-size: 12px; margin-right: 8px;
   font-variant-numeric: tabular-nums;
@@ -240,6 +243,59 @@ body { padding-bottom: 96px; }
   font-size: 10.5px; color: var(--ink-faint); border: 1px solid var(--border);
   border-radius: 999px; padding: 1px 7px; margin-left: 6px;
 }
+/* ── 母豬目前狀態 ── */
+.status-row { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
+.pill {
+  font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 999px;
+  background: var(--surface-2); color: var(--ink-soft);
+  border: 1px solid var(--border);
+}
+/* 狀態本身用顏色分開。「配種待驗孕」刻意不是懷孕的顏色 —— 那還沒確認。 */
+.pill-pregnant { background: var(--good); border-color: var(--good); color: #fff; }
+.pill-mated { border-color: var(--good); color: var(--good); }
+.pill-lactating { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pill-open { border-color: var(--warn, var(--accent)); color: var(--warn, var(--accent)); }
+.pill-exited { opacity: .65; }
+.pill-due { border-style: dashed; }
+.pill-overdue { background: var(--critical); border-color: var(--critical); color: #fff; }
+
+/* ── 生產表現 ── */
+/* 手機上務必維持兩欄。375px 時這一格只有 273px 可用,minmax(140px) 會塌成
+   一欄 —— 六項指標疊成一直排要滑很久,而這一區的用處正是一眼掃過去比較。
+   min 訂 120px:兩欄各 131px,放得下「窩均總仔數」六個字加數字。 */
+.perf {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px; margin-top: 14px;
+}
+.stat {
+  display: flex; flex-direction: column; gap: 4px; padding: 12px 13px;
+  background: var(--surface-2); border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.stat .k { font-size: 11.5px; color: var(--ink-faint); }
+.stat .v {
+  font-size: 21px; font-weight: 700; line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.stat .v-none { color: var(--ink-faint); font-weight: 400; }
+.stat .u { font-size: 11.5px; font-weight: 400; color: var(--ink-faint); margin-left: 3px; }
+.tier {
+  align-self: flex-start; font-size: 10.5px; font-weight: 700;
+  padding: 2px 8px; border-radius: 999px;
+}
+.t-good { background: var(--good); color: #fff; }
+.t-mid { background: var(--surface); color: var(--ink-soft); border: 1px solid var(--border); }
+.t-poor { background: var(--critical); color: #fff; }
+/* 一次性事件造成的難看數字,要在旁邊講清楚,否則會被當成長期問題。 */
+.flag {
+  margin-top: 13px; padding: 11px 13px; font-size: 12.5px; line-height: 1.65;
+  color: var(--ink-soft); background: var(--surface-2);
+  border-left: 3px solid var(--warn); border-radius: var(--radius-sm);
+}
+/* 這一行不可以拿掉:級距是與本場其他母豬比,不是全國常模。
+   不寫的話讀起來就像系統在說這頭豬「全國待改善」。 */
+.src { margin-top: 12px; font-size: 11px; color: var(--ink-faint); line-height: 1.6; }
+
 /* 年份標題。每列只印月-日,跨年時才插一列 —— 老母豬的時間軸橫跨
    四五年,不標年份就分不出是哪一年的配種。負的左邊距讓它壓在
    時間軸的線上,視覺上就是一個分段點。 */
@@ -249,6 +305,15 @@ body { padding-bottom: 96px; }
   background: var(--surface); padding: 2px 0;
 }
 .tl-year:first-child { margin-top: 0; }
+
+/* 「還沒驗孕」提示。不是一筆事件(沒有 id、不能收回),所以刻意做成
+   跟 .ev 不一樣的樣子 —— 一眼就看得出這是待辦,不是歷史記錄。 */
+.tl-pending {
+  margin: 0 0 12px -22px; padding: 10px 12px; font-size: 12.5px; line-height: 1.55;
+  color: var(--warn); background: var(--warn-bg); border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+}
+.tl-pending b { margin-right: 6px; }
 
 /* ── 設定 ── */
 .set {
