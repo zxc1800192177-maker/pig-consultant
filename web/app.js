@@ -1137,6 +1137,18 @@ function fieldMarkup(field) {
         </div>${hint}
       </div>`;
   }
+  if (field.type === "tri") {
+    // 跟 score 同樣的按鈕群,只是選項是 {value, label} —— 存的值(穩定
+    // 判斷)跟按鈕上顯示的符號分開,符號以後想換不必動到已存的資料。
+    return `
+      <div class="fld"><span>${escapeHtml(field.label)}</span>
+        <div class="seg tri" data-field="${field.key}">
+          ${field.options.map((o) =>
+            `<button type="button" class="seg-b" data-val="${escapeHtml(o.value)}"
+             >${escapeHtml(o.label)}</button>`).join("")}
+        </div>${hint}
+      </div>`;
+  }
   const type = field.type === "date" ? "date"
              : field.type === "int" ? "number" : "text";
   return `
@@ -1156,7 +1168,7 @@ function todayIso() {
 function readRecordFields(spec) {
   const raw = {};
   for (const field of spec.fields) {
-    if (["bool", "score", "choice"].includes(field.type)) {
+    if (["bool", "score", "choice", "tri"].includes(field.type)) {
       const picked = document.querySelector(
         `[data-field="${field.key}"] .is-active`);
       raw[field.key] = picked ? picked.dataset.val : "";

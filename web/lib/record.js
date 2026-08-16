@@ -5,11 +5,32 @@
 
 import { escapeHtml } from "./markdown.js";
 
+/** 發情穩定度的三個選項。存的是這裡的 value(穩定判斷,不受符號改版
+ * 影響),按鈕與時間軸摘要都顯示 label 這個符號 —— 只有一份定義,
+ * 表單跟摘要不會各自維護一份對照表而慢慢兜不起來。
+ */
+export const ESTRUS_STABILITY_OPTIONS = [
+  { value: "stable", label: "✓" },
+  { value: "uncertain", label: "△" },
+  { value: "unstable", label: "✗" },
+];
+
+/** value → 符號。摘要文字用,從上面那份選項表算出來,不是另一份定義。 */
+export const ESTRUS_STABILITY_LABEL = Object.fromEntries(
+  ESTRUS_STABILITY_OPTIONS.map((o) => [o.value, o.label]));
+
 /** 每種事件要填什麼。`type` 決定畫成什麼元件與怎麼收值。 */
 export const RECORD_FORMS = {
   MT: {
     label: "配種", target: "sow",
-    fields: [{ key: "boar_tag", label: "公豬", type: "boar" }],
+    fields: [
+      { key: "boar_tag", label: "公豬", type: "boar" },
+      // 配種當下觀察到的發情徵狀。跟離乳評分同樣的道理:主觀判斷,
+      // **可以不評**,沒填不補值(憲法第三條第 6 款)。
+      { key: "estrus_stability", label: "發情穩定度", type: "tri",
+        options: ESTRUS_STABILITY_OPTIONS,
+        hint: "配種當下的發情徵狀,不確定可以留空" },
+    ],
   },
   FW: {
     label: "分娩", target: "sow",
@@ -143,6 +164,10 @@ export function recordSummary(event) {
   const bits = [];
 
   if (d.boar_tag) bits.push(`公豬 ${d.boar_tag}`);
+  if (d.estrus_stability) {
+    const symbol = ESTRUS_STABILITY_LABEL[d.estrus_stability];
+    if (symbol) bits.push(`發情 ${symbol}`);
+  }
   if (d.born_alive != null) bits.push(`活仔 ${d.born_alive}`);
   if (d.stillborn) bits.push(`死胎 ${d.stillborn}`);
   if (d.weaned != null) bits.push(`離乳 ${d.weaned} 隻`);

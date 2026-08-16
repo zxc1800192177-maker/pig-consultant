@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  ESTRUS_STABILITY_LABEL,
+  ESTRUS_STABILITY_OPTIONS,
   RECORD_FORMS,
   SIDE_EFFECTS,
   buildDetail,
@@ -137,6 +139,48 @@ describe("離乳仔豬評分", () => {
 
   it("離乳頭數仍然是必填 —— 評分可略過不代表整筆可以空著", () => {
     assert.ok(buildDetail("WN", { wean_score: "4" }).problems.length);
+  });
+});
+
+describe("發情穩定度", () => {
+  // 使用者要求:配種表單裡三個選項,✓/△/✗,同樣可以不評
+  it("三個選項,符號是 ✓ △ ✗", () => {
+    assert.deepEqual(ESTRUS_STABILITY_OPTIONS.map((o) => o.label), ["✓", "△", "✗"]);
+  });
+
+  it("存的是判斷值,不是符號本身 —— 符號以後想換不必動到已存資料", () => {
+    const { detail, problems } = buildDetail("MT", { estrus_stability: "stable" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.estrus_stability, "stable");
+  });
+
+  it("三個判斷值都收", () => {
+    for (const value of ["stable", "uncertain", "unstable"]) {
+      const { detail, problems } = buildDetail("MT", { estrus_stability: value });
+      assert.deepEqual(problems, []);
+      assert.equal(detail.estrus_stability, value);
+    }
+  });
+
+  it("留空不算漏填 —— 可以不評", () => {
+    const { problems } = buildDetail("MT", {});
+    assert.deepEqual(problems, []);
+  });
+
+  it("公豬耳號仍然可以跟發情穩定度一起填", () => {
+    const { detail } = buildDetail("MT", { boar_tag: "D6", estrus_stability: "unstable" });
+    assert.equal(detail.boar_tag, "D6");
+    assert.equal(detail.estrus_stability, "unstable");
+  });
+
+  it("摘要顯示符號,值跟符號的對照只有這一份定義", () => {
+    const { extra } = recordSummary({ type: "MT", detail: { estrus_stability: "uncertain" } });
+    assert.ok(extra.includes(`發情 ${ESTRUS_STABILITY_LABEL.uncertain}`));
+  });
+
+  it("沒評就不顯示,不補一個中間符號", () => {
+    const { extra } = recordSummary({ type: "MT", detail: { boar_tag: "D6" } });
+    assert.doesNotMatch(extra, /發情/);
   });
 });
 

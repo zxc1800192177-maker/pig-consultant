@@ -2,6 +2,7 @@
 // 這樣才能在 node:test 下測試(app.js 那些 DOM 接線不行)。
 
 import { escapeHtml } from "./markdown.js";
+import { ESTRUS_STABILITY_LABEL } from "./record.js";
 
 export const EVENT_NAMES = {
   MT: "配種", PD: "驗孕", FW: "分娩", WN: "離乳", PL: "仔豬損失",
@@ -39,6 +40,10 @@ export function describeEvent(event) {
   if (d.count != null) bits.push(`${d.count} 隻`);
   if (d.reason) bits.push(d.reason);
   if (d.boar_tag) bits.push(`公豬 ${d.boar_tag}`);
+  if (d.estrus_stability) {
+    const symbol = ESTRUS_STABILITY_LABEL[d.estrus_stability];
+    if (symbol) bits.push(`發情 ${symbol}`);
+  }
   if (d.session) bits.push(d.session);
   if (d.positive === true) bits.push("陽性");
   if (d.positive === false) bits.push("陰性");

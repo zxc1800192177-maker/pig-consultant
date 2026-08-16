@@ -129,6 +129,9 @@ body { padding-bottom: 96px; }
 }
 .seg-b.is-active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .seg.score .seg-b { min-width: 44px; }
+/* 發情穩定度的三個符號按鈕。字級加大,不然 ✓ △ ✗ 縮在 14px 裡不容易
+   一眼辨認,巡欄時瞄一眼要能馬上點對。 */
+.seg.tri .seg-b { min-width: 60px; font-size: 20px; }
 
 .chips { display: flex; gap: 8px; flex-wrap: wrap; }
 /* 觸控目標至少 44px。豬舍裡是戴著手套單手操作,34px 的按鈕按不準,

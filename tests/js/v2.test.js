@@ -138,6 +138,23 @@ describe("事件細節整理", () => {
     assert.ok(describeEvent(ev({ type: "PD", detail: { positive: true } })).includes("陽性"));
   });
 
+  it("配種的發情穩定度顯示符號", () => {
+    const text = describeEvent(ev({ type: "MT", detail: { estrus_stability: "stable" } }));
+    assert.ok(text.includes("發情 ✓"));
+  });
+
+  it("沒評發情穩定度就不顯示", () => {
+    assert.doesNotMatch(
+      describeEvent(ev({ type: "MT", detail: { boar_tag: "D6" } })), /發情/);
+  });
+
+  it("認不得的發情穩定度值不顯示,也不會炸掉", () => {
+    assert.doesNotThrow(() =>
+      describeEvent(ev({ type: "MT", detail: { estrus_stability: "壞掉的值" } })));
+    assert.doesNotMatch(
+      describeEvent(ev({ type: "MT", detail: { estrus_stability: "壞掉的值" } })), /發情/);
+  });
+
   it("沒有細節就回空字串", () => {
     assert.equal(describeEvent(ev()), "");
   });
