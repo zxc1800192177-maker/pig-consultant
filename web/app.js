@@ -1202,6 +1202,7 @@ async function submitRecord() {
     const { ok, data } = await api(path, postJson({
       earTag: detail.earTag, breed: detail.breed,
       birthDate: detail.birthDate, entryDate: when,
+      sireTag: detail.sire_tag, damTag: detail.dam_tag,
     }));
     if (!ok) return showRecordError(data.error || "記錄失敗");
     closeRecordForm();

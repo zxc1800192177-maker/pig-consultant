@@ -1027,7 +1027,9 @@ class Application:
         if err:
             return err
         return 200, {"boars": [{"id": b["id"], "earTag": b["ear_tag"],
-                                "breed": b.get("breed") or ""}
+                                "breed": b.get("breed") or "",
+                                "sireTag": b.get("sire_tag") or "",
+                                "damTag": b.get("dam_tag") or ""}
                                for b in self.store.list_boars(farm_id)]}
 
     def _add_boar(self, payload, token) -> Tuple[int, dict]:
@@ -1048,6 +1050,8 @@ class Application:
             farm_id, tag,
             entry_date=_date(payload.get("entryDate")) or _today(),
             breed=_text(payload.get("breed"), config.MAX_BREED_CHARS),
+            sire_tag=_text(payload.get("sireTag"), config.MAX_EAR_TAG_CHARS),
+            dam_tag=_text(payload.get("damTag"), config.MAX_EAR_TAG_CHARS),
         )
         return 200, {"id": boar_id, "earTag": tag}
 

@@ -86,10 +86,14 @@ export const RECORD_FORMS = {
   },
   GA: {
     label: "種豬進場", target: "new",
+    // 母豬跟公豬共用同一張表單(用上面的 母豬/公豬 切換鈕決定送去哪個
+    // API),父母耳號兩邊都可能知道也可能不知道,所以是選填。
     fields: [
       { key: "earTag", label: "耳號", type: "text", required: true },
       { key: "breed", label: "品種", type: "text" },
       { key: "birthDate", label: "出生日期", type: "date" },
+      { key: "sire_tag", label: "父系耳號", type: "text" },
+      { key: "dam_tag", label: "母系耳號", type: "text" },
     ],
   },
 };

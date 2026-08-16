@@ -43,6 +43,41 @@ describe("表單定義", () => {
   });
 });
 
+describe("種豬進場的父母耳號", () => {
+  // 母豬跟公豬共用同一張表單(切換鈕決定送去哪個 API),父母耳號兩邊
+  // 都可能不知道,所以是選填,不因為留空而報錯。
+  it("表單裡有父系耳號跟母系耳號兩個欄位", () => {
+    const keys = formFor("GA").fields.map((f) => f.key);
+    assert.ok(keys.includes("sire_tag"));
+    assert.ok(keys.includes("dam_tag"));
+  });
+
+  it("兩個都填會存進 detail", () => {
+    const { detail, problems } = buildDetail("GA", {
+      earTag: "2580", sire_tag: "L鄭", dam_tag: "2416",
+    });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.sire_tag, "L鄭");
+    assert.equal(detail.dam_tag, "2416");
+  });
+
+  it("留空不報錯 —— 不是每頭豬都知道父母耳號", () => {
+    const { problems } = buildDetail("GA", { earTag: "2580" });
+    assert.deepEqual(problems, []);
+  });
+
+  it("只填一邊也可以", () => {
+    const { detail } = buildDetail("GA", { earTag: "2580", sire_tag: "L鄭" });
+    assert.equal(detail.sire_tag, "L鄭");
+    assert.ok(!("dam_tag" in detail));
+  });
+
+  it("前後空白會裁掉", () => {
+    const { detail } = buildDetail("GA", { earTag: "2580", sire_tag: "  L鄭  " });
+    assert.equal(detail.sire_tag, "L鄭");
+  });
+});
+
 describe("整理表單內容", () => {
   it("整數欄位轉成數字", () => {
     const { detail, problems } = buildDetail("FW", { born_alive: "12", stillborn: "2" });

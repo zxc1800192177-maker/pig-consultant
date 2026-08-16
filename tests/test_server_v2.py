@@ -93,6 +93,24 @@ class TestSows:
         assert sows[0]["earTag"] == "1183"
         assert sows[0]["breed"] == "LY"
 
+    def test_sire_and_dam_tags_are_stored_when_manually_added(self, farm):
+        """匯入時已經會存父母耳號(見 test_importer.py),但手動用紀錄頁
+        的「種豬進場」新增時,這條路徑一直沒有測試證明真的存得進去。
+        """
+        app, token, _ = farm
+        _post(app, "/api/sows",
+              {"earTag": "1183", "sireTag": "D1", "damTag": "2416"}, token)
+        sows = app.handle_get("/api/sows", token)[1]["sows"]
+        assert sows[0]["sireTag"] == "D1"
+        assert sows[0]["damTag"] == "2416"
+
+    def test_sire_and_dam_tags_are_optional(self, farm):
+        app, token, _ = farm
+        assert _post(app, "/api/sows", {"earTag": "1183"}, token)[0] == 200
+        sows = app.handle_get("/api/sows", token)[1]["sows"]
+        assert sows[0]["sireTag"] == ""
+        assert sows[0]["damTag"] == ""
+
     def test_ear_tag_required(self, farm):
         app, token, _ = farm
         for bad in ({}, {"earTag": ""}, {"earTag": "   "}):
@@ -635,6 +653,21 @@ class TestRecordPage:
                      {"earTag": "D6", "breed": "Duroc"}, token)[0] == 200
         boars = app.handle_get("/api/boars", token)[1]["boars"]
         assert [b["earTag"] for b in boars] == ["D6"]
+
+    def test_boar_sire_and_dam_tags_are_stored_and_listed(self, farm):
+        app, token, _ = farm
+        _post(app, "/api/boars",
+              {"earTag": "D6", "sireTag": "D1", "damTag": "2416"}, token)
+        boars = app.handle_get("/api/boars", token)[1]["boars"]
+        assert boars[0]["sireTag"] == "D1"
+        assert boars[0]["damTag"] == "2416"
+
+    def test_boar_parent_tags_are_optional(self, farm):
+        app, token, _ = farm
+        assert _post(app, "/api/boars", {"earTag": "D6"}, token)[0] == 200
+        boars = app.handle_get("/api/boars", token)[1]["boars"]
+        assert boars[0]["sireTag"] == ""
+        assert boars[0]["damTag"] == ""
 
     def test_duplicate_boar_tag_is_rejected(self, farm):
         app, token, _ = farm

@@ -125,10 +125,16 @@ CREATE TABLE IF NOT EXISTS boars (
   ear_tag TEXT NOT NULL,
   entry_date DATE,
   breed TEXT NOT NULL DEFAULT '',
+  sire_tag TEXT NOT NULL DEFAULT '',
+  dam_tag TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'active',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS boars_tag_unique ON boars (farm_id, ear_tag, entry_date);
+
+-- 既有資料庫沒有這兩欄,建表語句對它們不生效。
+ALTER TABLE boars ADD COLUMN IF NOT EXISTS sire_tag TEXT NOT NULL DEFAULT '';
+ALTER TABLE boars ADD COLUMN IF NOT EXISTS dam_tag TEXT NOT NULL DEFAULT '';
 
 -- detail 用 JSONB:八種事件各自需要的欄位差很多(分娩要活產/死產/木乃伊,
 -- 仔豬損失要數量/原因,驗孕只要 +/-),但都只是「這次事件的附註」,
@@ -322,7 +328,8 @@ class Store:
         raise NotImplementedError
 
     # --- 公豬 ---
-    def add_boar(self, farm_id, ear_tag, entry_date=None, breed="") -> int:
+    def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
+                 sire_tag="", dam_tag="") -> int:
         raise NotImplementedError
 
     def list_boars(self, farm_id: int) -> List[dict]:
@@ -616,11 +623,13 @@ class InMemoryStore(Store):
             return True
         return False
 
-    def add_boar(self, farm_id, ear_tag, entry_date=None, breed="") -> int:
+    def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
+                 sire_tag="", dam_tag="") -> int:
         boar_id = self._new_id("boar")
         self.boars.append({
             "id": boar_id, "farm_id": farm_id, "ear_tag": ear_tag,
-            "entry_date": entry_date, "breed": breed, "status": "active",
+            "entry_date": entry_date, "breed": breed,
+            "sire_tag": sire_tag, "dam_tag": dam_tag, "status": "active",
         })
         return boar_id
 
@@ -1034,14 +1043,15 @@ class PostgresStore(Store):
                 (sow_id, farm_id)).fetchone()
             return row is not None
 
-    def add_boar(self, farm_id, ear_tag, entry_date=None, breed="") -> int:
+    def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
+                 sire_tag="", dam_tag="") -> int:
         with self._connect() as conn:
             return conn.execute(
-                "INSERT INTO boars (farm_id, ear_tag, entry_date, breed)"
-                " VALUES (%s,%s,%s,%s) RETURNING id",
-                (farm_id, ear_tag, entry_date, breed)).fetchone()[0]
+                "INSERT INTO boars (farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag)"
+                " VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+                (farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag)).fetchone()[0]
 
-    BOAR_COLS = "id, farm_id, ear_tag, entry_date, breed, status"
+    BOAR_COLS = "id, farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag, status"
 
     def list_boars(self, farm_id):
         with self._connect() as conn:
