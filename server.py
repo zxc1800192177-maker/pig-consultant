@@ -496,8 +496,6 @@ class Application:
             return self._add_event(payload, token)
         if path == "/api/pens":
             return self._add_pen(payload, token)
-        if path == "/api/pens/count":
-            return self._set_pen_count(payload, token)
         if path == "/api/boars":
             return self._add_boar(payload, token)
         if path == "/api/settings":
@@ -870,13 +868,12 @@ class Application:
 
         sows = self.store.list_sows(farm_id, "active")
         events = self.store.list_sow_events(farm_id)
-        pens = self.store.list_pens(farm_id)
         cfg = self._farm_settings(farm_id)
         today = _today()
 
         return 200, {
             "openSows": schedule.overdue_sows(sows, events, today, cfg),
-            "pens": schedule.pen_pressure(sows, events, pens, today, cfg),
+            "pens": schedule.pen_pressure(sows, events, today, cfg),
         }
 
     def _farm_settings(self, farm_id) -> dict:
@@ -1022,52 +1019,6 @@ class Application:
             return 400, {"error": f"產房欄位最多 {config.MAX_PENS_PER_FARM} 個"}
         return 200, {"id": self.store.add_pen(
             farm_id, name.strip()[:config.MAX_PEN_NAME_CHARS])}
-
-    def _set_pen_count(self, payload, token) -> Tuple[int, dict]:
-        """把產房欄位數量補到指定數字。
-
-        逐欄位單獨新增(輸入名稱、按新增)對一次要開 20、30 欄的牧場太
-        繁瑣,所以設定頁改成填一個目標數字,系統自動補上差額、自動編號。
-
-        **只會增加,不會減少。** 少開的那幾欄可能已經有母豬指定在裡面,
-        自動砍欄位會讓那幾筆母豬資料指到不存在的欄位。真的要減少,
-        得先確認清空再個別刪除,這個功能不代勞。
-        """
-        farm_id, user, err = self._need_farm(token)
-        if err:
-            return err
-        deny = self._need_owner(user)
-        if deny:
-            return deny
-
-        target = payload.get("count")
-        if isinstance(target, bool) or not isinstance(target, int):
-            return 400, {"error": "數量請填整數"}
-        if target < 1:
-            return 400, {"error": "數量至少要 1"}
-        if target > config.MAX_PENS_PER_FARM:
-            return 400, {"error": f"產房欄位最多 {config.MAX_PENS_PER_FARM} 個"}
-
-        existing = self.store.list_pens(farm_id)
-        if target <= len(existing):
-            return 400, {"error": f"目前已有 {len(existing)} 個,這個功能只會增加不會"
-                                  f"減少 —— 要減少請個別刪除欄位"}
-
-        existing_names = {p["name"] for p in existing}
-        added = 0
-        candidate = 1
-        # candidate 只會遞增到 target 附近就結束,不會無限迴圈:
-        # MAX_PENS_PER_FARM 已經把 target 上限卡住了。
-        while len(existing) + added < target:
-            name = str(candidate)
-            candidate += 1
-            if name in existing_names:
-                continue
-            self.store.add_pen(farm_id, name)
-            existing_names.add(name)
-            added += 1
-
-        return 200, {"added": added, "total": len(existing) + added}
 
     def _list_boars(self, token) -> Tuple[int, dict]:
         """公豬清單。配種記錄要選公豬,所以員工也讀得到。"""

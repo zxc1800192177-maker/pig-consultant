@@ -200,20 +200,20 @@ class TestOverdue:
 
 
 class TestPenPressure:
-    """逐欄位追蹤,所以要能回答「還剩哪幾欄」而不只是「不夠」。"""
+    """產房容量是設定裡的一個總數(farrowing_pens)。
 
-    PENS = [{"id": 1, "name": "A-01"}, {"id": 2, "name": "A-02"}]
+    原本設計成逐欄位追蹤,但從來沒有任何地方把母豬指派到特定欄位 ——
+    sows.pen_id 只在離乳與離群時被清空,沒有人寫入過,所以「還空著哪幾欄」
+    永遠是列出全部欄位,等於沒有資訊。
+    """
 
-    def test_reports_which_pens_are_free(self):
-        r = pen_pressure([sow(1, "1183", pen_id=1)], [], self.PENS, date(2026, 3, 1))
-        assert r["occupied"] == 1
-        assert [p["name"] for p in r["free"]] == ["A-02"]
+    TWO = {"farrowing_pens": 2}
 
     def test_counts_sows_due_to_move_in(self):
         mated = date(2026, 3, 1) - timedelta(days=114 - 14)
         r = pen_pressure([sow(1, "1183"), sow(2, "2580")],
                          [ev(1, "MT", mated), ev(2, "MT", mated)],
-                         self.PENS, date(2026, 3, 1))
+                         date(2026, 3, 1), self.TWO)
         assert r["incoming"] == 2
         assert r["short_by"] == 0
 
@@ -221,9 +221,41 @@ class TestPenPressure:
         mated = date(2026, 3, 1) - timedelta(days=114 - 14)
         sows = [sow(i, str(i)) for i in range(1, 4)]
         events = [ev(i, "MT", mated) for i in range(1, 4)]
-        r = pen_pressure(sows, events, self.PENS, date(2026, 3, 1))
+        r = pen_pressure(sows, events, date(2026, 3, 1), self.TWO)
         assert r["incoming"] == 3
         assert r["short_by"] == 1
+
+    def test_lactating_sows_occupy_a_pen(self):
+        """分娩了還沒離乳的母豬正佔著一個產房位,那才是真正的佔用。
+        原本是數 sows.pen_id,而那個欄位從來沒被寫入過,所以永遠是 0。
+        """
+        r = pen_pressure([sow(1, "1183")], [ev(1, "FW", date(2026, 2, 25))],
+                         date(2026, 3, 1), self.TWO)
+        assert r["occupied"] == 1
+        assert r["free"] == 1
+
+    def test_weaned_sow_frees_the_pen(self):
+        events = [ev(1, "FW", date(2026, 2, 1)), ev(1, "WN", date(2026, 2, 23))]
+        r = pen_pressure([sow(1, "1183")], events, date(2026, 3, 1), self.TWO)
+        assert r["occupied"] == 0
+        assert r["free"] == 2
+
+    def test_zero_means_unset_not_no_pens(self):
+        """0 = 還沒設定。不知道容量時不可以宣稱空間不足 —— 那是憑空
+        捏造的警示(憲法第三條)。
+        """
+        mated = date(2026, 3, 1) - timedelta(days=114 - 14)
+        sows = [sow(i, str(i)) for i in range(1, 4)]
+        events = [ev(i, "MT", mated) for i in range(1, 4)]
+        r = pen_pressure(sows, events, date(2026, 3, 1), {"farrowing_pens": 0})
+        assert r["configured"] is False
+        assert r["incoming"] == 3      # 進來幾頭照算,那不需要知道容量
+        assert r["short_by"] == 0      # 但不宣稱缺幾欄
+
+    def test_configured_flag_is_true_once_set(self):
+        r = pen_pressure([], [], date(2026, 3, 1), self.TWO)
+        assert r["configured"] is True
+        assert r["total"] == 2
 
 
 class TestSettingsOverride:
@@ -306,7 +338,7 @@ class TestNegativePregnancyCheck:
         mated = date(2026, 3, 1) - timedelta(days=114 - 14)
         events = [ev(1, "MT", mated),
                   ev(1, "PD", mated + timedelta(days=26), {"positive": False})]
-        r = pen_pressure([sow()], events, [{"id": 1, "name": "A-01"}], date(2026, 3, 1))
+        r = pen_pressure([sow()], events, date(2026, 3, 1), {"farrowing_pens": 1})
         assert r["incoming"] == 0
 
 

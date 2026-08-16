@@ -242,23 +242,38 @@ describe("工作分組", () => {
 });
 
 describe("提醒排序與內容", () => {
+  // 產房容量是設定裡的一個總數,configured=false 代表還沒設定。
   const data = (over = {}) => ({
-    pens: { free: [], incoming: 0, short_by: 0 },
+    pens: { configured: true, total: 10, occupied: 0, free: 10,
+            incoming: 0, short_by: 0 },
     openSows: [],
     ...over,
   });
 
-  it("沒事就沒有提醒", () => {
-    assert.deepEqual(buildAlerts(data()), []);
+  it("沒事就只有「還有空位」這則好消息", () => {
+    const rows = buildAlerts(data());
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].tone, "ok");
   });
 
   it("產房不足排在最前面", () => {
     const rows = buildAlerts(data({
-      pens: { free: [], incoming: 48, short_by: 48 },
+      pens: { configured: true, total: 10, occupied: 10, free: 0,
+              incoming: 48, short_by: 48 },
       openSows: [{ earTag: "1013", days: 607 }],
     }));
     assert.equal(rows[0].title, "產房空間不足");
     assert.equal(rows[0].tone, "urgent");
+  });
+
+  it("還沒設定總產房數量時,不宣稱空間夠或不夠,而是提示去設定", () => {
+    // 不知道容量就說不知道 —— 憑空給一個「空間不足」是捏造的警示
+    const rows = buildAlerts({ pens: { configured: false, total: 0, occupied: 0,
+                                       free: 0, incoming: 43, short_by: 0 },
+                               openSows: [] });
+    assert.equal(rows.length, 1);
+    assert.ok(rows[0].title.includes("尚未設定"));
+    assert.doesNotMatch(rows.map((r) => r.title).join(), /空間不足/);
   });
 
   it("逾期未配種列出頭數與最久天數", () => {
@@ -276,9 +291,13 @@ describe("提醒排序與內容", () => {
     assert.ok(camel[0].sub.includes("1013"));
   });
 
-  it("有空欄時是好消息,不用急迫色", () => {
-    const rows = buildAlerts(data({ pens: { free: [{ name: "A-01" }], incoming: 0, short_by: 0 } }));
+  it("有空位時是好消息,不用急迫色", () => {
+    const rows = buildAlerts(data({
+      pens: { configured: true, total: 10, occupied: 3, free: 7,
+              incoming: 0, short_by: 0 },
+    }));
     assert.equal(rows[0].tone, "ok");
+    assert.ok(rows[0].right.includes("7"));
   });
 
   it("缺漏欄位不會炸掉整頁", () => {

@@ -176,13 +176,14 @@ export function taskGroup(group, index) {
 // 提醒。依急迫度排序,產房不足與逾期未配種排最前面。
 export function buildAlerts(data) {
   const rows = [];
-  const pens = data.pens || { free: [], incoming: 0, short_by: 0 };
+  const pens = data.pens || {};
+  const free = pens.free ?? 0;
   const short = pens.short_by ?? pens.shortBy ?? 0;
   const open = data.openSows || [];
 
   if (short > 0) {
     rows.push({ tone: "urgent", title: "產房空間不足",
-                sub: `14 天內 ${pens.incoming} 頭要移入,只剩 ${pens.free.length} 欄`,
+                sub: `14 天內 ${pens.incoming} 頭要移入,只剩 ${free} 欄`,
                 right: `缺 ${short} 欄` });
   }
   if (open.length) {
@@ -190,10 +191,16 @@ export function buildAlerts(data) {
                 sub: open.slice(0, 4).map((r) => r.ear_tag ?? r.earTag).join("、"),
                 right: `最久 ${open[0].days} 天` });
   }
-  if (pens.free.length) {
-    rows.push({ tone: "ok", title: "產房尚有空欄",
-                sub: pens.free.slice(0, 6).map((p) => p.name).join("、"),
-                right: `${pens.free.length} 欄` });
+  // 還沒設定總產房數量時不能宣稱空間夠或不夠 —— 不知道就說不知道,
+  // 順便告訴使用者去哪裡設定。
+  if (!pens.configured) {
+    rows.push({ tone: "soon", title: "尚未設定總產房數量",
+                sub: "到「設定 → 生產參數」填寫後,才能提醒產房空間夠不夠",
+                right: "" });
+  } else if (free > 0) {
+    rows.push({ tone: "ok", title: "產房尚有空位",
+                sub: `共 ${pens.total} 欄,目前 ${pens.occupied} 欄有母豬在哺乳`,
+                right: `空 ${free} 欄` });
   }
   return rows;
 }

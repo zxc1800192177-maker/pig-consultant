@@ -32,6 +32,10 @@ DEFAULTS = {
     "preg_check_days": 26,        # 配種 → 驗孕
     "open_sow_alert_days": 30,    # 離乳/驗孕陰性後多久沒動作要提醒
 
+    # 總產房數量。**0 代表還沒設定**,不是「一欄都沒有」—— 不知道容量時
+    # 不可以宣稱空間不足(見 pen_pressure)。
+    "farrowing_pens": 0,
+
     # 「值得檢視」的判準。門檻量自這個牧場的實際分布(451 頭在場母豬):
     #
     #   連續下滑胎數   下滑 2 胎 20 頭、3 胎 2 頭 → 取 2 才有意義的名單長度
@@ -85,6 +89,7 @@ SETTING_RANGES = {
     "service_after_wean_days": (0, 60),
     "preg_check_days": (14, 60),
     "open_sow_alert_days": (7, 180),
+    "farrowing_pens": (0, 2000),   # 0 = 還沒設定
     "review_decline_litters": (1, 10),
     "review_npd_days": (10, 200),
     "review_low_alive_pct": (1, 50),
@@ -676,35 +681,47 @@ def sows_worth_review(sows: Iterable[dict], events: Iterable[dict], today: date,
     return out
 
 
-def pen_pressure(sows: Iterable[dict], events: Iterable[dict], pens: List[dict],
+def pen_pressure(sows: Iterable[dict], events: Iterable[dict],
                  today: date, settings: Optional[dict] = None) -> dict:
     """產房空間是否夠用。
 
-    逐欄位追蹤(使用者選擇),所以除了「夠不夠」還回傳**還空著哪幾欄** ——
-    只給一個「不足」的布林值,牧場主還是得自己去數。
+    容量是設定裡的**一個總數**(`farrowing_pens`)。原本設計成逐欄位追蹤,
+    但實際上從來沒有任何地方把母豬指派到特定欄位 —— `sows.pen_id` 只在
+    離乳與離群時被清空,沒有人寫入過,所以「還空著哪幾欄」永遠是列出全部
+    欄位,等於沒有資訊。改成總數之後,牧場主只要填一個數字就能用。
+
+    **`farrowing_pens` 為 0 代表還沒設定,不是「一欄都沒有」。** 不知道
+    容量時不可以宣稱空間不足 —— 那會是憑空捏造的警示(憲法第三條)。
     """
     cfg = settings_with_defaults(settings)
     grouped = _by_sow(events)
 
-    occupied = {s["pen_id"] for s in sows if s.get("pen_id")}
-    free = [p for p in pens if p["id"] not in occupied]
+    total = cfg["farrowing_pens"]
+    configured = total > 0
 
     horizon = today + timedelta(days=cfg["pre_farrow_move_days"])
     incoming = 0
+    occupied = 0
     for sow in sows:
-        if sow.get("status") not in (None, "active") or sow.get("pen_id"):
+        if sow.get("status") not in (None, "active"):
             continue
         c = current_cycle(grouped.get(sow["id"], []))
+        # 已經在產房裡的:分娩了還沒離乳,那頭豬正佔著一個欄位。
+        if c["farrow"] and not c["wean"]:
+            occupied += 1
+            continue
         if c["mate"] and not c["farrow"]:
             due = c["mate"] + timedelta(days=cfg["gestation_days"]
                                         - cfg["pre_farrow_move_days"])
             if today <= due <= horizon:
                 incoming += 1
 
+    free = max(0, total - occupied)
     return {
-        "total": len(pens),
-        "occupied": len(occupied),
-        "free": [{"id": p["id"], "name": p["name"]} for p in free],
+        "configured": configured,
+        "total": total,
+        "occupied": occupied,
+        "free": free,
         "incoming": incoming,
-        "short_by": max(0, incoming - len(free)),
+        "short_by": max(0, incoming - free) if configured else 0,
     }
