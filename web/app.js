@@ -11,7 +11,8 @@ import {
 import { SseParser } from "./lib/sse.js";
 import { addFactor, removeFactor } from "./lib/factors.js";
 import {
-  alertRow, buildAlerts, eventName, eventRow, formatWeek, performanceGrid,
+  alertRow, buildAlerts, customTaskRow, customTaskSetting, eventName, eventRow,
+  formatWeek, performanceGrid,
   pendingCheckRow, reviewRow, settingRow, shiftDate, sowRow, statusPills, taskGroup,
   timelineCaption, TIMELINE_LIMIT, visibleEvents,
 } from "./lib/v2.js";
@@ -68,6 +69,7 @@ async function refreshAccount() {
   await Promise.all([
     reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
     reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(),
+    reloadCustomTaskSettings(),
   ]);
 }
 
@@ -461,6 +463,7 @@ async function init() {
     await Promise.all([
       reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
       reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(),
+    reloadCustomTaskSettings(),
     ]);
   }
 }
@@ -823,6 +826,21 @@ async function reloadTasks() {
 
   wrap.innerHTML = data.groups.map(taskGroup).join("")
     || '<p class="hint">這週沒有工作。母豬資料還是空的話,可以到「設定」匯入。</p>';
+
+  // 自訂工作:整張卡片在沒有排到任何一項時收起來,不留一個空框。
+  const custom = data.custom || [];
+  $("customTaskCard")?.classList.toggle("is-hidden", custom.length === 0);
+  const box = $("customTasks");
+  if (box) box.innerHTML = custom.map(customTaskRow).join("");
+}
+
+async function toggleCustomTask(taskId, due, done) {
+  const { ok, data } = await api("/api/custom-tasks/done",
+                                 postJson({ taskId, due, done }));
+  if (!ok) {
+    showBanner(data.error || "標記失敗", "warn");
+    await reloadTasks();          // 勾選框已經被瀏覽器改掉了,重畫回真實狀態
+  }
 }
 
 // ── 提醒 ──
@@ -1308,6 +1326,45 @@ async function saveSettings() {
 
 let settingFields = [];
 
+// ── 自訂工作(設定頁) ──
+
+async function reloadCustomTaskSettings() {
+  const card = $("customSetCard");
+  if (!card || !account.loggedIn) return;
+  // 跟其他設定一樣是牧場主的事 —— 員工在「工作」頁看得到、勾得動,
+  // 但不能新增或刪除。
+  card.classList.toggle("is-hidden", !account.isOwner);
+  if (!account.isOwner) return;
+
+  const { ok, data } = await api("/api/custom-tasks");
+  if (!ok) return;
+  $("customTaskList").innerHTML = data.tasks.map(customTaskSetting).join("")
+    || '<p class="hint">還沒有自訂工作。</p>';
+}
+
+async function addCustomTask() {
+  const name = ($("ctaskName")?.value || "").trim();
+  const startDate = $("ctaskStart")?.value;
+  const repeat = $("ctaskRepeat")?.value || "once";
+
+  if (!name) return showBanner("請填寫工作名稱", "warn");
+  if (!startDate) return showBanner("請選擇起始日期", "warn");
+
+  const { ok, data } = await api("/api/custom-tasks",
+                                 postJson({ name, startDate, repeat }));
+  if (!ok) return showBanner(data.error || "新增失敗", "warn");
+
+  $("ctaskName").value = "";
+  showBanner(`已新增「${name}」`, "ok");
+  await Promise.all([reloadCustomTaskSettings(), reloadTasks()]);
+}
+
+async function deleteCustomTask(taskId) {
+  const { ok, data } = await api(`/api/custom-tasks/${taskId}`, { method: "DELETE" });
+  if (!ok) return showBanner(data.error || "刪除失敗", "warn");
+  await Promise.all([reloadCustomTaskSettings(), reloadTasks()]);
+}
+
 
 // 分段按鈕、chip、收回、記錄 —— 全部走事件委派,因為這些元素是動態畫的。
 document.addEventListener("click", (e) => {
@@ -1329,9 +1386,23 @@ document.addEventListener("click", (e) => {
   const undo = e.target.closest("[data-undo]");
   if (undo) return undoRecord(Number(undo.dataset.undo), Number(undo.dataset.sow));
 
+  const delTask = e.target.closest("[data-del-task]");
+  if (delTask) return deleteCustomTask(Number(delTask.dataset.delTask));
+
   if (e.target.id === "recCancel") return closeRecordForm();
   if (e.target.id === "recSubmit") return submitRecord();
   if (e.target.id === "setSave") return saveSettings();
+  if (e.target.id === "ctaskAdd") return addCustomTask();
+});
+
+// 勾選框走 change 而不是 click —— click 在鍵盤操作與部分輔助技術下不會
+// 觸發,那些使用者會勾得動卻存不進去。
+document.addEventListener("change", (e) => {
+  const box = e.target.closest(".ctask-box");
+  if (box) {
+    toggleCustomTask(Number(box.dataset.task), box.dataset.due, box.checked);
+    box.closest(".ctask")?.classList.toggle("is-done", box.checked);
+  }
 });
 
 // 真的把 App 跑起來。這行漏掉時畫面不會報錯,只是所有標籤停在「載入中…」,

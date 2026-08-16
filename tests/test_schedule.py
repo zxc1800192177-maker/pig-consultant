@@ -1000,3 +1000,113 @@ class TestTodayUsesFarmTimezone:
 
         monkeypatch.setattr(config, "FARM_TIMEZONE", "Not/AZone")
         assert server._today() == datetime.now(timezone.utc).date()
+
+
+class TestCustomTaskDates:
+    """自訂工作的重複規則展開成這一週的日期。"""
+
+    MON = date(2026, 8, 17)          # 週一
+    SUN = date(2026, 8, 23)          # 週日
+
+    @staticmethod
+    def task(start, rule="once", name="消毒", tid=1):
+        return {"id": tid, "name": name, "start_date": start, "repeat_rule": rule}
+
+    def _dates(self, task):
+        return schedule.custom_task_dates(task, self.MON, self.SUN)
+
+    # --- once ---
+    def test_once_inside_the_week(self):
+        assert self._dates(self.task(date(2026, 8, 19))) == [date(2026, 8, 19)]
+
+    def test_once_outside_the_week(self):
+        assert self._dates(self.task(date(2026, 8, 10))) == []
+        assert self._dates(self.task(date(2026, 9, 1))) == []
+
+    def test_once_on_the_week_boundaries_counts(self):
+        assert self._dates(self.task(self.MON)) == [self.MON]
+        assert self._dates(self.task(self.SUN)) == [self.SUN]
+
+    # --- weekly ---
+    def test_weekly_repeats_on_the_same_weekday(self):
+        # 起始日是 8/5(週三),這一週的週三是 8/19
+        assert self._dates(self.task(date(2026, 8, 5), "weekly")) == [date(2026, 8, 19)]
+
+    def test_weekly_starting_this_week(self):
+        assert self._dates(self.task(date(2026, 8, 19), "weekly")) == [date(2026, 8, 19)]
+
+    def test_weekly_before_the_start_date_does_not_appear(self):
+        """設定「從下個月開始每週消毒」時,這個月不該冒出來。"""
+        assert self._dates(self.task(date(2026, 9, 2), "weekly")) == []
+
+    def test_weekly_appears_every_week_not_just_the_first(self):
+        """跨好幾週之後仍然要出現 —— 不是只有起始那一週。"""
+        task = self.task(date(2026, 1, 7), "weekly")     # 很久以前的週三
+        assert schedule.custom_task_dates(task, self.MON, self.SUN) == [date(2026, 8, 19)]
+
+    # --- monthly ---
+    def test_monthly_repeats_on_the_same_day_of_month(self):
+        task = self.task(date(2026, 3, 20), "monthly")
+        assert schedule.custom_task_dates(task, self.MON, self.SUN) == [date(2026, 8, 20)]
+
+    def test_monthly_outside_the_week(self):
+        task = self.task(date(2026, 3, 5), "monthly")    # 每月 5 號
+        assert schedule.custom_task_dates(task, self.MON, self.SUN) == []
+
+    def test_monthly_on_the_31st_falls_back_in_short_months(self):
+        """「每月 31 號」在 2 月、4 月這種月份要退到當月最後一天,
+        不能因為 2 月 31 日不存在就整個炸掉。
+        """
+        task = self.task(date(2026, 1, 31), "monthly")
+        # 2026-02 只有 28 天
+        got = schedule.custom_task_dates(task, date(2026, 2, 23), date(2026, 3, 1))
+        assert got == [date(2026, 2, 28)]
+
+    def test_monthly_does_not_crash_on_any_month(self):
+        task = self.task(date(2026, 1, 31), "monthly")
+        for month in range(1, 13):
+            start = date(2026, month, 1)
+            schedule.custom_task_dates(task, start, start + timedelta(days=6))
+
+    # --- 防呆 ---
+    def test_unknown_rule_shows_nothing_rather_than_guessing(self):
+        assert self._dates(self.task(self.MON, "每三天")) == []
+
+    def test_missing_rule_defaults_to_once(self):
+        task = {"id": 1, "name": "消毒", "start_date": date(2026, 8, 19)}
+        assert schedule.custom_task_dates(task, self.MON, self.SUN) == [date(2026, 8, 19)]
+
+
+class TestBuildCustomTasks:
+    MON = date(2026, 8, 17)
+    SUN = date(2026, 8, 23)
+
+    def test_marks_which_occurrences_are_done(self):
+        """重複性工作每一次發生各自標記 —— 這週消毒了、上週沒有。"""
+        tasks = [{"id": 1, "name": "消毒", "start_date": date(2026, 8, 5),
+                  "repeat_rule": "weekly"}]
+        done = [{"task_id": 1, "due_date": date(2026, 8, 19)}]
+
+        rows = schedule.build_custom_tasks(tasks, done, self.MON, self.SUN)
+        assert len(rows) == 1
+        assert rows[0]["done"] is True
+
+    def test_a_different_weeks_completion_does_not_leak(self):
+        """上週標了完成,不該讓這週看起來也完成了。"""
+        tasks = [{"id": 1, "name": "消毒", "start_date": date(2026, 8, 5),
+                  "repeat_rule": "weekly"}]
+        done = [{"task_id": 1, "due_date": date(2026, 8, 12)}]     # 上週那次
+
+        rows = schedule.build_custom_tasks(tasks, done, self.MON, self.SUN)
+        assert rows[0]["done"] is False
+
+    def test_sorted_by_date(self):
+        tasks = [
+            {"id": 1, "name": "B 工作", "start_date": date(2026, 8, 21), "repeat_rule": "once"},
+            {"id": 2, "name": "A 工作", "start_date": date(2026, 8, 18), "repeat_rule": "once"},
+        ]
+        rows = schedule.build_custom_tasks(tasks, [], self.MON, self.SUN)
+        assert [r["name"] for r in rows] == ["A 工作", "B 工作"]
+
+    def test_no_tasks_no_crash(self):
+        assert schedule.build_custom_tasks([], [], self.MON, self.SUN) == []

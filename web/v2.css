@@ -360,6 +360,41 @@ body { padding-bottom: 96px; }
 }
 .set-row.is-changed .set-in input { border-color: var(--accent); }
 
+/* ── 自訂工作 ── */
+.ctask {
+  display: flex; align-items: center; gap: 12px; padding: 12px 0;
+  border-bottom: 1px solid var(--border-light); cursor: pointer;
+}
+.ctask:last-child { border-bottom: none; }
+/* 44px 觸控目標:巡欄時戴著手套單手勾,勾錯就是一筆錯的完成記錄。 */
+.ctask-box { width: 22px; height: 22px; flex-shrink: 0; accent-color: var(--accent); }
+.ctask-b { flex: 1; min-width: 0; }
+.ctask-n { display: block; font-size: 14.5px; font-weight: 600; }
+.ctask-m { display: block; font-size: 12px; color: var(--ink-faint); margin-top: 2px; }
+/* 做完的淡化並劃掉 —— 一眼看得出這週還剩哪幾件沒做。 */
+.ctask.is-done { opacity: .5; }
+.ctask.is-done .ctask-n { text-decoration: line-through; }
+
+.cset {
+  display: flex; align-items: center; gap: 12px; padding: 11px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+.cset:last-of-type { border-bottom: none; }
+.cset-b { flex: 1; min-width: 0; }
+.cset-n { font-size: 14px; font-weight: 600; }
+.cset-m { font-size: 12px; color: var(--ink-faint); margin-top: 2px; }
+.cset .btn-ghost { flex-shrink: 0; min-height: 44px; padding: 10px 14px; }
+
+.ctask-add { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.ctask-add-row { display: flex; gap: 10px; }
+.ctask-add input, .ctask-add select {
+  padding: 11px 13px; font-size: 15px; font-family: inherit;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--ink);
+}
+.ctask-add > input { width: 100%; }
+.ctask-add-row > * { flex: 1; min-width: 0; }
+
 /* ── 匯入 ── */
 .mine {
   display: flex; align-items: center; gap: 11px; padding: 11px 0;

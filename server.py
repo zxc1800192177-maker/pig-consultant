@@ -454,6 +454,8 @@ class Application:
             return self._get_settings(token)
         if route == "/api/boars":
             return self._list_boars(token)
+        if route == "/api/custom-tasks":
+            return self._list_custom_tasks(token)
         if route == "/api/recent-events":
             return self._recent_events(token, path)
         if path == "/api/metrics":
@@ -508,6 +510,10 @@ class Application:
             return self._add_pen(payload, token)
         if path == "/api/boars":
             return self._add_boar(payload, token)
+        if path == "/api/custom-tasks":
+            return self._add_custom_task(payload, token)
+        if path == "/api/custom-tasks/done":
+            return self._toggle_custom_task(payload, token)
         if path == "/api/settings":
             return self._put_settings(payload, token)
         if path == "/api/import/preview":
@@ -536,6 +542,12 @@ class Application:
             if event_id is None:
                 return 400, {"error": "編號格式錯誤"}
             return self._delete_event(token, event_id)
+
+        if path.startswith("/api/custom-tasks/"):
+            task_id = self._path_id(path)
+            if task_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            return self._delete_custom_task(token, task_id)
 
         return 404, {"error": "not found"}
 
@@ -858,6 +870,14 @@ class Application:
         cfg = self._farm_settings(farm_id)
 
         groups = schedule.build_week_tasks(sows, events, start, end, cfg)
+
+        # 自訂工作**分開回傳**(已確認的設計決定)—— 混在 groups 裡的話
+        # 使用者分不出哪些是系統依生產週期推算的、哪些是自己排的。
+        custom = schedule.build_custom_tasks(
+            self.store.list_custom_tasks(farm_id),
+            self.store.list_task_done(farm_id, start, end),
+            start, end)
+
         return 200, {
             "weekStart": start.isoformat(),
             "weekEnd": end.isoformat(),
@@ -868,6 +888,12 @@ class Application:
                             "due": t.due.isoformat(), "why": t.why}
                            for t in g["tasks"]]}
                 for g in groups
+            ],
+            "custom": [
+                {"id": t["id"], "name": t["name"], "repeat": t["repeat"],
+                 "repeatLabel": labels.repeat_label(t["repeat"]),
+                 "due": t["due"].isoformat(), "done": t["done"]}
+                for t in custom
             ],
         }
 
@@ -1029,6 +1055,85 @@ class Application:
             return 400, {"error": f"產房欄位最多 {config.MAX_PENS_PER_FARM} 個"}
         return 200, {"id": self.store.add_pen(
             farm_id, name.strip()[:config.MAX_PEN_NAME_CHARS])}
+
+    def _list_custom_tasks(self, token) -> Tuple[int, dict]:
+        """自訂工作的設定清單(不是這週的排程,那在 /api/tasks)。
+
+        員工看得到 —— 他要知道自己被排了什麼。新增與刪除才限牧場主。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        return 200, {"tasks": [
+            {"id": t["id"], "name": t["name"],
+             "startDate": _iso(t["start_date"]),
+             "repeat": t["repeat_rule"],
+             "repeatLabel": labels.repeat_label(t["repeat_rule"])}
+            for t in self.store.list_custom_tasks(farm_id)
+        ]}
+
+    def _add_custom_task(self, payload, token) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        name = _text(payload.get("name"), config.MAX_TASK_NAME_CHARS)
+        if not name:
+            return 400, {"error": "請填寫工作名稱"}
+
+        start = _date(payload.get("startDate"))
+        if start is None:
+            return 400, {"error": "請選擇起始日期"}
+
+        rule = payload.get("repeat") or "once"
+        if rule not in schedule.REPEAT_RULES:
+            return 400, {"error": f"不認得的重複方式:{rule}"}
+
+        if len(self.store.list_custom_tasks(farm_id)) >= config.MAX_CUSTOM_TASKS_PER_FARM:
+            return 400, {"error": f"自訂工作最多 {config.MAX_CUSTOM_TASKS_PER_FARM} 項"}
+
+        task_id = self.store.add_custom_task(farm_id, name, start, rule)
+        return 200, {"id": task_id}
+
+    def _delete_custom_task(self, token, task_id) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        ok = self.store.delete_custom_task(farm_id, task_id)
+        return (200, {"ok": True}) if ok else (404, {"error": "找不到這項工作"})
+
+    def _toggle_custom_task(self, payload, token) -> Tuple[int, dict]:
+        """把某一次發生標記成完成 / 取消完成。
+
+        **員工也能標** —— 工作就是他在做的,標完成是記錄不是經營決策。
+        帶 due_date 而不是只有 task_id:重複性工作每一次發生各自標記,
+        少了日期就只記得住最後一次(見 db.py 的 custom_task_done)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        task_id = payload.get("taskId")
+        if not isinstance(task_id, int):
+            return 400, {"error": "請指定工作"}
+
+        due = _date(payload.get("due"))
+        if due is None:
+            return 400, {"error": "日期格式錯誤"}
+
+        done = bool(payload.get("done"))
+        ok = (self.store.mark_task_done(farm_id, task_id, due) if done
+              else self.store.unmark_task_done(farm_id, task_id, due))
+        if not ok and done:
+            return 404, {"error": "找不到這項工作"}
+        return 200, {"ok": True, "done": done}
 
     def _list_boars(self, token) -> Tuple[int, dict]:
         """公豬清單。配種記錄要選公豬,所以員工也讀得到。"""

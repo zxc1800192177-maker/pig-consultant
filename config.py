@@ -187,6 +187,8 @@ MAX_PENS_PER_FARM = int(os.environ.get("MAX_PENS_PER_FARM", "500"))
 MAX_EAR_TAG_CHARS = 30
 MAX_BREED_CHARS = 30
 MAX_PEN_NAME_CHARS = 30
+MAX_TASK_NAME_CHARS = 40       # 自訂工作的名稱
+MAX_CUSTOM_TASKS_PER_FARM = 100
 MAX_EVENT_FIELDS = 12          # 單筆事件的 detail 最多幾個欄位
 
 # 紀錄頁的「已記錄」清單。批次生產一週一批,整批同一天記完 —— 一天記

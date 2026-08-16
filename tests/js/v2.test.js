@@ -10,6 +10,8 @@ import {
   TIMELINE_LIMIT,
   alertRow,
   buildAlerts,
+  customTaskRow,
+  customTaskSetting,
   describeEvent,
   eventName,
   eventRow,
@@ -555,5 +557,62 @@ describe("時間軸驗孕記錄一律保留", () => {
   it("沒有驗孕記錄時行為跟原本一樣", () => {
     const events = Array.from({ length: 3 }, (_, i) => mk(i, "MT", i));
     assert.equal(visibleEvents(events, 40).length, 3);
+  });
+});
+
+
+describe("自訂工作", () => {
+  const task = (over = {}) => ({
+    id: 7, name: "產房消毒", due: "2026-08-19", repeat: "weekly",
+    repeatLabel: "每週", done: false, ...over,
+  });
+
+  it("畫出名稱、日期與重複方式", () => {
+    const html = customTaskRow(task());
+    assert.ok(html.includes("產房消毒"));
+    assert.ok(html.includes("08-19"));
+    assert.ok(html.includes("每週"));
+  });
+
+  it("勾選框帶著 id 跟日期 —— 重複性工作每一次發生各自標記", () => {
+    // 只有 id 的話伺服器不知道要標哪一次
+    const html = customTaskRow(task());
+    assert.match(html, /data-task="7"/);
+    assert.match(html, /data-due="2026-08-19"/);
+  });
+
+  it("已完成的打勾並淡化", () => {
+    const html = customTaskRow(task({ done: true }));
+    assert.match(html, /checked/);
+    assert.match(html, /is-done/);
+  });
+
+  it("未完成的不打勾", () => {
+    assert.doesNotMatch(customTaskRow(task()), /checked/);
+  });
+
+  it("名稱有跳脫", () => {
+    assert.doesNotMatch(customTaskRow(task({ name: "<script>x</script>" })), /<script>/);
+  });
+});
+
+describe("自訂工作的設定列", () => {
+  const task = (over = {}) => ({
+    id: 7, name: "產房消毒", startDate: "2026-08-19",
+    repeat: "weekly", repeatLabel: "每週", ...over,
+  });
+
+  it("顯示重複方式與起始日", () => {
+    const html = customTaskSetting(task());
+    assert.ok(html.includes("每週"));
+    assert.ok(html.includes("2026-08-19"));
+  });
+
+  it("刪除鈕帶得到 id", () => {
+    assert.match(customTaskSetting(task()), /data-del-task="7"/);
+  });
+
+  it("名稱有跳脫", () => {
+    assert.doesNotMatch(customTaskSetting(task({ name: "<img src=x>" })), /<img/);
   });
 });

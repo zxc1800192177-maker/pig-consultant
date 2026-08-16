@@ -929,3 +929,166 @@ class TestExitedSowsInReview:
 
         body = app.handle_get("/api/review", token)[1]
         assert body["sows"] == []
+
+
+class TestCustomTasks:
+    """自訂工作:牧場自己排的例行事項(消毒、疫苗、設備檢查)。
+
+    與系統推算的工作**分開回傳** —— 混在一起使用者分不出哪些是系統
+    依生產週期算的、哪些是自己設的。
+    """
+
+    def test_add_then_list(self, farm):
+        app, token, _ = farm
+        assert _post(app, "/api/custom-tasks",
+                     {"name": "產房消毒", "startDate": "2026-08-19",
+                      "repeat": "weekly"}, token)[0] == 200
+
+        tasks = app.handle_get("/api/custom-tasks", token)[1]["tasks"]
+        assert tasks[0]["name"] == "產房消毒"
+        assert tasks[0]["repeat"] == "weekly"
+        assert tasks[0]["repeatLabel"] == "每週"
+
+    def test_name_is_required(self, farm):
+        app, token, _ = farm
+        for bad in ({}, {"name": ""}, {"name": "   "}):
+            payload = {"startDate": "2026-08-19", **bad}
+            assert _post(app, "/api/custom-tasks", payload, token)[0] == 400
+
+    def test_start_date_is_required(self, farm):
+        app, token, _ = farm
+        assert _post(app, "/api/custom-tasks", {"name": "消毒"}, token)[0] == 400
+        assert _post(app, "/api/custom-tasks",
+                     {"name": "消毒", "startDate": "壞掉"}, token)[0] == 400
+
+    def test_unknown_repeat_rule_is_rejected(self, farm):
+        """不認得的規則不猜 —— 存進去之後展開不出日期,工作會安靜消失。"""
+        app, token, _ = farm
+        assert _post(app, "/api/custom-tasks",
+                     {"name": "消毒", "startDate": "2026-08-19",
+                      "repeat": "每三天"}, token)[0] == 400
+
+    def test_repeat_defaults_to_once(self, farm):
+        app, token, _ = farm
+        _post(app, "/api/custom-tasks",
+              {"name": "消毒", "startDate": "2026-08-19"}, token)
+        assert app.handle_get("/api/custom-tasks", token)[1]["tasks"][0]["repeat"] == "once"
+
+    def test_delete(self, farm):
+        app, token, _ = farm
+        task_id = _post(app, "/api/custom-tasks",
+                        {"name": "消毒", "startDate": "2026-08-19"}, token)[1]["id"]
+        assert app.handle_delete(f"/api/custom-tasks/{task_id}", token)[0] == 200
+        assert app.handle_get("/api/custom-tasks", token)[1]["tasks"] == []
+
+    def test_delete_missing_is_404(self, farm):
+        app, token, _ = farm
+        assert app.handle_delete("/api/custom-tasks/999", token)[0] == 404
+
+    def test_worker_can_see_but_not_change(self, farm):
+        """員工要知道自己被排了什麼,但排班是牧場主的事。"""
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        task_id = _post(app, "/api/custom-tasks",
+                        {"name": "消毒", "startDate": "2026-08-19"}, owner)[1]["id"]
+
+        assert app.handle_get("/api/custom-tasks", worker)[0] == 200
+        assert _post(app, "/api/custom-tasks",
+                     {"name": "別的", "startDate": "2026-08-19"}, worker)[0] == 403
+        assert app.handle_delete(f"/api/custom-tasks/{task_id}", worker)[0] == 403
+
+    def test_does_not_leak_across_farms(self, farm):
+        app, a_token, _ = farm
+        b_token = _owner(app, "otherfarm")
+        _post(app, "/api/custom-tasks",
+              {"name": "消毒", "startDate": "2026-08-19"}, a_token)
+        assert app.handle_get("/api/custom-tasks", b_token)[1]["tasks"] == []
+
+
+class TestCustomTasksInTheWeek:
+    """自訂工作要出現在 /api/tasks 的這一週裡,而且跟推算的工作分開。"""
+
+    def _add(self, app, token, **over):
+        payload = {"name": "產房消毒", "startDate": "2026-08-19",
+                   "repeat": "weekly", **over}
+        return _post(app, "/api/custom-tasks", payload, token)[1]["id"]
+
+    def test_appears_in_the_week(self, farm):
+        app, token, _ = farm
+        self._add(app, token)
+        body = app.handle_get("/api/tasks?start=2026-08-17", token)[1]
+        assert [t["name"] for t in body["custom"]] == ["產房消毒"]
+        assert body["custom"][0]["due"] == "2026-08-19"
+
+    def test_kept_separate_from_computed_groups(self, farm):
+        """不可以混進 groups —— 那是系統依生產週期推算的。"""
+        app, token, _ = farm
+        self._add(app, token)
+        body = app.handle_get("/api/tasks?start=2026-08-17", token)[1]
+        assert body["custom"]
+        assert all("產房消毒" not in str(g) for g in body["groups"])
+
+    def test_absent_from_other_weeks(self, farm):
+        app, token, _ = farm
+        self._add(app, token, repeat="once")
+        body = app.handle_get("/api/tasks?start=2026-09-07", token)[1]
+        assert body["custom"] == []
+
+    def test_marking_done_sticks_to_that_occurrence(self, farm):
+        """這週標了完成,下週同一項工作仍是未完成。"""
+        app, token, _ = farm
+        task_id = self._add(app, token)
+
+        assert _post(app, "/api/custom-tasks/done",
+                     {"taskId": task_id, "due": "2026-08-19", "done": True},
+                     token)[0] == 200
+
+        this_week = app.handle_get("/api/tasks?start=2026-08-17", token)[1]["custom"]
+        next_week = app.handle_get("/api/tasks?start=2026-08-24", token)[1]["custom"]
+        assert this_week[0]["done"] is True
+        assert next_week[0]["done"] is False, "下週不該跟著被標成完成"
+
+    def test_unmarking_works(self, farm):
+        app, token, _ = farm
+        task_id = self._add(app, token)
+        _post(app, "/api/custom-tasks/done",
+              {"taskId": task_id, "due": "2026-08-19", "done": True}, token)
+        _post(app, "/api/custom-tasks/done",
+              {"taskId": task_id, "due": "2026-08-19", "done": False}, token)
+
+        body = app.handle_get("/api/tasks?start=2026-08-17", token)[1]
+        assert body["custom"][0]["done"] is False
+
+    def test_marking_twice_is_not_an_error(self, farm):
+        """網路不穩重送一次不該炸 —— 標記是冪等的。"""
+        app, token, _ = farm
+        task_id = self._add(app, token)
+        for _ in range(2):
+            assert _post(app, "/api/custom-tasks/done",
+                         {"taskId": task_id, "due": "2026-08-19", "done": True},
+                         token)[0] == 200
+
+    def test_worker_can_mark_done(self, farm):
+        """工作就是員工在做的,標完成是記錄不是經營決策。"""
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        task_id = self._add(app, owner)
+        assert _post(app, "/api/custom-tasks/done",
+                     {"taskId": task_id, "due": "2026-08-19", "done": True},
+                     worker)[0] == 200
+
+    def test_cannot_mark_another_farms_task(self, farm):
+        app, a_token, _ = farm
+        b_token = _owner(app, "otherfarm")
+        task_id = self._add(app, a_token)
+        assert _post(app, "/api/custom-tasks/done",
+                     {"taskId": task_id, "due": "2026-08-19", "done": True},
+                     b_token)[0] == 404
+
+    def test_bad_payload_is_rejected(self, farm):
+        app, token, _ = farm
+        task_id = self._add(app, token)
+        assert _post(app, "/api/custom-tasks/done",
+                     {"due": "2026-08-19", "done": True}, token)[0] == 400
+        assert _post(app, "/api/custom-tasks/done",
+                     {"taskId": task_id, "due": "壞掉", "done": True}, token)[0] == 400

@@ -98,6 +98,18 @@
       <p class="hint" id="weekSummary"></p>
       <div id="taskGroups"></div>
     </div>
+
+    <!-- 自訂工作與推算的工作分開一張卡片:混在一起使用者分不出哪些是
+         系統依生產週期算的、哪些是自己排的。 -->
+    <div class="card is-hidden" id="customTaskCard">
+      <div class="card-head">
+        <div>
+          <h3>自訂工作</h3>
+          <p class="hint">牧場自己排的例行事項,勾起來表示做完了</p>
+        </div>
+      </div>
+      <div id="customTasks"></div>
+    </div>
   </section>
 
   <!-- ══ 提醒 ══ -->
@@ -232,6 +244,32 @@
         <input type="file" id="importFile" accept=".txt,.csv,text/plain" hidden>
       </div>
       <div id="importResult"></div>
+    </div>
+
+    <div class="card is-hidden" id="customSetCard">
+      <div class="card-head">
+        <div>
+          <h2>自訂工作</h2>
+          <p class="hint">
+            消毒、疫苗、設備檢查這類系統推算不出來的例行事項。
+            設定後會出現在「工作」頁,跟推算的工作分開顯示。
+          </p>
+        </div>
+      </div>
+      <div id="customTaskList"></div>
+      <div class="ctask-add">
+        <input type="text" id="ctaskName" placeholder="工作名稱,例如:產房消毒"
+               maxlength="40">
+        <div class="ctask-add-row">
+          <input type="date" id="ctaskStart">
+          <select id="ctaskRepeat">
+            <option value="once">單次</option>
+            <option value="weekly">每週</option>
+            <option value="monthly">每月</option>
+          </select>
+        </div>
+        <button type="button" class="btn-soft" id="ctaskAdd">新增工作</button>
+      </div>
     </div>
 
     <div class="card" id="setCard">

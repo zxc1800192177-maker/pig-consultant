@@ -323,6 +323,89 @@ def build_week_tasks(sows: Iterable[dict], events: Iterable[dict],
     ]
 
 
+# 自訂工作的重複規則。刻意只有這三種 —— 「每 N 天」「每月第幾個星期二」
+# 這類規則要配一整套介面才講得清楚,而牧場實際會用的就是這幾種
+# (消毒、疫苗、設備檢查)。
+REPEAT_RULES = ("once", "weekly", "monthly")
+
+
+def _add_months(day: date, months: int) -> date:
+    """加幾個月。落在不存在的日子(1/31 + 1 個月)時退到當月最後一天。
+
+    直接算 day.replace(month=...) 會在 2 月 30 日這種日子拋 ValueError,
+    而「每月 31 號消毒」是完全合理的設定 —— 不能因此炸掉整個工作清單。
+    """
+    total = day.month - 1 + months
+    year = day.year + total // 12
+    month = total % 12 + 1
+    # 下個月的第一天往回退一天 = 這個月的最後一天
+    if month == 12:
+        last = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last = date(year, month + 1, 1) - timedelta(days=1)
+    return date(year, month, min(day.day, last.day))
+
+
+def custom_task_dates(task: dict, week_start: date, week_end: date) -> List[date]:
+    """這件自訂工作在這一週會發生的日期。
+
+    起始日之前不算 —— 設定「從下個月開始每週消毒」時,這個月不該冒出來。
+
+    回傳清單而不是單一日期:一週剛好跨到兩次的規則(例如每月 1 號與
+    31 號之間的月份邊界)不該只算到一次。實務上 weekly/monthly 一週最多
+    一次,但讓呼叫端不必假設這件事。
+    """
+    start = task["start_date"]
+    rule = task.get("repeat_rule") or "once"
+    if start > week_end:
+        return []
+
+    if rule == "once":
+        return [start] if week_start <= start <= week_end else []
+
+    if rule == "weekly":
+        # 對齊到同一個星期幾,再往前推到這一週
+        offset = (week_start - start).days % 7
+        first = week_start + timedelta(days=(7 - offset) % 7)
+        return [first] if first <= week_end else []
+
+    if rule == "monthly":
+        out = []
+        # 從起始日所在的月份往後掃,最多掃到週末所在月份的下一個月
+        cursor = start
+        while cursor <= week_end:
+            if cursor >= week_start:
+                out.append(cursor)
+            cursor = _add_months(start, (cursor.year - start.year) * 12
+                                 + cursor.month - start.month + 1)
+        return out
+
+    return []      # 不認得的規則不猜,寧可不顯示也不要顯示錯的
+
+
+def build_custom_tasks(tasks: Iterable[dict], done: Iterable[dict],
+                       week_start: date, week_end: date) -> List[dict]:
+    """這一週的自訂工作,含每一次是否已完成。
+
+    **與系統推算的工作分開回傳**(已確認的設計決定)—— 推算出來的是
+    系統依生產週期算的,自訂的是牧場自己排的,混在一起使用者分不出
+    哪些是系統說的、哪些是自己設的。
+    """
+    marked = {(d["task_id"], d["due_date"]) for d in done}
+    out = []
+    for task in tasks:
+        for due in custom_task_dates(task, week_start, week_end):
+            out.append({
+                "id": task["id"],
+                "name": task["name"],
+                "repeat": task.get("repeat_rule") or "once",
+                "due": due,
+                "done": (task["id"], due) in marked,
+            })
+    out.sort(key=lambda t: (t["due"], t["name"]))
+    return out
+
+
 def overdue_sows(sows: Iterable[dict], events: Iterable[dict], today: date,
                  settings: Optional[dict] = None) -> List[dict]:
     """離乳或驗孕陰性後太久沒有下一步動作的母豬。

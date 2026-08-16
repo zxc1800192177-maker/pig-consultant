@@ -103,6 +103,15 @@ def task_label(kind: str) -> str:
     return TASK_LABELS.get(kind, kind)
 
 
+# 自訂工作的重複規則。只有這三種 —— 「每 N 天」這類規則要配一整套介面
+# 才講得清楚,而牧場實際會用的就是這幾種(消毒、疫苗、設備檢查)。
+REPEAT_LABELS = {"once": "單次", "weekly": "每週", "monthly": "每月"}
+
+
+def repeat_label(rule: str) -> str:
+    return REPEAT_LABELS.get(rule, rule)
+
+
 # 母豬目前狀態。「配種待驗孕」與「懷孕中」刻意分開 —— 配種了不等於懷孕,
 # 這個場目前有 50 頭驗孕陰性。混為一談會讓畫面宣稱一件還沒確認的事。
 SOW_STATE_LABELS = {

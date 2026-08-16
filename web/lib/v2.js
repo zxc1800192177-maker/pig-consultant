@@ -173,6 +173,41 @@ export function taskGroup(group, index) {
     </div>`;
 }
 
+/** 自訂工作的一列。
+ *
+ * 跟推算出來的工作長得不一樣是刻意的:這些是牧場自己排的例行事項,
+ * 有勾選框可以標完成;推算的工作是「記錄即完成」,沒有勾選框
+ * (已確認的設計決定)。
+ *
+ * `due` 一起帶在按鈕上 —— 重複性工作每一次發生各自標記,只有 id
+ * 的話伺服器不知道要標哪一次。
+ */
+export function customTaskRow(task) {
+  return `
+    <label class="ctask${task.done ? " is-done" : ""}">
+      <input type="checkbox" class="ctask-box" data-task="${task.id}"
+             data-due="${escapeHtml(task.due)}"${task.done ? " checked" : ""}>
+      <span class="ctask-b">
+        <span class="ctask-n">${escapeHtml(task.name)}</span>
+        <span class="ctask-m">${escapeHtml(task.due.slice(5))}
+          ・ ${escapeHtml(task.repeatLabel || "")}</span>
+      </span>
+    </label>`;
+}
+
+/** 設定頁裡那份自訂工作清單(不是這週的排程)。 */
+export function customTaskSetting(task) {
+  return `
+    <div class="cset">
+      <div class="cset-b">
+        <div class="cset-n">${escapeHtml(task.name)}</div>
+        <div class="cset-m">${escapeHtml(task.repeatLabel || "")}
+          ・ ${escapeHtml(task.startDate)} 起</div>
+      </div>
+      <button type="button" class="btn-ghost" data-del-task="${task.id}">刪除</button>
+    </div>`;
+}
+
 // 提醒。依急迫度排序,產房不足與逾期未配種排最前面。
 export function buildAlerts(data) {
   const rows = [];
