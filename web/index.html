@@ -234,6 +234,24 @@
       <div id="importResult"></div>
     </div>
 
+    <div class="card is-hidden" id="penCard">
+      <div class="card-head">
+        <div>
+          <h2>產房欄位</h2>
+          <p class="hint">
+            逐欄位追蹤,提醒才能告訴你「還空著哪幾欄」,不是只給一個
+            空間不足的警示。
+          </p>
+        </div>
+        <span class="cnt" id="penCount"></span>
+      </div>
+      <div class="pen-add-row">
+        <input type="number" id="penTarget" min="1" inputmode="numeric" placeholder="目標總數">
+        <button type="button" class="btn-soft" id="penSetCount">新增到這個數量</button>
+      </div>
+      <p class="hint">只會增加,不會減少 —— 少開的欄位可能已經有母豬在裡面,要減少請個別處理。</p>
+    </div>
+
     <div class="card" id="setCard">
       <div class="card-head">
         <div>

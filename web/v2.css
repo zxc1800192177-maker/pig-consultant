@@ -360,6 +360,16 @@ body { padding-bottom: 96px; }
 }
 .set-row.is-changed .set-in input { border-color: var(--accent); }
 
+/* ── 產房欄位 ── */
+.pen-add-row { display: flex; gap: 10px; margin-top: 14px; }
+.pen-add-row input {
+  width: 100px; padding: 11px 13px; font-size: 15px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.pen-add-row .btn-soft { flex: 1; }
+
 /* ── 匯入 ── */
 .mine {
   display: flex; align-items: center; gap: 11px; padding: 11px 0;

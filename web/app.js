@@ -67,7 +67,7 @@ async function refreshAccount() {
   // 使用者的資料 —— 跨牧場的資料外洩就是這樣發生的。
   await Promise.all([
     reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
-    reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(),
+    reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(), reloadPens(),
   ]);
 }
 
@@ -460,7 +460,7 @@ async function init() {
     applyLoginGate();
     await Promise.all([
       reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
-      reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(),
+      reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(), reloadPens(),
     ]);
   }
 }
@@ -1303,6 +1303,37 @@ async function saveSettings() {
 
 let settingFields = [];
 
+// ── 產房欄位 ──
+
+async function reloadPens() {
+  const card = $("penCard");
+  if (!card || !account.loggedIn) return;
+  // 跟其他設定項目同一個權限:員工看不到 setCard,產房欄位也一樣不給看,
+  // 不必為此多打一次 API 來判斷。
+  card.classList.toggle("is-hidden", !account.isOwner);
+  if (!account.isOwner) return;
+
+  const { ok, data } = await api("/api/pens");
+  if (!ok) return;
+  $("penCount").textContent = `目前 ${data.pens.length} 欄`;
+}
+
+async function setPenCount() {
+  const raw = $("penTarget")?.value;
+  const target = Number(raw);
+  if (!raw || !Number.isInteger(target) || target < 1) {
+    return showBanner("請填一個正整數", "warn");
+  }
+
+  const { ok, data } = await api("/api/pens/count", postJson({ count: target }));
+  if (!ok) return showBanner(data.error || "設定失敗", "warn");
+
+  $("penTarget").value = "";
+  showBanner(`已新增 ${data.added} 欄,共 ${data.total} 欄`, "ok");
+  // 產房數量變了,提醒裡的空間不足判斷要跟著重算。
+  await Promise.all([reloadPens(), reloadAlerts()]);
+}
+
 // 分段按鈕、chip、收回、記錄 —— 全部走事件委派,因為這些元素是動態畫的。
 document.addEventListener("click", (e) => {
   const seg = e.target.closest(".seg-b");
@@ -1326,6 +1357,7 @@ document.addEventListener("click", (e) => {
   if (e.target.id === "recCancel") return closeRecordForm();
   if (e.target.id === "recSubmit") return submitRecord();
   if (e.target.id === "setSave") return saveSettings();
+  if (e.target.id === "penSetCount") return setPenCount();
 });
 
 // 真的把 App 跑起來。這行漏掉時畫面不會報錯,只是所有標籤停在「載入中…」,

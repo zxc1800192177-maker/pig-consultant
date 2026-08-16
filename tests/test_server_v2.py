@@ -232,6 +232,75 @@ class TestOwnerOnly:
                      {"content": "1183|MT|20260203"}, owner)[0] == 200
 
 
+class TestSetPenCount:
+    """設定頁的「產房數量」。逐欄位單獨新增對一次要開 20、30 欄的牧場
+    太繁瑣,這裡改成填目標數字,系統自動補上差額、自動編號。
+    """
+
+    def test_creates_pens_up_to_the_target(self, farm):
+        app, token, _ = farm
+        status, body = _post(app, "/api/pens/count", {"count": 5}, token)
+        assert status == 200
+        assert body == {"added": 5, "total": 5}
+        assert len(app.handle_get("/api/pens", token)[1]["pens"]) == 5
+
+    def test_only_adds_the_difference_when_some_already_exist(self, farm):
+        app, token, _ = farm
+        _post(app, "/api/pens", {"name": "A-01"}, token)
+        _post(app, "/api/pens", {"name": "A-02"}, token)
+        status, body = _post(app, "/api/pens/count", {"count": 5}, token)
+        assert status == 200
+        assert body == {"added": 3, "total": 5}
+
+    def test_auto_generated_names_do_not_collide_with_existing_ones(self, farm):
+        """既有欄位剛好叫「1」的話,自動編號要跳過它,不能撞名。"""
+        app, token, _ = farm
+        _post(app, "/api/pens", {"name": "1"}, token)
+        _post(app, "/api/pens/count", {"count": 3}, token)
+        names = {p["name"] for p in app.handle_get("/api/pens", token)[1]["pens"]}
+        assert len(names) == 3          # 沒有因為撞名而少生出一個
+
+    def test_refuses_to_shrink(self, farm):
+        """只會增加不會減少 —— 少開的那幾欄可能已經有母豬指定在裡面。"""
+        app, token, _ = farm
+        _post(app, "/api/pens/count", {"count": 10}, token)
+        status, body = _post(app, "/api/pens/count", {"count": 5}, token)
+        assert status == 400
+        assert len(app.handle_get("/api/pens", token)[1]["pens"]) == 10
+
+    def test_equal_to_current_count_is_also_refused(self, farm):
+        app, token, _ = farm
+        _post(app, "/api/pens/count", {"count": 10}, token)
+        assert _post(app, "/api/pens/count", {"count": 10}, token)[0] == 400
+
+    def test_rejects_non_integer(self, farm):
+        app, token, _ = farm
+        for bad in ("10", 10.5, None, True):
+            assert _post(app, "/api/pens/count", {"count": bad}, token)[0] == 400, bad
+
+    def test_rejects_zero_or_negative(self, farm):
+        app, token, _ = farm
+        assert _post(app, "/api/pens/count", {"count": 0}, token)[0] == 400
+        assert _post(app, "/api/pens/count", {"count": -1}, token)[0] == 400
+
+    def test_rejects_over_the_farm_limit(self, farm):
+        app, token, _ = farm
+        status, body = _post(app, "/api/pens/count",
+                             {"count": config.MAX_PENS_PER_FARM + 1}, token)
+        assert status == 400
+
+    def test_worker_cannot_set_pen_count(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        assert _post(app, "/api/pens/count", {"count": 5}, worker)[0] == 403
+
+    def test_does_not_leak_across_farms(self, farm):
+        app, a_token, _ = farm
+        b_token = _owner(app, "otherfarm")
+        _post(app, "/api/pens/count", {"count": 5}, a_token)
+        assert app.handle_get("/api/pens", b_token)[1]["pens"] == []
+
+
 class TestWorkerCanFixOwnMistake:
     """手誤很常見。完全不能改的話,實務上會變成「先不記、等老闆來」——
     反而遺失資料(憲法第十一條第 5 款)。
