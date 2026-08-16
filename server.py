@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from http.cookies import SimpleCookie
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
 
 import config
@@ -46,10 +47,19 @@ from core import labels
 from core.metrics import validate
 
 def _today() -> date:
-    """伺服器的「今天」。**只有這裡取得當下日期** —— schedule.py 與
+    """牧場當地的「今天」。**只有這裡取得當下日期** —— schedule.py 與
     importer.py 都不自己取,一律由呼叫端傳入,測試才能固定日期斷言。
+
+    **用牧場時區,不是 UTC。** 正式站跑在 UTC 的機器上,取 UTC 日期的話,
+    台灣時間半夜 12 點到早上 8 點之間系統會以為還是昨天 —— 清晨看工作
+    清單會看到上一週的工作,而豬場的班表正好從清晨開始。
+
+    時區設錯或缺 tzdata 時退回 UTC:寧可日期偏一點,也不要整個服務起不來。
     """
-    return datetime.now(timezone.utc).date()
+    try:
+        return datetime.now(ZoneInfo(config.FARM_TIMEZONE)).date()
+    except Exception:
+        return datetime.now(timezone.utc).date()
 
 
 def _monday(day: date) -> date:

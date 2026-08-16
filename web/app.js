@@ -850,6 +850,9 @@ async function reloadAlerts() {
 let sows = [];
 let allSows = [];
 
+// 母豬清單一次畫幾筆。
+const SOW_LIST_LIMIT = 10;
+
 async function reloadSows() {
   if (!$("sowList") || !account.loggedIn) return;
   const [active, all] = await Promise.all([api("/api/sows"), api("/api/sows?all=1")]);
@@ -879,9 +882,11 @@ function renderSowList() {
       ? "沒有符合的耳號。" : "還沒有母豬資料,可以到「設定」匯入 PigCHAMP 檔案。"}</p>`;
     return;
   }
-  // 只畫前 100 筆:451 頭全畫會讓搜尋時每次輸入都卡一下。
-  list.innerHTML = shown.slice(0, 100).map(sowRow).join("")
-    + (shown.length > 100 ? `<p class="hint">只顯示前 100 頭,請用搜尋縮小範圍。</p>` : "");
+  // 只畫前 10 筆。451 頭全畫會讓搜尋時每次輸入都卡一下,而且捲很久也
+  // 找不到 —— 這份清單的用法是「搜尋耳號找某一頭」,不是從頭讀到尾。
+  list.innerHTML = shown.slice(0, SOW_LIST_LIMIT).map(sowRow).join("")
+    + (shown.length > SOW_LIST_LIMIT
+        ? `<p class="hint">只顯示前 ${SOW_LIST_LIMIT} 頭,請輸入耳號縮小範圍。</p>` : "");
 }
 
 // 目前開著的是哪一頭母豬的卡片。記錄或收回事件之後,若剛好是這一頭,

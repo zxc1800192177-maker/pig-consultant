@@ -173,6 +173,13 @@ PORT = int(os.environ.get("PORT", 8000))
 
 # --- v2:母豬場管理 ---
 #
+# 牧場所在時區。**「今天」要用牧場當地的日期,不是 UTC。**
+#
+# 正式站跑在 UTC 的機器上,原本直接取 UTC 日期 —— 台灣時間半夜 12 點到
+# 早上 8 點之間,系統會以為還是昨天,清晨看工作清單會看到上一週的工作。
+# 豬場的班表本來就從清晨開始,這段時間正是會被用到的時候。
+FARM_TIMEZONE = os.environ.get("FARM_TIMEZONE", "Asia/Taipei")
+
 # 上限比照憲法第九條:用量保護的參數寫在設定,不埋在邏輯深處。
 # 數字參考這個牧場的實際規模(451 頭在場、1,690 頭歷史)並留餘裕。
 MAX_SOWS_PER_FARM = int(os.environ.get("MAX_SOWS_PER_FARM", "5000"))

@@ -11,6 +11,7 @@ from datetime import date, timedelta
 
 import pytest
 
+import config
 import schedule
 from schedule import (
     CHECK_DUE, FARROW_DUE, INDUCE, MATE_DUE, MOVE_IN, WEAN_DUE,
@@ -957,3 +958,45 @@ class TestExitedSowsCountTowardTheComparisonBaseline:
         dead = sow(1, "0001", status="dead")
         events = self.farrows(1, [14, 12, 10])
         assert schedule.sows_worth_review([dead], events, date(2026, 1, 1)) == []
+
+
+class TestTodayUsesFarmTimezone:
+    """「今天」要用牧場當地日期,不是 UTC。
+
+    正式站跑在 UTC 的機器上。取 UTC 日期的話,台灣時間半夜 12 點到早上
+    8 點之間系統會以為還是昨天 —— 清晨看工作清單會看到上一週的工作,
+    而豬場的班表正好從清晨開始。
+
+    這個 bug 是在台灣時間 00:05 跑測試時才浮現的:三個用 date.today()
+    寫的測試同時紅了,因為它們算的是本地日期、伺服器算的是 UTC 日期。
+    """
+
+    def test_today_matches_the_configured_timezone(self, monkeypatch):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        import server
+
+        monkeypatch.setattr(config, "FARM_TIMEZONE", "Asia/Taipei")
+        assert server._today() == datetime.now(ZoneInfo("Asia/Taipei")).date()
+
+    def test_a_different_timezone_really_changes_the_answer(self, monkeypatch):
+        """證明它真的有讀設定,不是剛好跟 UTC 一樣。
+
+        挑 UTC+14 與 UTC-11 這兩端:任何時刻這兩個時區的日期都不同,
+        所以這條測試不會因為執行時間而時好時壞。
+        """
+        import server
+
+        monkeypatch.setattr(config, "FARM_TIMEZONE", "Pacific/Kiritimati")   # UTC+14
+        east = server._today()
+        monkeypatch.setattr(config, "FARM_TIMEZONE", "Pacific/Niue")         # UTC-11
+        west = server._today()
+        assert east != west
+
+    def test_broken_timezone_falls_back_instead_of_crashing(self, monkeypatch):
+        """時區設錯不該讓整個服務起不來 —— 寧可日期偏一點。"""
+        from datetime import datetime, timezone
+        import server
+
+        monkeypatch.setattr(config, "FARM_TIMEZONE", "Not/AZone")
+        assert server._today() == datetime.now(timezone.utc).date()
