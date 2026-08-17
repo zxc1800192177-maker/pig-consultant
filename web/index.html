@@ -326,6 +326,31 @@
       <div id="setFields"></div>
       <button class="btn-primary" id="setSave">儲存設定</button>
     </div>
+
+    <!-- 刪除帳號。刻意放在最後、獨立一張卡、用警示色 —— 這是唯一
+         不可復原的動作,不該跟一般設定混在一起讓人順手按到。 -->
+    <div class="card danger-card is-hidden" id="deleteAccountCard">
+      <div class="card-head">
+        <div>
+          <h2>刪除帳號</h2>
+          <p class="hint">
+            這個動作<b>無法復原</b>。帳號、整座牧場、所有母豬與公豬資料、
+            全部的生產事件與健檢紀錄都會永久消失,沒有備份可以救回。
+            要換裝置或換人使用的話,直接用原帳號登入即可,不需要刪除。
+          </p>
+        </div>
+      </div>
+      <div class="gate-form">
+        <div class="pw-wrap">
+          <input type="password" id="deleteAccountPassword"
+                 autocomplete="current-password" placeholder="輸入密碼以確認身分">
+          <button type="button" class="pw-toggle"
+                  data-pw-toggle="deleteAccountPassword">顯示</button>
+        </div>
+        <button class="btn-danger" id="deleteAccountBtn">永久刪除這個帳號</button>
+        <p class="hint" id="deleteAccountError" hidden></p>
+      </div>
+    </div>
   </section>
 
   <nav class="nav" role="tablist">

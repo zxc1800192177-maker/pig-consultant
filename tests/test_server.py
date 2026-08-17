@@ -755,6 +755,52 @@ class TestLoginGateCanBeTurnedOff:
         assert body["loginRequired"] is False
 
 
+class TestDeleteAccount:
+    """不可逆的破壞性動作,所以「誰能按、按了會發生什麼」都要釘住。"""
+
+    def test_requires_login(self):
+        app = _account_app()
+        assert _post(app, "/api/auth/delete", {"password": "hunter2hunter2"})[0] == 401
+
+    def test_wrong_password_is_refused(self):
+        """登入狀態可能是幾天前留下的 cookie —— 借到別人沒鎖的手機
+        就能把整座牧場清光的話,代價太大。
+        """
+        app = _account_app()
+        token = _register(app)
+        status, body = _post_as(app, "/api/auth/delete", {"password": "wrong-one"}, token)
+        assert status == 401
+        assert app.auth.resolve_session(token) is not None, "密碼錯還是被刪掉了"
+
+    def test_right_password_deletes_the_account(self):
+        app = _account_app()
+        token = _register(app)
+        user_id = app.auth.resolve_session(token).id
+
+        status, _ = _post_as(app, "/api/auth/delete",
+                             {"password": "hunter2hunter2"}, token)
+
+        assert status == 200
+        assert app.store.get_user_by_id(user_id) is None
+
+    def test_session_is_cleared_so_the_cookie_does_not_linger(self):
+        app = _account_app()
+        token = _register(app)
+        status, body = _post_as(app, "/api/auth/delete",
+                                {"password": "hunter2hunter2"}, token)
+        assert body["loggedIn"] is False
+        assert app.auth.resolve_session(token) is None
+
+    def test_username_becomes_available_again(self):
+        """刪掉之後名稱要放得出來,否則「刪掉重來」這件事做不到。"""
+        app = _account_app()
+        token = _register(app)
+        _post_as(app, "/api/auth/delete", {"password": "hunter2hunter2"}, token)
+
+        assert _post(app, "/api/auth/register",
+                     {"username": "farmer", "password": "hunter2hunter2"})[0] == 200
+
+
 class TestLoginThrottle:
     """密碼可以被暴力猜,訪客建立會寫入資料庫 —— 兩者都要設限。"""
 

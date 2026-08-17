@@ -303,6 +303,25 @@ class Auth:
         self._ensure_farm(user_id, "試用牧場")
         return Authenticated(User(user_id, None, True), self._issue_session(user_id))
 
+    def delete_account(self, token, password) -> None:
+        """永久刪除目前登入的帳號。無法復原。
+
+        **一定要重新驗一次密碼。** 這是不可逆的破壞性動作,而登入狀態
+        可能是幾天前留下的 cookie —— 借到別人沒鎖的手機就能把整座牧場
+        的記錄清光,那個代價太大。
+
+        訪客沒有密碼可驗(password_hash 是 NULL),對他們而言那張 cookie
+        本身就是唯一憑證,拿得到 cookie 就已經等同於本人。
+        """
+        user = self.resolve_session(token)
+        if user is None:
+            raise InvalidCredentials("尚未登入")
+        if not user.is_guest:
+            row = self.store.get_user_by_id(user.id)
+            if not row or not verify_password(str(password), row["password_hash"]):
+                raise InvalidCredentials("密碼錯誤,帳號沒有被刪除")
+        self.store.delete_account(user.id)
+
     def claim(self, token, username, password) -> Authenticated:
         """訪客設定帳密,升級為正式帳號。
 

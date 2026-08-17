@@ -293,6 +293,92 @@ class TestBothImplementationsAgree:
             assert "role" in source, f"PostgresStore.{name} 少了 role"
 
 
+class TestDeleteAccount:
+    """刪除帳號是不可逆的,而且牽動好幾張表 —— 刪不乾淨會留下孤兒資料,
+    刪太多會把別人的牧場一起帶走。兩個方向都要測。
+    """
+
+    def _farm_with_data(self, store, username="farmer"):
+        farm = store.create_farm(f"{username} 的牧場")
+        user = store.create_user(username, "hash")
+        store.set_user_farm(user, farm, "owner")
+        sow = store.add_sow(farm, "1183")
+        store.add_sow_event(farm, sow, "FW", date(2026, 2, 1),
+                            {"born_alive": 12}, recorded_by=user)
+        store.add_health_check(user, {"psy": 25.0})
+        return farm, user, sow
+
+    def test_missing_user_reports_failure(self, store):
+        assert store.delete_account(9999) is False
+
+    def test_removes_the_user(self, store):
+        farm, user, _ = self._farm_with_data(store)
+        assert store.delete_account(user) is True
+        assert store.get_user_by_id(user) is None
+        assert store.get_user_by_username("farmer") is None
+
+    def test_removes_the_farm_and_its_animals(self, store):
+        """最後一個人走了,牧場沒有留著的理由。"""
+        farm, user, _ = self._farm_with_data(store)
+        store.delete_account(user)
+        assert store.get_farm(farm) is None
+        assert store.list_sows(farm) == []
+        assert store.list_sow_events(farm) == []
+
+    def test_removes_the_health_checks(self, store):
+        farm, user, _ = self._farm_with_data(store)
+        store.delete_account(user)
+        assert store.list_health_checks(user) == []
+
+    def test_sessions_are_gone(self, store):
+        """留著的話,那張 cookie 會指向一個已經不存在的人。"""
+        from datetime import datetime, timedelta, timezone
+        farm, user, _ = self._farm_with_data(store)
+        later = datetime.now(timezone.utc) + timedelta(days=1)
+        store.create_session("tokenhash", user, later)
+        store.delete_account(user)
+        assert store.get_session_user_id("tokenhash", datetime.now(timezone.utc)) is None
+
+    def test_another_farm_is_untouched(self, store):
+        """A 牧場刪帳號不可以動到 B 牧場(憲法第十一條)。"""
+        farm_a, user_a, _ = self._farm_with_data(store, "alice")
+        farm_b, user_b, _ = self._farm_with_data(store, "bob")
+
+        store.delete_account(user_a)
+
+        assert store.get_farm(farm_b) is not None
+        assert [s["ear_tag"] for s in store.list_sows(farm_b)] == ["1183"]
+        assert store.get_user_by_id(user_b) is not None
+
+    def test_farm_survives_when_a_colleague_remains(self, store):
+        """牧場是共同財產。一位員工離開,不該把整場的記錄一起帶走。"""
+        farm, owner, _ = self._farm_with_data(store)
+        worker = store.create_user("worker", "hash")
+        store.set_user_farm(worker, farm, "worker")
+
+        assert store.delete_account(worker) is True
+
+        assert store.get_user_by_id(worker) is None
+        assert store.get_farm(farm) is not None
+        assert [s["ear_tag"] for s in store.list_sows(farm)] == ["1183"]
+
+    def test_events_recorded_by_the_leaver_stay_but_lose_the_name(self, store):
+        """記錄本身是全場的財產,不會因為記錄的人離開就消失 ——
+        但「是誰記的」已經指向一個不存在的人,只能留空。
+        """
+        farm, owner, sow = self._farm_with_data(store)
+        worker = store.create_user("worker", "hash")
+        store.set_user_farm(worker, farm, "worker")
+        store.add_sow_event(farm, sow, "WN", date(2026, 3, 1),
+                            {"weaned": 11}, recorded_by=worker)
+
+        store.delete_account(worker)
+
+        weans = [e for e in store.list_sow_events(farm) if e["event_type"] == "WN"]
+        assert len(weans) == 1
+        assert weans[0]["recorded_by"] is None
+
+
 class TestPostgresBatching:
     """PostgresStore.batch() 是匯入效能問題的修法核心 —— 沒有它,匯入
     32,159 筆事件等於開 32,159 次資料庫連線(實測 300 行/198 筆寫入要

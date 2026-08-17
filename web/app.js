@@ -65,6 +65,8 @@ async function refreshAccount() {
   account = ok && data.loggedIn ? data : LOGGED_OUT;
   renderAuthBar();
   applyLoginGate();
+  // 沒登入就沒有帳號可刪,整張卡收起來而不是留一個按了會失敗的按鈕。
+  $("deleteAccountCard")?.classList.toggle("is-hidden", !account.loggedIn);
   // 登入/登出後全部重讀。少列一項的話,換帳號後那一區會留著上一個
   // 使用者的資料 —— 跨牧場的資料外洩就是這樣發生的。
   await Promise.all([
@@ -308,6 +310,7 @@ document.addEventListener("click", (e) => {
     return mode === "guest" ? startGuestSession() : openAuthPanel(mode);
   }
   if (e.target.closest('[data-auth-action="logout"]')) logout();
+  if (e.target.closest("#deleteAccountBtn")) deleteAccount();
 
   // 密碼的「顯示/隱藏」。看不到自己打了什麼,是「註冊完就再也登不進去」
   // 最常見的成因 —— 尤其密碼含中文時,選錯字在圓點底下完全看不出來。
@@ -340,6 +343,45 @@ if ($("gateSubmit")) {
   $("gatePassword").addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitGateForm();
   });
+}
+
+// ── 刪除帳號 ──
+//
+// 整張卡只在登入後出現(未登入沒有帳號可刪),而且送出前一定要再問一次:
+// 這是全站唯一不可復原的動作,而按鈕就在設定頁裡,誤觸的代價是整座牧場。
+async function deleteAccount() {
+  const field = $("deleteAccountPassword");
+  const error = $("deleteAccountError");
+  const btn = $("deleteAccountBtn");
+  if (!field || !btn) return;
+
+  const showError = (message) => {
+    error.textContent = message;
+    error.hidden = false;
+  };
+  error.hidden = true;
+
+  if (!account.isGuest && !field.value) {
+    return showError("請輸入密碼以確認身分");
+  }
+  // 訪客沒有密碼可驗,所以更需要這一問 —— 對他們來說按下去就沒了。
+  if (!window.confirm(
+    "確定要永久刪除這個帳號嗎?\n\n"
+    + "整座牧場的母豬、公豬、所有生產事件與健檢紀錄都會一起消失,"
+    + "沒有備份可以救回。\n\n這個動作無法復原。"
+  )) return;
+
+  btn.disabled = true;
+  try {
+    const { ok, data } = await api("/api/auth/delete",
+                                   postJson({ password: field.value }));
+    if (!ok) return showError(data.error || "刪除失敗,請稍後再試");
+    // 帳號已經不存在,整頁重載回到登入畫面 —— 理由跟登出那邊一樣,
+    // 畫面上不能留下任何一塊已經被刪掉的資料。
+    location.reload();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // 訪客提醒。這段話必須主動講:資料確實存在伺服器,但只有這台瀏覽器的

@@ -596,6 +596,21 @@ class Application:
             self.auth.logout(token)
             return 200, {"loggedIn": False, CLEAR_SESSION_KEY: True}
 
+        if path == "/api/auth/delete":
+            # 密碼錯誤走的是限流(可以被拿來猜密碼),所以先過節流再驗。
+            wait = self._over_login_limit(client)
+            if wait:
+                minutes = math.ceil(wait / 60)
+                return 429, {"error": f"嘗試次數過多,請等 {minutes} 分鐘後再試"
+                                      "(重複嘗試不會讓等待時間變長)"}
+            try:
+                self.auth.delete_account(token, payload.get("password"))
+            except AuthError as e:
+                return self._auth_error_status(e), {"error": str(e)}
+            # 帳號已經不存在,cookie 一定要跟著清掉,否則瀏覽器會一直
+            # 帶著一張指向空號的 session。
+            return 200, {"loggedIn": False, CLEAR_SESSION_KEY: True}
+
         # 註冊/登入/訪客建立都會消耗資源(雜湊運算或資料庫寫入),
         # 而且都是可以被自動化重複嘗試的入口,一律先過節流。
         # 講得出還要等多久。只說「請稍後再試」的話,使用者只能每隔幾秒

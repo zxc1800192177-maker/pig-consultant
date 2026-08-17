@@ -261,6 +261,25 @@ class Store:
         """
         raise NotImplementedError
 
+    def delete_account(self, user_id: int) -> bool:
+        """永久刪除一個帳號,連同他獨有的牧場資料。找不到人時回 False。
+
+        **牧場裡還有別人時,只刪這個人,牧場留著。** 牧場是共同財產,
+        一位員工離職不該把整場的母豬記錄一起帶走。只有當他是最後一個
+        人時,牧場才跟著消失。
+
+        刪除順序是有講究的,不能照直覺來:
+          1. 事件的 recorded_by 指向使用者,而且沒有連帶刪除規則,
+             不先清成 NULL 的話資料庫會擋下整個刪除。
+          2. health_checks 同時指向使用者與牧場,不先刪掉的話會擋住
+             牧場那一步。
+          3. users.farm_id 指向牧場,所以要先把自己的 farm_id 清掉,
+             才刪得動牧場。
+        牧場一旦刪掉,底下的欄位/母豬/公豬/事件/自訂工作都是
+        ON DELETE CASCADE,會一起消失。
+        """
+        raise NotImplementedError
+
     # --- session ---
     def create_session(self, token_hash: str, user_id: int, expires_at: datetime) -> None:
         raise NotImplementedError
@@ -502,6 +521,43 @@ class InMemoryStore(Store):
         if self.get_user_by_username(username):
             raise ValueError("username 已存在")
         user.update(username=username, password_hash=password_hash, is_guest=False)
+        return True
+
+    def delete_account(self, user_id) -> bool:
+        user = self.users.get(user_id)
+        if user is None:
+            return False
+        farm_id = user.get("farm_id")
+        alone = farm_id is not None and not any(
+            u["id"] != user_id and u.get("farm_id") == farm_id
+            for u in self.users.values()
+        )
+
+        for events in (self.sow_events, self.boar_events):
+            for e in events:
+                if e.get("recorded_by") == user_id:
+                    e["recorded_by"] = None
+
+        self.health_checks = [h for h in self.health_checks if h["user_id"] != user_id]
+        self.drugs = [d for d in self.drugs if d["user_id"] != user_id]
+        self.sessions = {t: s for t, s in self.sessions.items()
+                         if s["user_id"] != user_id}
+
+        if alone:
+            # 比照 ON DELETE CASCADE:牧場沒了,底下的東西都不該留著
+            self.pens = [p for p in self.pens if p["farm_id"] != farm_id]
+            self.sows = [s for s in self.sows if s["farm_id"] != farm_id]
+            self.boars = [b for b in self.boars if b["farm_id"] != farm_id]
+            self.sow_events = [e for e in self.sow_events if e["farm_id"] != farm_id]
+            self.boar_events = [e for e in self.boar_events if e["farm_id"] != farm_id]
+            self.custom_tasks = [t for t in self.custom_tasks if t["farm_id"] != farm_id]
+            self.task_done = [d for d in self.task_done if d["farm_id"] != farm_id]
+            self.health_checks = [h for h in self.health_checks
+                                  if h.get("farm_id") != farm_id]
+            self.farms.pop(farm_id, None)
+            self.farm_settings.pop(farm_id, None)
+
+        del self.users[user_id]
         return True
 
     def create_session(self, token_hash, user_id, expires_at):
@@ -944,6 +1000,41 @@ class PostgresStore(Store):
                 (username, password_hash, user_id),
             ).fetchone()
             return row is not None
+
+    def delete_account(self, user_id) -> bool:
+        # 整段在同一條連線/交易裡:中途失敗會留下一個刪到一半的帳號
+        # (牧場沒了但人還在,或反過來),那比沒刪還糟。
+        with self._connect() as conn:
+            row = conn.execute("SELECT farm_id FROM users WHERE id = %s",
+                               (user_id,)).fetchone()
+            if row is None:
+                return False
+            farm_id = row[0]
+
+            alone = False
+            if farm_id is not None:
+                alone = conn.execute(
+                    "SELECT count(*) FROM users WHERE farm_id = %s AND id <> %s",
+                    (farm_id, user_id)).fetchone()[0] == 0
+
+            # recorded_by 沒有連帶刪除規則,留著會擋下刪除使用者那一步。
+            # 設成 NULL 而不是刪掉事件 —— 牧場還在的話,那些記錄是全場的
+            # 共同財產,不該因為記錄的人離開就消失。
+            conn.execute("UPDATE sow_events SET recorded_by = NULL WHERE recorded_by = %s",
+                         (user_id,))
+            conn.execute("UPDATE boar_events SET recorded_by = NULL WHERE recorded_by = %s",
+                         (user_id,))
+            conn.execute("DELETE FROM health_checks WHERE user_id = %s", (user_id,))
+
+            if alone:
+                # health_checks.farm_id 與 users.farm_id 都會擋住刪牧場,
+                # 兩個都要先讓開。
+                conn.execute("DELETE FROM health_checks WHERE farm_id = %s", (farm_id,))
+                conn.execute("UPDATE users SET farm_id = NULL WHERE id = %s", (user_id,))
+                conn.execute("DELETE FROM farms WHERE id = %s", (farm_id,))
+
+            conn.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            return True
 
     def create_session(self, token_hash, user_id, expires_at):
         with self._connect() as conn:

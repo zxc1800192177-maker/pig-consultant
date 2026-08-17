@@ -421,6 +421,18 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 }
 .gate-form #gateError { color: var(--critical); text-align: center; margin: 2px 0 0; }
 
+/* 刪除帳號那一區。用邊框與紅色按鈕跟一般設定明顯分開 ——
+   這是唯一不可復原的動作,不能長得像其他按鈕一樣安全。 */
+.danger-card { border: 1px solid var(--critical); }
+.danger-card h2 { color: var(--critical); }
+.btn-danger {
+  width: 100%; padding: 13px 18px; border: none; border-radius: var(--radius-sm);
+  background: var(--critical); color: #fff;
+  font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.btn-danger:disabled { opacity: .6; cursor: default; }
+#deleteAccountError { color: var(--critical); margin: 2px 0 0; }
+
 /* 密碼的「顯示」切換。
    密碼框只看得到圓點,打錯了完全沒有回饋 —— 而這個站的說明還明講
    「4 個中文字也可以」,用注音/倉頡選錯字更是看不出來,結果就是
