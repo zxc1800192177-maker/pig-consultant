@@ -1316,3 +1316,172 @@ class TestBuildCustomTasks:
 
     def test_no_tasks_no_crash(self):
         assert schedule.build_custom_tasks([], [], self.MON, self.SUN) == []
+
+
+class TestMonthBounds:
+    def test_ordinary_month(self):
+        assert schedule.month_bounds(2026, 8) == (date(2026, 8, 1), date(2026, 8, 31))
+
+    def test_december_rolls_into_next_year(self):
+        assert schedule.month_bounds(2026, 12) == (date(2026, 12, 1), date(2026, 12, 31))
+
+    def test_february_leap_year(self):
+        assert schedule.month_bounds(2028, 2) == (date(2028, 2, 1), date(2028, 2, 29))
+
+    def test_february_non_leap_year(self):
+        assert schedule.month_bounds(2026, 2) == (date(2026, 2, 1), date(2026, 2, 28))
+
+
+class TestMonthlyReport:
+    """生產月報,12 項指標,即時重算不存快照。"""
+
+    START = date(2026, 8, 1)
+    END = date(2026, 8, 31)
+
+    def test_no_data_returns_none_for_everything(self):
+        r = schedule.monthly_report([], [], self.START, self.END)
+        for key in schedule.MONTH_REPORT_METRICS:
+            assert r["metrics"][key]["value"] is None, key
+
+    def test_herd_size_is_the_average_of_start_and_end_counts(self):
+        sows = [sow(1, "1183", entry_date=date(2026, 1, 1)),
+               sow(2, "2580", entry_date=date(2026, 8, 20))]   # 月中才進場
+        r = schedule.monthly_report(sows, [], self.START, self.END)
+        # 月初 1 頭在場,月底 2 頭在場 → 平均 1.5
+        assert r["herdSize"] == 1.5
+
+    def test_entry_date_falls_back_to_earliest_event(self):
+        """沒有進場記錄的母豬,用她最早一筆事件的日期當進場日 ——
+        跟 importer.py 對公豬進場日的處理是同一個理由。
+        """
+        sows = [sow(1, "1183")]      # 沒有 entry_date
+        events = [ev(1, "MT", date(2026, 1, 5))]
+        r = schedule.monthly_report(sows, events, self.START, self.END)
+        assert r["herdSize"] == 1.0
+
+    def test_exited_sow_does_not_count_after_her_exit(self):
+        sows = [sow(1, "1183", entry_date=date(2026, 1, 1))]
+        events = [ev(1, "SAL", date(2026, 8, 5))]
+        r = schedule.monthly_report(sows, events, self.START, self.END)
+        # 月初(8/1)還在場,月底(8/31)已經離群 → 平均 0.5
+        assert r["herdSize"] == 0.5
+
+    def test_mating_rate(self):
+        sows = [sow(i, str(i), entry_date=date(2026, 1, 1)) for i in range(1, 5)]  # 4 頭
+        events = [ev(1, "MT", date(2026, 8, 5)), ev(2, "MT", date(2026, 8, 10))]
+        r = schedule.monthly_report(sows, events, self.START, self.END)
+        assert r["metrics"]["mating_rate"]["value"] == 50.0    # 2/4
+
+    def test_conception_rate_only_counts_this_months_checks(self):
+        events = [
+            ev(1, "PD", date(2026, 8, 5), {"positive": True}),
+            ev(2, "PD", date(2026, 8, 10), {"positive": False}),
+            ev(3, "PD", date(2026, 7, 20), {"positive": True}),    # 上個月,不算
+        ]
+        r = schedule.monthly_report([], events, self.START, self.END)
+        assert r["metrics"]["conception_rate"]["n"] == 2
+        assert r["metrics"]["conception_rate"]["value"] == 50.0
+
+    def test_conception_rate_ignores_unrecorded_results(self):
+        events = [ev(1, "PD", date(2026, 8, 5), {})]
+        r = schedule.monthly_report([], events, self.START, self.END)
+        assert r["metrics"]["conception_rate"]["n"] == 0
+
+    def test_farrowing_rate_denominator_is_matings_from_gestation_days_earlier(self):
+        """這正是這個指標最容易算錯的地方:分母是回推 gestation_days 天
+        的配種,不是當月配種 —— 配種量一波動,拿當月配種當分母會讓
+        分娩率出現跟真實表現無關的假跳動。
+        """
+        mated_for_this_month = self.START - timedelta(days=114)
+        events = [
+            ev(1, "MT", mated_for_this_month),
+            ev(2, "MT", mated_for_this_month + timedelta(days=5)),
+            ev(1, "FW", date(2026, 8, 10)),
+            # 當月配種,不該算進分娩率的分母 —— 她要到年底才可能分娩
+            ev(3, "MT", date(2026, 8, 15)),
+        ]
+        r = schedule.monthly_report([], events, self.START, self.END)
+        assert r["metrics"]["farrowing_rate"]["n"] == 2        # 只有回推那兩筆
+        assert r["metrics"]["farrowing_rate"]["value"] == 50.0  # 1 窩 / 2 筆配種
+
+    def test_litter_metrics_ignore_farrows_missing_alive_or_stillborn(self):
+        events = [
+            ev(1, "FW", date(2026, 8, 5), {"born_alive": 12, "stillborn": 1, "mummified": 1}),
+            ev(2, "FW", date(2026, 8, 10), {"born_alive": 10}),    # 缺死胎欄位,不計入
+        ]
+        r = schedule.monthly_report([], events, self.START, self.END)
+        m = r["metrics"]
+        assert m["total_born_per_litter"]["n"] == 1
+        assert m["total_born_per_litter"]["value"] == 14
+        assert m["born_alive_per_litter"]["value"] == 12
+        assert m["mummification_rate"]["value"] == pytest.approx(1 / 14 * 100)
+        assert m["stillbirth_rate"]["value"] == pytest.approx(1 / 14 * 100)
+
+    def test_weaned_per_litter(self):
+        events = [
+            ev(1, "WN", date(2026, 8, 5), {"weaned": 11}),
+            ev(2, "WN", date(2026, 8, 10), {"weaned": 9}),
+        ]
+        r = schedule.monthly_report([], events, self.START, self.END)
+        assert r["metrics"]["weaned_per_litter"]["value"] == 10.0
+
+    def test_lactation_days_pairs_each_weaning_with_her_preceding_farrow(self):
+        events = [
+            ev(1, "FW", date(2026, 2, 1)),
+            ev(1, "WN", date(2026, 8, 5)),      # 配對到 2/1 那胎,不是隨便算
+        ]
+        r = schedule.monthly_report([], events, self.START, self.END)
+        assert r["metrics"]["lactation_days"]["value"] == (date(2026, 8, 5) - date(2026, 2, 1)).days
+
+    def test_weaning_without_any_prior_farrow_is_not_counted(self):
+        events = [ev(1, "WN", date(2026, 8, 5), {"weaned": 11})]
+        r = schedule.monthly_report([], events, self.START, self.END)
+        assert r["metrics"]["lactation_days"]["n"] == 0
+        assert r["metrics"]["lactation_days"]["value"] is None
+
+    def test_psy_is_annualized_not_a_bare_monthly_count(self):
+        sows = [sow(1, "1183", entry_date=date(2026, 1, 1))]     # 1 頭母豬全月在場
+        events = [ev(1, "WN", date(2026, 8, 5), {"weaned": 10})]
+        r = schedule.monthly_report(sows, events, self.START, self.END)
+        # (10 頭離乳 / 1 頭母豬)*(365.25 / 31 天)—— 這裡只驗證公式,
+        # 不代表這是合理範圍,單月樣本本來就會被年化放大。
+        expected = 10 / 1 * (365.25 / 31)
+        assert r["metrics"]["psy"]["value"] == pytest.approx(expected)
+
+    def test_cull_rate_is_annualized(self):
+        # 淘汰的那頭本身月中才離群,月初、月底平均下來只算 1.5 頭,不是
+        # 乾淨的 2 —— 她整個月只有一部分時間真的在群內,這正是「淘汰率」
+        # 這種指標會遇到的情形,不是算錯。
+        sows = [sow(i, str(i), entry_date=date(2026, 1, 1)) for i in range(1, 3)]  # 2 頭
+        events = [ev(1, "SAL", date(2026, 8, 5))]
+        r = schedule.monthly_report(sows, events, self.START, self.END)
+        expected = 1 / 1.5 * 100 * (365.25 / 31)
+        assert r["metrics"]["cull_rate"]["value"] == pytest.approx(expected)
+
+    def test_mortality_rate_is_annualized(self):
+        sows = [sow(i, str(i), entry_date=date(2026, 1, 1)) for i in range(1, 3)]
+        events = [ev(1, "DTH", date(2026, 8, 5))]
+        r = schedule.monthly_report(sows, events, self.START, self.END)
+        expected = 1 / 1.5 * 100 * (365.25 / 31)     # 同上,離群那頭只算半個月
+        assert r["metrics"]["mortality_rate"]["value"] == pytest.approx(expected)
+
+    def test_excluded_events_are_ignored(self):
+        sows = [sow(1, "1183", entry_date=date(2026, 1, 1))]
+        events = [ev(1, "MT", date(2026, 8, 5), excluded=True)]
+        r = schedule.monthly_report(sows, events, self.START, self.END)
+        assert r["metrics"]["mating_rate"]["value"] == 0.0
+
+    def test_events_outside_the_period_do_not_count(self):
+        sows = [sow(1, "1183", entry_date=date(2026, 1, 1))]
+        events = [ev(1, "MT", date(2026, 7, 31)), ev(1, "MT", date(2026, 9, 1))]
+        r = schedule.monthly_report(sows, events, self.START, self.END)
+        assert r["metrics"]["mating_rate"]["value"] == 0.0
+
+    def test_no_herd_means_annualized_metrics_are_none_not_a_crash(self):
+        """一頭母豬都不在場的月份 —— 用她本來就沒有的分母算年化指標
+        會除以零,必須回 None 而不是炸掉或宣稱 0。
+        """
+        r = schedule.monthly_report([], [], self.START, self.END)
+        assert r["metrics"]["psy"]["value"] is None
+        assert r["metrics"]["cull_rate"]["value"] is None
+        assert r["metrics"]["mortality_rate"]["value"] is None

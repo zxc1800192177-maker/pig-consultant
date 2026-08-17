@@ -12,7 +12,7 @@
 """
 
 from datetime import date, timedelta
-from typing import Dict, Iterable, List, NamedTuple, Optional
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 # 預設間隔。**這些數字量自這個牧場 32,814 筆真實事件的中位數**,
 # 不是教科書數字:
@@ -918,3 +918,155 @@ def pen_pressure(sows: Iterable[dict], events: Iterable[dict], pens: Iterable[di
         "incoming": incoming,
         "short_by": max(0, incoming - free) if configured else 0,
     }
+
+
+# 生產月報的 12 項指標,依 specs 的計畫文件列出的順序。
+MONTH_REPORT_METRICS = (
+    "mating_rate", "conception_rate", "farrowing_rate",
+    "total_born_per_litter", "born_alive_per_litter",
+    "mummification_rate", "stillbirth_rate",
+    "weaned_per_litter", "lactation_days",
+    "psy", "cull_rate", "mortality_rate",
+)
+
+
+def month_bounds(year: int, month: int) -> Tuple[date, date]:
+    """該年月的起訖日期(該月第一天到最後一天)。"""
+    start = date(year, month, 1)
+    end = date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
+    return start, end
+
+
+def _in_herd_on(sow: dict, sow_events: List[dict], on_date: date) -> bool:
+    """這頭母豬在指定的這一天是不是在場(進場之後、還沒離群)。
+
+    entry_date 缺的話退回她自己最早一筆事件的日期 —— 歷史資料不一定有
+    進場記錄,用「今天」當進場日會讓一頭早就在場的母豬看起來是剛到的
+    (跟 importer.py 對公豬進場日的處理是同一個理由)。
+    """
+    entry = sow.get("entry_date")
+    if entry is None:
+        entry = sow_events[0]["event_date"] if sow_events else None
+    if entry is None or entry > on_date:
+        return False
+    return not any(e["event_type"] in EXIT_EVENTS and e["event_date"] <= on_date
+                   for e in sow_events)
+
+
+def _avg_herd_size(sows: Iterable[dict], grouped: Dict[int, List[dict]],
+                   start: date, end: date) -> float:
+    """月初、月底在場頭數的平均,估這段期間的平均在群母豬數。"""
+    sows = list(sows)
+    at_start = sum(1 for s in sows if _in_herd_on(s, grouped.get(s["id"], []), start))
+    at_end = sum(1 for s in sows if _in_herd_on(s, grouped.get(s["id"], []), end))
+    return (at_start + at_end) / 2
+
+
+def monthly_report(sows: Iterable[dict], events: Iterable[dict],
+                   start: date, end: date, settings: Optional[dict] = None) -> dict:
+    """生產月報,12 項指標,即時重算不存快照 —— 事件記錄本身才是唯一
+    真相,存快照的話事後補登或修正舊記錄不會反映到已經算過的月份。
+
+    兩個容易算錯的分母:
+
+    1. **分娩率**:當月分娩的窩對應大約 gestation_days 天前的配種,
+       不是當月配種 —— 配種量一波動,拿當月配種當分母會讓分娩率出現
+       跟真實表現無關的假跳動。
+
+    2. **PSY / 母豬淘汰率 / 母豬死亡率**:業界慣例是年化數字,不是當月
+       原始比率 —— 用當月數字乘以 365.25 / 當月天數換算成年率,樣本
+       只有一個月,數字本來就會比全年平均噪一些。
+
+    每一項都各自看有沒有底層記錄,**沒有就回 None,不補 0 也不猜**
+    (憲法第三條)。`n` 依各指標自然的樣本數而定(驗孕次數、對應窗口內
+    的配種次數、記錄到的窩數……),不是統一的意義。
+    """
+    cfg = settings_with_defaults(settings)
+    sows = list(sows)
+    grouped = _by_sow(events)
+    days_in_month = (end - start).days + 1
+    annualize = 365.25 / days_in_month
+    herd = _avg_herd_size(sows, grouped, start, end)
+
+    by_type: Dict[str, List[dict]] = {}
+    for e in events:
+        if e.get("excluded"):
+            continue
+        by_type.setdefault(e["event_type"], []).append(e)
+
+    def in_range(code, lo, hi):
+        return [e for e in by_type.get(code, []) if lo <= e["event_date"] <= hi]
+
+    mt_month = in_range(MATE, start, end)
+    fw_month = in_range(FARROW, start, end)
+    wn_month = in_range(WEAN, start, end)
+    pd_month = in_range(PREG_CHECK, start, end)
+    sal_month = in_range(CULL, start, end)
+    dth_month = in_range(DEATH, start, end)
+    mt_for_farrowing = in_range(MATE, start - timedelta(days=cfg["gestation_days"]),
+                                end - timedelta(days=cfg["gestation_days"]))
+
+    def rate(numerator: int, denominator) -> dict:
+        value = numerator / denominator * 100 if denominator else None
+        return {"value": value, "n": denominator}
+
+    checked = [e for e in pd_month
+              if isinstance((e.get("detail") or {}).get("positive"), bool)]
+    positive = sum(1 for e in checked if e["detail"]["positive"])
+
+    litters = []
+    for e in fw_month:
+        d = e.get("detail") or {}
+        if isinstance(d.get("born_alive"), int) and isinstance(d.get("stillborn"), int):
+            mummy = d.get("mummified") if isinstance(d.get("mummified"), int) else 0
+            litters.append((d["born_alive"], d["stillborn"], mummy))
+
+    alive_sum = sum(x[0] for x in litters)
+    still_sum = sum(x[1] for x in litters)
+    mummy_sum = sum(x[2] for x in litters)
+    total_born_sum = alive_sum + still_sum + mummy_sum
+
+    weaned_vals = []
+    for e in wn_month:
+        v = (e.get("detail") or {}).get("weaned")
+        if isinstance(v, int):
+            weaned_vals.append(v)
+    weaned_total = sum(weaned_vals)
+
+    # 哺乳天數:每一筆離乳配對她自己在那之前最近一次分娩 —— 跟
+    # current_cycle() 抓「上一胎」同樣的道理,只是這裡要看整段歷史,
+    # 不是只看目前這一輪。
+    lactation_spans = []
+    for e in wn_month:
+        prior_farrows = [x["event_date"] for x in grouped.get(e["sow_id"], [])
+                         if x["event_type"] == FARROW and x["event_date"] <= e["event_date"]]
+        if prior_farrows:
+            lactation_spans.append((e["event_date"] - max(prior_farrows)).days)
+
+    def avg(values):
+        return sum(values) / len(values) if values else None
+
+    metrics = {
+        "mating_rate": rate(len(mt_month), round(herd) if herd else 0),
+        "conception_rate": rate(positive, len(checked)),
+        "farrowing_rate": rate(len(fw_month), len(mt_for_farrowing)),
+        "total_born_per_litter":
+            {"value": avg([sum(x) for x in litters]), "n": len(litters)},
+        "born_alive_per_litter": {"value": avg([x[0] for x in litters]), "n": len(litters)},
+        "mummification_rate":
+            {"value": mummy_sum / total_born_sum * 100 if total_born_sum else None,
+             "n": len(litters)},
+        "stillbirth_rate":
+            {"value": still_sum / total_born_sum * 100 if total_born_sum else None,
+             "n": len(litters)},
+        "weaned_per_litter": {"value": avg(weaned_vals), "n": len(weaned_vals)},
+        "lactation_days": {"value": avg(lactation_spans), "n": len(lactation_spans)},
+        "psy": {"value": weaned_total / herd * annualize if herd else None,
+               "n": len(wn_month)},
+        "cull_rate": {"value": len(sal_month) / herd * 100 * annualize if herd else None,
+                     "n": len(sal_month)},
+        "mortality_rate": {"value": len(dth_month) / herd * 100 * annualize if herd else None,
+                          "n": len(dth_month)},
+    }
+
+    return {"start": start, "end": end, "herdSize": herd, "metrics": metrics}

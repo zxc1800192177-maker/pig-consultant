@@ -12,9 +12,9 @@ import { SseParser } from "./lib/sse.js";
 import { addFactor, removeFactor } from "./lib/factors.js";
 import {
   alertRow, boarPerformanceGrid, boarRow, buildAlerts, customTaskRow, customTaskSetting,
-  eventName, eventRow, formatWeek, performanceGrid,
-  pendingCheckRow, reviewRow, settingRow, shiftDate, sowRow, statusPills, taskGroup,
-  timelineCaption, TIMELINE_LIMIT, visibleEvents,
+  eventName, eventRow, formatMonth, formatWeek, monthReportGrid, performanceGrid,
+  pendingCheckRow, reviewRow, settingRow, shiftDate, shiftMonth, sowRow, statusPills,
+  taskGroup, timelineCaption, TIMELINE_LIMIT, visibleEvents,
 } from "./lib/v2.js";
 import {
   SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, recordedRow,
@@ -69,7 +69,7 @@ async function refreshAccount() {
   // 使用者的資料 —— 跨牧場的資料外洩就是這樣發生的。
   await Promise.all([
     reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
-    reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(),
+    reloadBoars(), reloadRecent(), reloadReview(), reloadMonthReport(), reloadSettings(),
     reloadCustomTaskSettings(),
   ]);
 }
@@ -463,7 +463,7 @@ async function init() {
     applyLoginGate();
     await Promise.all([
       reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
-      reloadBoars(), reloadRecent(), reloadReview(), reloadSettings(),
+      reloadBoars(), reloadRecent(), reloadReview(), reloadMonthReport(), reloadSettings(),
     reloadCustomTaskSettings(),
     ]);
   }
@@ -1138,6 +1138,14 @@ document.addEventListener("click", (e) => {
   if (e.target.id === "importConfirm") return commitImport();
   if (e.target.id === "weekPrev") { weekStart = shiftDate(weekStart, -7); return reloadTasks(); }
   if (e.target.id === "weekNext") { weekStart = shiftDate(weekStart, 7); return reloadTasks(); }
+  if (e.target.id === "mrPrev") {
+    monthReportMonth = shiftMonth(monthReportMonth, -1);
+    return reloadMonthReport();
+  }
+  if (e.target.id === "mrNext") {
+    monthReportMonth = shiftMonth(monthReportMonth, 1);
+    return reloadMonthReport();
+  }
 });
 
 $("sowSearch")?.addEventListener("input", renderAnimalList);
@@ -1481,6 +1489,32 @@ async function reloadReview() {
     || '<p class="hint">目前沒有需要特別看一眼的母豬。</p>';
 }
 
+// ── 生產月報 ──
+//
+// null 代表「用伺服器判斷的當月」;一旦拿到回應就固定成該月字串,
+// 之後靠 mrPrev/mrNext 平移 —— 不然月份導覽的起點每次都會被拉回今天。
+let monthReportMonth = null;
+
+async function reloadMonthReport() {
+  const box = $("mrGrid");
+  if (!box || !account.loggedIn) return;
+
+  const { ok, data, status } = await api(
+    `/api/monthly-report${monthReportMonth ? `?month=${monthReportMonth}` : ""}`);
+  if (!ok) {
+    // 員工看不到月報(憲法第十一條),整張卡收起來而不是留一個錯誤訊息
+    $("monthReportCard")?.classList.toggle("is-hidden", status === 403);
+    return;
+  }
+
+  monthReportMonth = data.start.slice(0, 7);
+  $("mrLabel").textContent = formatMonth(data.start);
+  $("mrHerdSize").textContent = data.herdSize
+    ? `平均在場 ${data.herdSize.toFixed(1)} 頭` : "本月無在場母豬記錄";
+  box.innerHTML = monthReportGrid(data.metrics);
+  $("mrBasis").textContent = data.basis;
+}
+
 // ── 設定 ──
 
 async function reloadSettings() {
@@ -1510,7 +1544,9 @@ async function saveSettings() {
 
   showBanner("設定已儲存", "ok");
   // 參數變了,推算出來的東西全部要重算
-  await Promise.all([reloadSettings(), reloadTasks(), reloadAlerts(), reloadReview()]);
+  await Promise.all([
+    reloadSettings(), reloadTasks(), reloadAlerts(), reloadReview(), reloadMonthReport(),
+  ]);
 }
 
 let settingFields = [];

@@ -207,6 +207,47 @@ def performance_digits(key: str) -> int:
     return PERFORMANCE_TEXT.get(key, (key, "", 1))[2]
 
 
+# 生產月報的 12 項指標。單位跟小數位分開放,理由跟 PERFORMANCE_TEXT 一樣。
+MONTH_REPORT_TEXT = {
+    "mating_rate": ("配種率", "%", 1),
+    "conception_rate": ("受胎率", "%", 1),
+    "farrowing_rate": ("分娩率", "%", 1),
+    "total_born_per_litter": ("每胎總仔數", "隻", 1),
+    "born_alive_per_litter": ("活仔數", "隻", 1),
+    "mummification_rate": ("木乃伊率", "%", 1),
+    "stillbirth_rate": ("死胎率", "%", 1),
+    "weaned_per_litter": ("離乳數", "隻", 1),
+    "lactation_days": ("哺乳天數", "天", 1),
+    "psy": ("PSY(母豬年產離乳仔豬數)", "隻", 1),
+    "cull_rate": ("母豬淘汰率", "%", 1),
+    "mortality_rate": ("母豬死亡率", "%", 1),
+}
+
+
+def month_report_label(key: str) -> str:
+    return MONTH_REPORT_TEXT.get(key, (key, "", 1))[0]
+
+
+def month_report_unit(key: str) -> str:
+    return MONTH_REPORT_TEXT.get(key, (key, "", 1))[1]
+
+
+def month_report_digits(key: str) -> int:
+    return MONTH_REPORT_TEXT.get(key, (key, "", 1))[2]
+
+
+def month_report_basis() -> str:
+    """生產月報一定要一起顯示的說明。
+
+    分娩率、PSY、母豬淘汰率、母豬死亡率這幾項的分母/年化算法不是直覺
+    看數字猜得到的(分娩率回推配種日、後三項是年化數字),不講清楚
+    使用者會拿它們跟「當月原始比率」的心裡預期對不上。
+    """
+    return ("由事件記錄計算,非 AI 生成 ・ "
+           "分娩率對應約懷孕天數前的配種,不是當月配種 ・ "
+           "PSY/淘汰率/死亡率為年化數字")
+
+
 def tier_label(tier: str) -> str:
     return TIER_LABELS.get(tier, "")
 

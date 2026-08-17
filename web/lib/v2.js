@@ -28,6 +28,24 @@ export function shiftDate(iso, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// 月報標籤:2026-08-01 → 2026/08
+export function formatMonth(iso) {
+  const m = /^(\d{4})-(\d{2})/.exec(String(iso || ""));
+  return m ? `${m[1]}/${m[2]}` : "";
+}
+
+// 往前/往後幾個月,回傳 YYYY-MM 給 /api/monthly-report?month= 用。
+// 直接算年月而不透過 Date 物件加減天數 —— 每個月天數不同,
+// 2026-01-31 加 30 天不會落在 2026-02,月份導覽會跳錯格。
+export function shiftMonth(iso, delta) {
+  const m = /^(\d{4})-(\d{2})/.exec(String(iso || ""));
+  if (!m) return iso;
+  const total = Number(m[1]) * 12 + (Number(m[2]) - 1) + delta;
+  const year = Math.floor(total / 12);
+  const month = total - year * 12 + 1;
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
 // 把事件的 detail 整理成一句話。欄位是哪些由 importer.py 決定,
 // 這裡只負責挑出有值的來顯示。
 export function describeEvent(event) {
@@ -377,6 +395,26 @@ export function boarPerformanceGrid(performance) {
       <div class="perf">${stats}</div>
       <p class="src">${escapeHtml(performance.basis)}</p>
     </div>`;
+}
+
+/** 生產月報一格。樣本數(n)一定要露出來 —— 12 項裡有幾項天生小樣本
+ *  (例如當月只驗孕過兩三次),只給一個百分比會讓人誤以為跟其他項目
+ *  一樣可信,實際上抽一兩筆記錄結果就會大幅跳動。
+ */
+export function monthReportStat(m) {
+  const value = m.value == null
+    ? '<span class="v v-none">—</span>'
+    : `<span class="v">${m.value.toFixed(m.digits)}<span class="u">${escapeHtml(m.unit)}</span></span>`;
+  return `
+    <div class="stat">
+      <span class="k">${escapeHtml(m.label)}</span>
+      ${value}
+      <span class="n2">${m.n ? `n=${m.n}` : "無記錄"}</span>
+    </div>`;
+}
+
+export function monthReportGrid(metrics) {
+  return (metrics || []).map(monthReportStat).join("");
 }
 
 /** 「值得檢視」的一列。

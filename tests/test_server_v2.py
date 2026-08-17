@@ -892,6 +892,86 @@ class TestWorthReviewEndpoint:
         assert app.handle_get("/api/review", _worker(app, farm_id))[0] == 403
 
 
+class TestMonthlyReportEndpoint:
+    def test_requires_login(self):
+        app = _app()
+        assert app.handle_get("/api/monthly-report")[0] == 401
+
+    def test_worker_cannot_see_it(self, farm):
+        app, _, farm_id = farm
+        assert app.handle_get("/api/monthly-report", _worker(app, farm_id))[0] == 403
+
+    def test_defaults_to_current_month(self, farm, monkeypatch):
+        app, token, _ = farm
+        monkeypatch.setattr("server._today", lambda: date(2026, 8, 17))
+        body = app.handle_get("/api/monthly-report", token)[1]
+        assert body["start"] == "2026-08-01"
+        assert body["end"] == "2026-08-31"
+
+    def test_explicit_month_selection(self, farm):
+        app, token, _ = farm
+        body = app.handle_get("/api/monthly-report?month=2026-02", token)[1]
+        assert body["start"] == "2026-02-01"
+        assert body["end"] == "2026-02-28"
+
+    def test_bad_month_format_rejected(self, farm):
+        app, token, _ = farm
+        assert app.handle_get("/api/monthly-report?month=garbage", token)[0] == 400
+        assert app.handle_get("/api/monthly-report?month=2026-13", token)[0] == 400
+
+    def test_returns_all_twelve_metrics_with_labels(self, farm):
+        app, token, _ = farm
+        body = app.handle_get("/api/monthly-report?month=2026-08", token)[1]
+        assert len(body["metrics"]) == 12
+        assert body["basis"]
+        keys = {m["key"] for m in body["metrics"]}
+        assert keys == set(schedule.MONTH_REPORT_METRICS)
+        farrowing = next(m for m in body["metrics"] if m["key"] == "farrowing_rate")
+        assert farrowing["label"] == "分娩率"
+        assert farrowing["unit"] == "%"
+
+    def test_farms_are_isolated(self, farm):
+        app, token, farm_id = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": "2026-04-19"}, token)
+
+        other_token = _owner(app, "other-farmer")
+        other_body = app.handle_get("/api/monthly-report?month=2026-08", other_token)[1]
+        farrowing = next(m for m in other_body["metrics"] if m["key"] == "farrowing_rate")
+        assert farrowing["n"] == 0
+
+    def test_farrowing_rate_denominator_is_shifted_by_gestation_days(self, farm):
+        """分娩率的分母是回推 gestation_days 天前的配種,不是當月配種
+        (specs 的分娩率反直覺事實)。這裡直接用真實天數驗證整條路徑,
+        不只測 schedule.monthly_report 本身。
+        """
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+
+        mate_date = date(2026, 4, 19)
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": mate_date.isoformat()}, token)
+        farrow_date = mate_date + timedelta(days=schedule.DEFAULTS["gestation_days"])
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "FW", "date": farrow_date.isoformat(),
+               "detail": {"born_alive": 12, "stillborn": 1}}, token)
+
+        month_str = f"{farrow_date.year:04d}-{farrow_date.month:02d}"
+        body = app.handle_get(f"/api/monthly-report?month={month_str}", token)[1]
+        farrowing = next(m for m in body["metrics"] if m["key"] == "farrowing_rate")
+        assert farrowing["n"] == 1
+        assert farrowing["value"] == 100.0
+
+        same_month_str = f"{mate_date.year:04d}-{mate_date.month:02d}"
+        if same_month_str != month_str:
+            same_month_body = app.handle_get(
+                f"/api/monthly-report?month={same_month_str}", token)[1]
+            same_month_farrowing = next(
+                m for m in same_month_body["metrics"] if m["key"] == "farrowing_rate")
+            assert same_month_farrowing["n"] == 0
+
+
 class TestRecordPage:
     """紀錄頁需要的東西:公豬清單、最近記錄、離乳評分。"""
 

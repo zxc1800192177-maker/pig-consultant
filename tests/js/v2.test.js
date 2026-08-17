@@ -17,11 +17,14 @@ import {
   describeEvent,
   eventName,
   eventRow,
+  formatMonth,
   formatWeek,
+  monthReportGrid,
   parityTone,
   pendingCheckRow,
   performanceGrid,
   shiftDate,
+  shiftMonth,
   statusPills,
   visibleEvents,
   sowRow,
@@ -65,6 +68,35 @@ describe("日期加減", () => {
 
   it("不受時區影響 —— new Date('2026-08-10') 在某些時區會退成前一天", () => {
     assert.equal(shiftDate("2026-08-10", 0), "2026-08-10");
+  });
+});
+
+describe("月報標籤", () => {
+  it("只留年月", () => {
+    assert.equal(formatMonth("2026-08-01"), "2026/08");
+  });
+
+  it("接受 YYYY-MM 格式", () => {
+    assert.equal(formatMonth("2026-08"), "2026/08");
+  });
+});
+
+describe("月份加減", () => {
+  it("往後一個月", () => {
+    assert.equal(shiftMonth("2026-08", 1), "2026-09");
+  });
+
+  it("往前一個月", () => {
+    assert.equal(shiftMonth("2026-08", -1), "2026-07");
+  });
+
+  it("跨年不會算錯", () => {
+    assert.equal(shiftMonth("2025-12", 1), "2026-01");
+    assert.equal(shiftMonth("2026-01", -1), "2025-12");
+  });
+
+  it("不受每月天數不同影響 —— 月初的日期加減天數會撞到月底問題", () => {
+    assert.equal(shiftMonth("2026-01-31", 1), "2026-02");
   });
 });
 
@@ -507,6 +539,40 @@ describe("生產表現", () => {
   it("標籤有跳脫", () => {
     const html = performanceGrid(perf([metric({ label: "<script>x</script>" })]));
     assert.doesNotMatch(html, /<script>/);
+  });
+});
+
+describe("生產月報", () => {
+  const metric = (over = {}) => ({
+    key: "farrowing_rate", label: "分娩率", unit: "%", digits: 1,
+    value: 82.4, n: 12, ...over,
+  });
+
+  it("數值依 digits 取位並附單位", () => {
+    const html = monthReportGrid([metric()]);
+    assert.ok(html.includes("82.4"));
+    assert.ok(html.includes("%"));
+  });
+
+  it("樣本數一起畫出來 —— 小樣本的項目不能看起來跟大樣本一樣可信", () => {
+    assert.ok(monthReportGrid([metric({ n: 3 })]).includes("n=3"));
+  });
+
+  it("沒有記錄時顯示破折號跟「無記錄」,不顯示 0", () => {
+    const html = monthReportGrid([metric({ value: null, n: 0 })]);
+    assert.ok(html.includes("—"));
+    assert.ok(html.includes("無記錄"));
+    assert.doesNotMatch(html, />0\.0</);
+  });
+
+  it("標籤有跳脫", () => {
+    const html = monthReportGrid([metric({ label: "<script>x</script>" })]);
+    assert.doesNotMatch(html, /<script>/);
+  });
+
+  it("沒有指標就回空字串", () => {
+    assert.equal(monthReportGrid([]), "");
+    assert.equal(monthReportGrid(null), "");
   });
 });
 

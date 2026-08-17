@@ -450,6 +450,8 @@ class Application:
             return self._pens(token, path)
         if route == "/api/review":
             return self._review(token)
+        if route == "/api/monthly-report":
+            return self._monthly_report(token, path)
         if route == "/api/settings":
             return self._get_settings(token)
         if route == "/api/boars":
@@ -1070,6 +1072,47 @@ class Application:
                              for x in r["reasons"]]}
                 for r in rows
             ],
+        }
+
+    def _monthly_report(self, token, path) -> Tuple[int, dict]:
+        """生產月報,12 項指標。owner 專屬(規格第 17 條)。"""
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        today = _today()
+        year, month = today.year, today.month
+        raw = _query(path, "month")
+        if raw:
+            parts = raw.strip()[:7].split("-")
+            if len(parts) != 2 or not all(p.isdigit() for p in parts):
+                return 400, {"error": "月份格式錯誤,請用 YYYY-MM"}
+            year, month = int(parts[0]), int(parts[1])
+        if not 1 <= month <= 12:
+            return 400, {"error": "月份格式錯誤,請用 YYYY-MM"}
+
+        start, end = schedule.month_bounds(year, month)
+        sows = self.store.list_sows(farm_id, None)
+        events = self.store.list_sow_events(farm_id)
+        cfg = self._farm_settings(farm_id)
+        report = schedule.monthly_report(sows, events, start, end, cfg)
+
+        return 200, {
+            "start": _iso(report["start"]),
+            "end": _iso(report["end"]),
+            "herdSize": report["herdSize"],
+            "metrics": [
+                {"key": key,
+                 "label": labels.month_report_label(key),
+                 "unit": labels.month_report_unit(key),
+                 "digits": labels.month_report_digits(key),
+                 "value": m["value"], "n": m["n"]}
+                for key, m in report["metrics"].items()
+            ],
+            "basis": labels.month_report_basis(),
         }
 
     def _import_preview(self, payload, token) -> Tuple[int, dict]:
