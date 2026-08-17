@@ -420,6 +420,24 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 .gate-form #gateError { color: var(--critical); text-align: center; margin: 2px 0 0; }
+
+/* 密碼的「顯示」切換。
+   密碼框只看得到圓點,打錯了完全沒有回饋 —— 而這個站的說明還明講
+   「4 個中文字也可以」,用注音/倉頡選錯字更是看不出來,結果就是
+   註冊完再也登不進去,只看到「帳號或密碼錯誤」。看得到自己打了
+   什麼,是這個問題最直接的解法。
+   包一層 .pw-wrap 不影響既有版面:.gate-form / .drug-form 的 input
+   規則是後代選擇器,包起來之後照樣套用。 */
+.pw-wrap { position: relative; display: block; }
+.pw-toggle {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  border: none; background: none; color: var(--ink-faint);
+  font-family: inherit; font-size: 13px; font-weight: 600;
+  padding: 8px 10px; cursor: pointer;
+}
+.pw-toggle:hover { color: var(--accent); }
+/* 文字不要被切換鈕蓋住 */
+.pw-wrap input { padding-right: 60px !important; }
 .gate-toggle {
   text-align: center; margin: 4px 0 0 !important; max-width: none !important;
 }

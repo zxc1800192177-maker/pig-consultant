@@ -93,6 +93,7 @@ function applyLoginGate() {
     gateMode = "login";
     $("gateUsername").value = "";
     $("gatePassword").value = "";
+    hidePasswordField("gatePassword");
     $("gateError").hidden = true;
     renderGateForm();
   }
@@ -183,12 +184,22 @@ function openAuthPanel(mode) {
   $("authError").hidden = true;
   $("authUsername").value = "";
   $("authPassword").value = "";
+  hidePasswordField("authPassword");
   $("authPanel").classList.remove("is-hidden");
   $("authUsername").focus();
 }
 
 function closeAuthPanel() {
   $("authPanel").classList.add("is-hidden");
+}
+
+// 表單清空時一併把密碼收回圓點狀態 —— 否則上一個人按過「顯示」之後,
+// 下一次打開表單會直接以明文顯示正在輸入的密碼。
+function hidePasswordField(id) {
+  const field = $(id);
+  if (field) field.type = "password";
+  const toggle = document.querySelector(`[data-pw-toggle="${id}"]`);
+  if (toggle) toggle.textContent = "顯示";
 }
 
 function showAuthError(message) {
@@ -285,6 +296,18 @@ document.addEventListener("click", (e) => {
     return mode === "guest" ? startGuestSession() : openAuthPanel(mode);
   }
   if (e.target.closest('[data-auth-action="logout"]')) logout();
+
+  // 密碼的「顯示/隱藏」。看不到自己打了什麼,是「註冊完就再也登不進去」
+  // 最常見的成因 —— 尤其密碼含中文時,選錯字在圓點底下完全看不出來。
+  const toggle = e.target.closest("[data-pw-toggle]");
+  if (toggle) {
+    const field = $(toggle.dataset.pwToggle);
+    if (!field) return;
+    const shown = field.type === "text";
+    field.type = shown ? "password" : "text";
+    toggle.textContent = shown ? "顯示" : "隱藏";
+    field.focus();
+  }
 });
 
 $("authSubmit")?.addEventListener("click", submitAuthForm);

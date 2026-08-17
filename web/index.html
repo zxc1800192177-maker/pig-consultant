@@ -40,8 +40,19 @@
       <button class="btn-ghost" id="authClose">關閉</button>
     </div>
     <div class="drug-form">
-      <input type="text" id="authUsername" autocomplete="username" placeholder="使用者名稱">
-      <input type="password" id="authPassword" autocomplete="current-password" placeholder="密碼">
+      <!-- autocapitalize 等三個屬性要跟下面 #gateUsername 完全一致。
+           手機上文字框預設會自動把第一個字母變大寫,而使用者名稱是
+           區分大小寫的 —— 兩張表單設定不同的話,在其中一張註冊的
+           「Wang」到另一張輸入「wang」就會變成查無此帳號,而畫面只會
+           說「帳號或密碼錯誤」,使用者完全看不出差在哪。 -->
+      <input type="text" id="authUsername" autocomplete="username"
+             autocapitalize="off" autocorrect="off" spellcheck="false"
+             placeholder="使用者名稱">
+      <div class="pw-wrap">
+        <input type="password" id="authPassword" autocomplete="current-password"
+               placeholder="密碼">
+        <button type="button" class="pw-toggle" data-pw-toggle="authPassword">顯示</button>
+      </div>
       <button class="btn-primary" id="authSubmit">登入</button>
     </div>
     <p class="hint" id="authError" hidden></p>
@@ -62,8 +73,11 @@
         <input type="text" id="gateUsername" autocomplete="username"
                autocapitalize="off" autocorrect="off" spellcheck="false"
                placeholder="使用者名稱">
-        <input type="password" id="gatePassword" autocomplete="current-password"
-               placeholder="密碼">
+        <div class="pw-wrap">
+          <input type="password" id="gatePassword" autocomplete="current-password"
+                 placeholder="密碼">
+          <button type="button" class="pw-toggle" data-pw-toggle="gatePassword">顯示</button>
+        </div>
         <button class="btn-primary" id="gateSubmit">登入</button>
         <p class="hint" id="gateHint" hidden></p>
         <p class="hint" id="gateError" hidden></p>
