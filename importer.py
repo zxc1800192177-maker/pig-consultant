@@ -325,8 +325,19 @@ def import_into(store, farm_id: int, result: ParseResult,
     `exclude_lines` 是使用者在預覽畫面上勾選「不納入統計」的行號。
     那些事件**照樣寫入**,只是標記 excluded —— 不刪使用者的資料,
     日後可以改回來,母豬卡的時間軸也仍看得到。
+
+    整段包在 `store.batch()` 裡 —— 底下對 store 的呼叫動輒上萬次
+    (母豬、公豬、事件全部加起來),PostgresStore 沒有這個的話等於
+    每一筆都各自連一次資料庫,實測 300 行/198 筆寫入要 17.9 秒,
+    推算整份 3.5 萬行的檔案要 50 分鐘,而且逾時被砍斷還會留下寫到
+    一半的資料。batch() 借同一條連線重複用,結束時才一次 commit。
     """
-    excluded = set(exclude_lines)
+    with store.batch() as store:
+        return _write_import(store, farm_id, result, set(exclude_lines), recorded_by)
+
+
+def _write_import(store, farm_id: int, result: ParseResult,
+                  excluded: set, recorded_by=None) -> dict:
     entries = {r.ear_tag: r for r in result.rows if r.code == "GA"}
 
     # 一次撈全場建對照表。不能用 find_sow_by_tag —— 它只找 status='active'

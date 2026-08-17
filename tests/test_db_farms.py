@@ -293,6 +293,90 @@ class TestBothImplementationsAgree:
             assert "role" in source, f"PostgresStore.{name} 少了 role"
 
 
+class TestPostgresBatching:
+    """PostgresStore.batch() 是匯入效能問題的修法核心 —— 沒有它,匯入
+    32,159 筆事件等於開 32,159 次資料庫連線(實測 300 行/198 筆寫入要
+    17.9 秒,推算整份檔案要 50 分鐘,而且大概率被逾時砍斷,留下寫到
+    一半的資料)。這裡沒有真的 Postgres 可以連,用假的 psycopg 模組
+    驗證「batch 範圍內只開一條連線、離開後照常各自開連線」這個機制
+    本身是對的 —— 這比什麼都不測好,但不能取代真的部署驗證。
+
+    這個開發環境根本沒裝 psycopg(db.psycopg 是 None,PostgresStore
+    建構時就會擋下來),所以連 db.psycopg 本身都要換成假模組,
+    不能只換它的 .connect 屬性。
+    """
+
+    class _FakeConn:
+        def __init__(self, log):
+            self.log = log
+            log.append("open")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.log.append("close")
+            return False
+
+    class _FakePsycopg:
+        def __init__(self, connect_fn):
+            self.connect = connect_fn
+
+    def _store(self, monkeypatch, log):
+        import db
+        monkeypatch.setattr(db, "psycopg",
+                            self._FakePsycopg(lambda dsn: self._FakeConn(log)))
+        return db.PostgresStore("postgresql://fake")
+
+    def test_batch_reuses_one_connection(self, monkeypatch):
+        log = []
+        store = self._store(monkeypatch, log)
+
+        with store.batch():
+            with store._connect():
+                pass
+            with store._connect():
+                pass
+
+        assert log == ["open", "close"]
+
+    def test_connect_opens_a_fresh_connection_each_time_outside_batch(self, monkeypatch):
+        """batch() 以外的一般呼叫維持原樣 —— 一般端點一個請求本來就
+        只查一兩次,不必為了匯入這個特例改變其他路徑的行為。
+        """
+        log = []
+        store = self._store(monkeypatch, log)
+
+        with store._connect():
+            pass
+        with store._connect():
+            pass
+
+        assert log == ["open", "close", "open", "close"]
+
+    def test_nested_batch_reuses_the_outer_connection(self, monkeypatch):
+        log = []
+        store = self._store(monkeypatch, log)
+
+        with store.batch():
+            with store.batch():
+                with store._connect():
+                    pass
+
+        assert log == ["open", "close"]
+
+    def test_connection_closes_even_if_the_batch_body_raises(self, monkeypatch):
+        """匯入中途出錯不能留著沒關掉的連線。"""
+        log = []
+        store = self._store(monkeypatch, log)
+
+        with pytest.raises(ValueError):
+            with store.batch():
+                raise ValueError("匯入中途出錯")
+
+        assert log == ["open", "close"]
+
+
 class TestDevMemoryStore:
     """本機開發用的記憶體 store。
 

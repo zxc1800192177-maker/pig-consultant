@@ -17,8 +17,10 @@ Postgres 連線刻意「每次操作開一條、用完關掉」:免費方案的�
 """
 
 import collections
+import contextlib
 import json
 import secrets
+import threading
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -229,6 +231,19 @@ def new_token() -> str:
 class Store:
     """資料存取介面。實作見 InMemoryStore / PostgresStore。"""
 
+    def batch(self):
+        """連續呼叫大量寫入方法時用(目前只有 importer.import_into 用到)。
+
+        PostgresStore 預設每個方法各自連線、各自送出 —— 對單一請求
+        來說沒有問題,但匯入一次要寫上萬筆,等於一個請求裡開上萬條
+        連線,實測 300 行/198 筆寫入要 17.9 秒,推算整份 3.5 萬行的檔案
+        要 50 分鐘,遠遠超過使用者能等的時間(而且大概率會被逾時砍斷,
+        留下寫到一半的資料)。`with store.batch():` 讓 PostgresStore
+        借同一條連線重複用、最後一次 commit;InMemoryStore 沒有連線
+        可省,直接把自己借出去。
+        """
+        raise NotImplementedError
+
     # --- 使用者 ---
     def create_user(self, username, password_hash, is_guest=False) -> int:
         raise NotImplementedError
@@ -426,6 +441,11 @@ class InMemoryStore(Store):
         # (sow_id, event_type, event_date) → event_id。對應 PostgresStore 的
         # sow_events_dedupe 唯一索引 —— 沒有它,匯入時的判重是 O(n²)。
         self._event_key = {}
+
+    @contextlib.contextmanager
+    def batch(self):
+        """沒有連線可省,直接把自己借出去用(見 Store.batch 的說明)。"""
+        yield self
 
     def _new_id(self, kind: str) -> int:
         self._next[kind] += 1
@@ -817,9 +837,37 @@ class PostgresStore(Store):
         if psycopg is None:
             raise RuntimeError("需要 psycopg 才能使用 PostgresStore,請安裝 requirements.txt")
         self.dsn = dsn
+        # 每條處理請求的執行緒各自的「目前批次連線」—— 用 thread-local
+        # 而不是一般的實例屬性,因為這個 PostgresStore 是所有請求共用
+        # 的同一個物件(見 server.py 的 APP = Application(...))。用一般
+        # 屬性的話,兩個請求同時匯入就會互相搶對方的連線,造成資料寫錯
+        # 請求或連線被兩個執行緒同時使用(psycopg 的連線不是執行緒安全的)。
+        self._local = threading.local()
 
     def _connect(self):
+        conn = getattr(self._local, "batch_conn", None)
+        if conn is not None:
+            # 借出去用,不能讓 `with ... as conn:` 提前把它 commit/關掉 ——
+            # 那要留給 batch() 結束時做一次。
+            return contextlib.nullcontext(conn)
         return psycopg.connect(self.dsn)
+
+    @contextlib.contextmanager
+    def batch(self):
+        """見 Store.batch 的說明。開一條連線重複借給接下來所有的
+        self._connect() 呼叫用,結束時才一次 commit、關閉。
+
+        巢狀呼叫(理論上不會發生,防呆用)沿用最外層那條連線,不重開。
+        """
+        if getattr(self._local, "batch_conn", None) is not None:
+            yield self
+            return
+        with psycopg.connect(self.dsn) as conn:
+            self._local.batch_conn = conn
+            try:
+                yield self
+            finally:
+                self._local.batch_conn = None
 
     def ensure_schema(self) -> None:
         with self._connect() as conn:
