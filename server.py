@@ -8,6 +8,7 @@ Application 與 HTTP 傳輸分離,測試才能不開 socket 直接驗證行為�
 
 import http.server
 import json
+import math
 import pathlib
 import socketserver
 import threading
@@ -239,8 +240,13 @@ class Application:
 
     def _over_window_limit(
         self, bucket: Dict[str, List[float]], client: str, limit: int, window: int
-    ) -> bool:
+    ) -> int:
         """滑動視窗限流。每一種額度各自帶一個 bucket 進來。
+
+        回傳「還要等幾秒」,放行時是 0 —— 0 是假值,所以呼叫端照樣可以
+        直接寫 `if self._over_login_limit(client):`。會回秒數而不是 True
+        是為了讓畫面講得出「請等 X 分鐘」:只說「請稍後再試」的話,
+        使用者只能每隔幾秒重按一次碰運氣(實際發生過)。
 
         只在實際放行時記錄 —— 被擋下的嘗試不計入,否則使用者越重試,
         額度恢復時間被推得越晚,等於因為被擋而受到額外懲罰。
@@ -261,20 +267,21 @@ class Application:
             hits = [t for t in bucket.get(client, []) if t > cutoff]
             if len(hits) >= limit:
                 bucket[client] = hits
-                return True
+                # 最舊的那一筆滿 window 秒就會讓出一個名額,不必等整個窗口。
+                return max(1, math.ceil(hits[0] + window - now))
 
             hits.append(now)
             bucket[client] = hits
-            return False
+            return 0
 
-    def _over_hourly_limit(self, client: str) -> bool:
+    def _over_hourly_limit(self, client: str) -> int:
         """每個 IP 每小時的提問上限。"""
         return self._over_window_limit(
             self._hourly_hits, client,
             config.MAX_QUESTIONS_PER_HOUR, config.RATE_WINDOW_SEC,
         )
 
-    def _over_login_limit(self, client: str) -> bool:
+    def _over_login_limit(self, client: str) -> int:
         """登入/註冊/訪客建立的嘗試次數上限。
 
         跟提問限流分開計算,原因是威脅不同:提問是花錢,登入是被猜密碼,
@@ -286,7 +293,7 @@ class Application:
             config.MAX_LOGIN_ATTEMPTS_PER_WINDOW, config.LOGIN_WINDOW_SEC,
         )
 
-    def _over_scan_limit(self, client: str) -> bool:
+    def _over_scan_limit(self, client: str) -> int:
         """拍照辨識的每小時上限。
 
         跟提問分開計算:建置藥品庫是一次性的(一口氣拍十張很正常),
@@ -591,8 +598,13 @@ class Application:
 
         # 註冊/登入/訪客建立都會消耗資源(雜湊運算或資料庫寫入),
         # 而且都是可以被自動化重複嘗試的入口,一律先過節流。
-        if self._over_login_limit(client):
-            return 429, {"error": "嘗試次數過多,請稍後再試"}
+        # 講得出還要等多久。只說「請稍後再試」的話,使用者只能每隔幾秒
+        # 重按一次碰運氣,而重按並不會讓額度更快恢復。
+        wait = self._over_login_limit(client)
+        if wait:
+            minutes = math.ceil(wait / 60)
+            return 429, {"error": f"嘗試次數過多,請等 {minutes} 分鐘後再試"
+                                  "(重複嘗試不會讓等待時間變長)"}
 
         try:
             if path == "/api/auth/register":

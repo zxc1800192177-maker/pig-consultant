@@ -784,6 +784,34 @@ class TestLoginThrottle:
         for _ in range(5):
             assert _post_as(app, "/api/auth/logout", {}, token)[0] == 200
 
+    def test_message_says_how_long_to_wait(self, monkeypatch):
+        """只說「請稍後再試」的話,使用者只能每隔幾秒重按一次碰運氣 ——
+        而重按並不會讓額度更快恢復,所以那是純粹的浪費(實際被問過
+        「這個要等多久」)。
+        """
+        monkeypatch.setattr(config, "MAX_LOGIN_ATTEMPTS_PER_WINDOW", 1)
+        monkeypatch.setattr(config, "LOGIN_WINDOW_SEC", 900)
+        app = _account_app()
+        _post(app, "/api/auth/login", {"username": "farmer", "password": "guess"})
+
+        status, body = _post(app, "/api/auth/login",
+                             {"username": "farmer", "password": "guess"})
+        assert status == 429
+        assert "15 分鐘" in body["error"], body["error"]
+
+    def test_retrying_does_not_extend_the_wait(self, monkeypatch):
+        """被擋下的嘗試不計入,否則使用者越急著重試、鎖得越久。"""
+        monkeypatch.setattr(config, "MAX_LOGIN_ATTEMPTS_PER_WINDOW", 1)
+        monkeypatch.setattr(config, "LOGIN_WINDOW_SEC", 900)
+        app = _account_app()
+        _post(app, "/api/auth/login", {"username": "farmer", "password": "guess"})
+
+        waits = []
+        for _ in range(3):
+            waits.append(_post(app, "/api/auth/login",
+                               {"username": "farmer", "password": "guess"})[1]["error"])
+        assert len(set(waits)) == 1, f"重試把等待時間改掉了:{waits}"
+
 
 # --- 藥品標示拍照辨識 ---
 
