@@ -46,6 +46,31 @@ export function shiftMonth(iso, delta) {
   return `${year}-${String(month).padStart(2, "0")}`;
 }
 
+// 從「YYYY-MM」取出年份。壞掉的格式回 null,不拋例外、也不猜——呼叫端
+// (app.js)自己決定要退回哪一年。
+export function yearOfMonth(monthStr) {
+  const m = /^(\d{4})/.exec(String(monthStr || ""));
+  return m ? Number(m[1]) : null;
+}
+
+/** 生產月報的年月選擇器:一次列出某一年的 12 個月,點哪個月就直接跳過去。
+ *
+ * 不做這個的話,要看半年前的月報得靠 ‹ › 一格一格點,而**每點一次都是
+ * 一次重新計算**(即時算、不存快照),找去年同月這種情境等於點十幾次、
+ * 等十幾次,體驗上很沒效率。
+ */
+export function monthPickerGrid(year, selectedMonth) {
+  const months = [];
+  for (let m = 1; m <= 12; m++) {
+    const key = `${year}-${String(m).padStart(2, "0")}`;
+    const current = key === selectedMonth;
+    months.push(`
+      <button type="button" class="mr-picker-month${current ? " is-current" : ""}"
+              data-mr-pick="${key}">${m} 月</button>`);
+  }
+  return months.join("");
+}
+
 // 把事件的 detail 整理成一句話。欄位是哪些由 importer.py 決定,
 // 這裡只負責挑出有值的來顯示。
 export function describeEvent(event) {

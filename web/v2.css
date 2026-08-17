@@ -38,6 +38,43 @@ body { padding-bottom: 96px; }
   color: var(--ink-faint); font-size: 22px; line-height: 1; cursor: pointer;
   padding: 0 8px; user-select: none;
 }
+
+/* 生產月報的月份選擇器。點月份文字本身打開,不必用 ‹ › 一格一格點過去 ——
+   那樣點十幾次才到得了半年前,而且每點一次都要重新計算一次月報。
+   虛線底線是「這個文字可以點」的提示,跟 .weekbar 裡的箭頭一樣重要,
+   否則使用者根本不會發現月份本身也能點。 */
+.mr-label-btn {
+  background: none; border: none; font: inherit; color: inherit;
+  cursor: pointer; padding: 0 8px; text-decoration: underline;
+  text-decoration-style: dotted; text-underline-offset: 3px;
+}
+.mr-picker {
+  margin: 8px 0 6px; padding: 12px; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.mr-picker-year {
+  display: flex; align-items: center; justify-content: center; gap: 20px;
+  margin-bottom: 10px;
+}
+.mr-picker-year span {
+  color: var(--ink-faint); font-size: 20px; line-height: 1; cursor: pointer;
+  user-select: none;
+}
+#mrPickerYearText { color: var(--ink); font-size: 15px; font-weight: 700; }
+/* 三欄四排:月份按鈕只需要「1 月」~「12 月」這幾個字,不像 .perf
+   那些統計格需要放數字,375px 手機上三欄還是按得準。 */
+.mr-picker-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+}
+.mr-picker-month {
+  min-height: 40px; padding: 8px 4px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.mr-picker-month:active { transform: scale(.96); }
+.mr-picker-month.is-current {
+  border-color: var(--accent); background: var(--accent); color: #fff;
+}
 .tgrp {
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   margin-top: 12px; overflow: hidden;

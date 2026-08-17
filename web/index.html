@@ -271,7 +271,19 @@
         </div>
       </div>
       <div class="weekbar">
-        <span id="mrPrev">‹</span><div id="mrLabel">載入中…</div><span id="mrNext">›</span>
+        <span id="mrPrev">‹</span>
+        <button type="button" id="mrLabel" class="mr-label-btn">載入中…</button>
+        <span id="mrNext">›</span>
+      </div>
+      <!-- 月份太久遠時,用 ‹ › 一格一格點效率太差(每點一次都要重新
+           計算)。點月份文字本身開這個選擇器,一次跳到目標月份。 -->
+      <div class="mr-picker is-hidden" id="mrPicker">
+        <div class="mr-picker-year">
+          <span id="mrPickerYearPrev">‹</span>
+          <span id="mrPickerYearText"></span>
+          <span id="mrPickerYearNext">›</span>
+        </div>
+        <div class="mr-picker-grid" id="mrPickerGrid"></div>
       </div>
       <p class="hint" id="mrHerdSize"></p>
       <div class="perf" id="mrGrid"></div>

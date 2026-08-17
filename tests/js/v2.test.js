@@ -19,6 +19,7 @@ import {
   eventRow,
   formatMonth,
   formatWeek,
+  monthPickerGrid,
   monthReportGrid,
   parityTone,
   pendingCheckRow,
@@ -30,6 +31,7 @@ import {
   sowRow,
   taskGroup,
   timelineCaption,
+  yearOfMonth,
 } from "../../web/lib/v2.js";
 
 const ev = (over = {}) => ({ type: "MT", date: "2026-03-25", detail: {}, ...over });
@@ -97,6 +99,49 @@ describe("月份加減", () => {
 
   it("不受每月天數不同影響 —— 月初的日期加減天數會撞到月底問題", () => {
     assert.equal(shiftMonth("2026-01-31", 1), "2026-02");
+  });
+});
+
+describe("從月份字串取年份", () => {
+  it("取出年份", () => {
+    assert.equal(yearOfMonth("2026-08"), 2026);
+  });
+
+  it("壞掉的格式回 null,不拋例外", () => {
+    assert.equal(yearOfMonth(""), null);
+    assert.equal(yearOfMonth(null), null);
+    assert.equal(yearOfMonth(undefined), null);
+  });
+});
+
+describe("生產月報的年月選擇器", () => {
+  // 每個按鈕的 class 跟 data-mr-pick 分兩行寫,所以用「這個按鈕」整段
+  // (以 <button 切開)去找,不能只看含 data-mr-pick 那一行。
+  const buttonFor = (html, key) =>
+    html.split("<button").find((chunk) => chunk.includes(`data-mr-pick="${key}"`));
+
+  it("列出 12 個月", () => {
+    const html = monthPickerGrid(2026, "2026-08");
+    for (let m = 1; m <= 12; m++) {
+      const key = `2026-${String(m).padStart(2, "0")}`;
+      assert.ok(html.includes(`data-mr-pick="${key}"`), `缺少 ${m} 月`);
+    }
+  });
+
+  it("目前選到的月份有標記", () => {
+    const html = monthPickerGrid(2026, "2026-03");
+    assert.match(buttonFor(html, "2026-03"), /is-current/);
+  });
+
+  it("不是目前選到的月份沒有標記", () => {
+    const html = monthPickerGrid(2026, "2026-03");
+    assert.doesNotMatch(buttonFor(html, "2026-04"), /is-current/);
+  });
+
+  it("换年份時,同一個月份的 key 跟著換", () => {
+    const html2025 = monthPickerGrid(2025, "2026-08");
+    assert.ok(html2025.includes('data-mr-pick="2025-08"'));
+    assert.ok(!html2025.includes('data-mr-pick="2026-08"'));
   });
 });
 

@@ -12,9 +12,9 @@ import { SseParser } from "./lib/sse.js";
 import { addFactor, removeFactor } from "./lib/factors.js";
 import {
   alertRow, boarPerformanceGrid, boarRow, buildAlerts, customTaskRow, customTaskSetting,
-  eventName, eventRow, formatMonth, formatWeek, monthReportGrid, performanceGrid,
-  pendingCheckRow, reviewRow, settingRow, shiftDate, shiftMonth, sowRow, statusPills,
-  taskGroup, timelineCaption, TIMELINE_LIMIT, visibleEvents,
+  eventName, eventRow, formatMonth, formatWeek, monthPickerGrid, monthReportGrid,
+  performanceGrid, pendingCheckRow, reviewRow, settingRow, shiftDate, shiftMonth, sowRow,
+  statusPills, taskGroup, timelineCaption, TIMELINE_LIMIT, visibleEvents, yearOfMonth,
 } from "./lib/v2.js";
 import {
   SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, recordedRow,
@@ -1317,11 +1317,22 @@ document.addEventListener("click", (e) => {
   if (e.target.id === "weekPrev") { weekStart = shiftDate(weekStart, -7); return reloadTasks(); }
   if (e.target.id === "weekNext") { weekStart = shiftDate(weekStart, 7); return reloadTasks(); }
   if (e.target.id === "mrPrev") {
+    closeMonthPicker();
     monthReportMonth = shiftMonth(monthReportMonth, -1);
     return reloadMonthReport();
   }
   if (e.target.id === "mrNext") {
+    closeMonthPicker();
     monthReportMonth = shiftMonth(monthReportMonth, 1);
+    return reloadMonthReport();
+  }
+  if (e.target.id === "mrLabel") return toggleMonthPicker();
+  if (e.target.id === "mrPickerYearPrev") { mrPickerYear -= 1; return renderMonthPicker(); }
+  if (e.target.id === "mrPickerYearNext") { mrPickerYear += 1; return renderMonthPicker(); }
+  const monthPick = e.target.closest("[data-mr-pick]");
+  if (monthPick) {
+    monthReportMonth = monthPick.dataset.mrPick;
+    closeMonthPicker();
     return reloadMonthReport();
   }
 });
@@ -1691,6 +1702,33 @@ async function reloadMonthReport() {
     ? `平均在場 ${data.herdSize.toFixed(1)} 頭` : "本月無在場母豬記錄";
   box.innerHTML = monthReportGrid(data.metrics);
   $("mrBasis").textContent = data.basis;
+}
+
+// 月份選擇器:點月份文字本身開起來,一次跳到目標月份 —— 不然要看半年前
+// 的月報得靠 ‹ › 一格一格點,每點一次都要重新計算一次(即時算、不存
+// 快照),效率很差。mrPickerYear 是選擇器目前顯示哪一年,跟已經載入的
+// monthReportMonth 分開 —— 瀏覽年份不該連帶重新計算月報。
+let mrPickerYear = null;
+
+function renderMonthPicker() {
+  $("mrPickerYearText").textContent = `${mrPickerYear} 年`;
+  $("mrPickerGrid").innerHTML = monthPickerGrid(mrPickerYear, monthReportMonth);
+}
+
+function toggleMonthPicker() {
+  const picker = $("mrPicker");
+  if (!picker) return;
+  if (!picker.classList.contains("is-hidden")) {
+    picker.classList.add("is-hidden");
+    return;
+  }
+  mrPickerYear = yearOfMonth(monthReportMonth) || new Date().getFullYear();
+  renderMonthPicker();
+  picker.classList.remove("is-hidden");
+}
+
+function closeMonthPicker() {
+  $("mrPicker")?.classList.add("is-hidden");
 }
 
 // ── 設定 ──
