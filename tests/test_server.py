@@ -755,6 +755,94 @@ class TestLoginGateCanBeTurnedOff:
         assert body["loginRequired"] is False
 
 
+class TestRecoveryEndpoints:
+    """忘記密碼的入口。這是唯一「不必知道密碼就能改密碼」的路徑,
+    所以每一道守衛都要釘住。
+    """
+
+    def test_registration_returns_a_code_to_show_once(self):
+        app = _account_app()
+        status, body = _post(app, "/api/auth/register",
+                             {"username": "farmer", "password": "hunter2hunter2"})
+        assert status == 200
+        assert body.get("recoveryCode")
+
+    def test_login_does_not_leak_a_code(self):
+        """登入不該吐出救援碼 —— 那等於讓任何知道密碼的人隨手拿到備用鑰匙。"""
+        app = _account_app()
+        _post(app, "/api/auth/register",
+              {"username": "farmer", "password": "hunter2hunter2"})
+        _, body = _post(app, "/api/auth/login",
+                        {"username": "farmer", "password": "hunter2hunter2"})
+        assert "recoveryCode" not in body
+
+    def test_recover_resets_the_password(self):
+        app = _account_app()
+        code = _post(app, "/api/auth/register",
+                     {"username": "farmer", "password": "hunter2hunter2"})[1]["recoveryCode"]
+
+        status, body = _post(app, "/api/auth/recover",
+                             {"username": "farmer", "code": code,
+                              "password": "brand-new-pass-9"})
+        assert status == 200
+        assert body["recoveryCode"] != code
+        assert _post(app, "/api/auth/login",
+                     {"username": "farmer", "password": "brand-new-pass-9"})[0] == 200
+
+    def test_recover_does_not_log_you_in(self):
+        """OWASP:重設後要求重新登入,才能確認新密碼真的被記住了。"""
+        app = _account_app()
+        code = _post(app, "/api/auth/register",
+                     {"username": "farmer", "password": "hunter2hunter2"})[1]["recoveryCode"]
+        _, body = _post(app, "/api/auth/recover",
+                        {"username": "farmer", "code": code, "password": "brand-new-pass-9"})
+        assert SET_SESSION_KEY not in body
+
+    def test_wrong_code_is_refused(self):
+        app = _account_app()
+        _post(app, "/api/auth/register",
+              {"username": "farmer", "password": "hunter2hunter2"})
+        assert _post(app, "/api/auth/recover",
+                     {"username": "farmer", "code": "AAAA-BBBB-CCCC-DDDD",
+                      "password": "brand-new-pass-9"})[0] == 401
+
+    def test_unknown_account_looks_identical_to_a_wrong_code(self):
+        """否則這支端點就成了「查詢誰有註冊」的工具。"""
+        app = _account_app()
+        _post(app, "/api/auth/register",
+              {"username": "farmer", "password": "hunter2hunter2"})
+        missing = _post(app, "/api/auth/recover",
+                        {"username": "nobody-here", "code": "AAAA-BBBB-CCCC-DDDD",
+                         "password": "brand-new-pass-9"})
+        wrong = _post(app, "/api/auth/recover",
+                      {"username": "farmer", "code": "AAAA-BBBB-CCCC-DDDD",
+                       "password": "brand-new-pass-9"})
+        assert missing == wrong
+
+    def test_recover_is_throttled(self, monkeypatch):
+        """救援碼可以被暴力猜,所以跟登入共用同一份節流。"""
+        monkeypatch.setattr(config, "MAX_LOGIN_ATTEMPTS_PER_WINDOW", 2)
+        app = _account_app()
+        for _ in range(2):
+            _post(app, "/api/auth/recover",
+                  {"username": "farmer", "code": "AAAA-BBBB-CCCC-DDDD", "password": "x"})
+        assert _post(app, "/api/auth/recover",
+                     {"username": "farmer", "code": "AAAA-BBBB-CCCC-DDDD",
+                      "password": "x"})[0] == 429
+
+    def test_regenerating_needs_login_and_password(self):
+        app = _account_app()
+        assert _post(app, "/api/auth/recovery-code",
+                     {"password": "hunter2hunter2"})[0] == 401
+
+        token = _register(app)
+        assert _post_as(app, "/api/auth/recovery-code",
+                        {"password": "wrong-one"}, token)[0] == 401
+        status, body = _post_as(app, "/api/auth/recovery-code",
+                                {"password": "hunter2hunter2"}, token)
+        assert status == 200 and body["recoveryCode"]
+
+
 class TestDeleteAccount:
     """不可逆的破壞性動作,所以「誰能按、按了會發生什麼」都要釘住。"""
 

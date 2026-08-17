@@ -475,6 +475,136 @@ class TestHealthCheckRetention:
         assert len(store.list_health_checks(b.id)) == 1
 
 
+class TestRecoveryCodeFormat:
+    """救援碼會被抄在紙上、幾個月後再打回去 —— 抄寫與重打的每一種
+    常見出入都不該讓一組有效的碼被拒絕。
+    """
+
+    def test_has_no_lookalike_characters(self):
+        from auth import RECOVERY_ALPHABET, new_recovery_code
+        for _ in range(50):
+            code = new_recovery_code().replace("-", "")
+            assert set(code) <= set(RECOVERY_ALPHABET)
+            # 分不出 0 與 O、1 與 I/L 的話,使用者會以為自己記錯而放棄
+            assert not (set(code) & set("O0I1L"))
+
+    def test_codes_are_not_repeated(self):
+        from auth import new_recovery_code
+        assert len({new_recovery_code() for _ in range(200)}) == 200
+
+    def test_normalisation_forgives_transcription_differences(self):
+        from auth import normalize_recovery_code
+        canonical = normalize_recovery_code("K7QM-3XPR-9WFT-2HDN")
+        for typed in ("k7qm-3xpr-9wft-2hdn", "K7QM3XPR9WFT2HDN",
+                      "  K7QM-3XPR-9WFT-2HDN  ", "K7QM 3XPR 9WFT 2HDN"):
+            assert normalize_recovery_code(typed) == canonical
+
+    def test_junk_input_does_not_crash(self):
+        from auth import normalize_recovery_code
+        for junk in (None, 123, [], {}):
+            assert normalize_recovery_code(junk) == ""
+
+
+class TestRecoveryCode:
+    def test_registration_hands_out_a_code(self):
+        """唯一能在忘記密碼之前先準備好的時機就是註冊當下。"""
+        store = InMemoryStore()
+        auth = Auth(store)
+        assert auth.register("farmer", "hunter2hunter2").recovery_code
+
+    def test_only_the_hash_is_stored(self, auth, store):
+        """能被讀出來的備用鑰匙就不是備用鑰匙。"""
+        result = auth.register("farmer", "hunter2hunter2")
+        stored = store.get_user_by_username("farmer")["recovery_hash"]
+        assert stored
+        assert result.recovery_code not in stored
+        assert result.recovery_code.replace("-", "") not in stored
+
+    def test_code_resets_the_password(self, auth):
+        result = auth.register("farmer", "hunter2hunter2")
+        auth.reset_with_recovery_code("farmer", result.recovery_code, "brand-new-pass-9")
+
+        assert auth.login("farmer", "brand-new-pass-9").user.username == "farmer"
+        with pytest.raises(InvalidCredentials):
+            auth.login("farmer", "hunter2hunter2")
+
+    def test_code_works_however_it_was_transcribed(self, auth):
+        result = auth.register("farmer", "hunter2hunter2")
+        typed = result.recovery_code.lower().replace("-", " ")
+        auth.reset_with_recovery_code("farmer", typed, "brand-new-pass-9")
+        assert auth.login("farmer", "brand-new-pass-9")
+
+    def test_used_code_cannot_be_used_again(self, auth):
+        """一次性才有意義 —— 否則它就是一把永遠有效的第二密碼。"""
+        result = auth.register("farmer", "hunter2hunter2")
+        auth.reset_with_recovery_code("farmer", result.recovery_code, "brand-new-pass-9")
+
+        with pytest.raises(InvalidCredentials):
+            auth.reset_with_recovery_code("farmer", result.recovery_code, "third-pass-77")
+
+    def test_reset_hands_back_a_fresh_code(self):
+        """用掉一組就要立刻補上下一組,否則使用者第二次忘記時已經沒得救。"""
+        store = InMemoryStore()
+        auth = Auth(store)
+        first = auth.register("farmer", "hunter2hunter2").recovery_code
+        second = auth.reset_with_recovery_code("farmer", first, "brand-new-pass-9")
+
+        assert second and second != first
+        auth.reset_with_recovery_code("farmer", second, "third-pass-77")
+        assert auth.login("farmer", "third-pass-77")
+
+    def test_wrong_code_is_refused(self, auth):
+        auth.register("farmer", "hunter2hunter2")
+        with pytest.raises(InvalidCredentials):
+            auth.reset_with_recovery_code("farmer", "AAAA-BBBB-CCCC-DDDD", "brand-new-pass-9")
+
+    def test_unknown_account_is_refused_the_same_way(self, auth):
+        """訊息要跟「碼錯了」一模一樣,否則這裡就成了查詢誰有註冊的工具。"""
+        auth.register("farmer", "hunter2hunter2")
+        with pytest.raises(InvalidCredentials) as unknown:
+            auth.reset_with_recovery_code("nobody", "AAAA-BBBB-CCCC-DDDD", "brand-new-pass-9")
+        with pytest.raises(InvalidCredentials) as wrong_code:
+            auth.reset_with_recovery_code("farmer", "AAAA-BBBB-CCCC-DDDD", "brand-new-pass-9")
+        assert str(unknown.value) == str(wrong_code.value)
+
+    def test_weak_new_password_is_still_rejected(self, auth):
+        """走救援流程不代表可以放行一組弱密碼。"""
+        result = auth.register("farmer", "hunter2hunter2")
+        with pytest.raises(ValidationError):
+            auth.reset_with_recovery_code("farmer", result.recovery_code, "123")
+
+    def test_existing_sessions_are_logged_out(self, auth):
+        """會走到重設,常常正是因為擔心帳號被別人拿走。"""
+        result = auth.register("farmer", "hunter2hunter2")
+        assert auth.resolve_session(result.token) is not None
+
+        auth.reset_with_recovery_code("farmer", result.recovery_code, "brand-new-pass-9")
+
+        assert auth.resolve_session(result.token) is None
+
+    def test_regenerate_requires_the_password(self, auth):
+        """否則借到一支沒鎖的手機就能印出一把長期有效的備用鑰匙。"""
+        result = auth.register("farmer", "hunter2hunter2")
+        with pytest.raises(InvalidCredentials):
+            auth.regenerate_recovery_code(result.token, "wrong-password")
+
+    def test_regenerate_replaces_the_old_code(self, auth):
+        result = auth.register("farmer", "hunter2hunter2")
+        fresh = auth.regenerate_recovery_code(result.token, "hunter2hunter2")
+
+        assert fresh != result.recovery_code
+        with pytest.raises(InvalidCredentials):
+            auth.reset_with_recovery_code("farmer", result.recovery_code, "brand-new-pass-9")
+        auth.reset_with_recovery_code("farmer", fresh, "brand-new-pass-9")
+
+    def test_account_without_a_code_cannot_be_reset(self, auth, store):
+        """這個功能出現之前註冊的帳號沒有碼 —— 不能因此就放行任何輸入。"""
+        user_id = store.create_user("oldtimer", hash_password("hunter2hunter2"))
+        assert store.get_user_by_id(user_id)["recovery_hash"] is None
+        with pytest.raises(InvalidCredentials):
+            auth.reset_with_recovery_code("oldtimer", "", "brand-new-pass-9")
+
+
 class TestLegacyAccountsGetABackfilledFarm:
     """v2 上線前(users 表還沒有 farm_id 欄位時)就存在的帳號,ALTER TABLE
     加欄位不會幫舊資料補值,所以這些帳號的 farm_id 是 NULL。register()

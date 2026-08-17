@@ -276,21 +276,40 @@ class TestBothImplementationsAgree:
                         bad.append(f"{impl.__name__}.{name}: {got} != {want}")
         assert bad == [], "\n".join(bad)
 
-    def test_get_user_by_id_returns_farm_scoping_fields(self):
-        """簽章一致不代表回傳的資料一樣完整。PostgresStore.get_user_by_id/
-        get_user_by_username 曾經只 SELECT id、username、password_hash、
-        is_guest,漏了 farm_id 與 role —— InMemoryStore 因為整包 dict
-        本來就存了這兩個欄位,測試永遠過;真的部署到 Postgres 後,
-        resolve_session() 每次都讀到 farm_id=None,連剛註冊的帳號都被
-        誤判成「這個帳號還沒有對應的牧場」。這裡沒有真的 Postgres 可以連,
-        改成比對原始碼裡的 SQL 與回傳欄位,把這個坑釘住。
+    def test_both_stores_return_the_same_user_fields(self):
+        """簽章一致不代表回傳的資料一樣完整。
+
+        PostgresStore.get_user_by_username 曾經只 SELECT id、username、
+        password_hash、is_guest,漏了 farm_id 與 role —— InMemoryStore
+        因為整包 dict 本來就存著全部欄位,測試永遠過;真的部署到 Postgres
+        之後,resolve_session() 每次都讀到 farm_id=None,連剛註冊的帳號
+        都被誤判成「這個帳號還沒有對應的牧場」,整個網站等於不能用。
+
+        這裡沒有真的 Postgres 可以連,所以直接比對兩邊「回傳哪些欄位」:
+        少加一個欄位就會被抓出來,而不是等上線才發現。
         """
-        import inspect
+        from db import InMemoryStore, PostgresStore
+
+        memory = InMemoryStore()
+        user_id = memory.create_user("farmer", "hash")
+        memory_fields = set(memory.get_user_by_id(user_id))
+
+        columns = [c.strip() for c in PostgresStore.USER_COLS.split(",")]
+        postgres_fields = set(PostgresStore._user_row(tuple(range(len(columns)))))
+
+        assert postgres_fields == memory_fields, (
+            f"兩邊的使用者欄位對不起來:"
+            f"只有 Postgres 有 {postgres_fields - memory_fields}、"
+            f"只有記憶體版有 {memory_fields - postgres_fields}"
+        )
+
+    def test_postgres_user_row_matches_its_own_column_list(self):
+        """_user_row 是照位置取值的,欄位數對不上就會整排錯開 ——
+        錯開之後 password_hash 會變成別的欄位的值,而且不會報錯。
+        """
         from db import PostgresStore
-        for name in ("get_user_by_id", "get_user_by_username", "_user_row"):
-            source = inspect.getsource(getattr(PostgresStore, name))
-            assert "farm_id" in source, f"PostgresStore.{name} 少了 farm_id"
-            assert "role" in source, f"PostgresStore.{name} 少了 role"
+        columns = [c.strip() for c in PostgresStore.USER_COLS.split(",")]
+        assert len(PostgresStore._user_row(tuple(range(len(columns))))) == len(columns)
 
 
 class TestDeleteAccount:

@@ -621,6 +621,25 @@ class Application:
             return 429, {"error": f"嘗試次數過多,請等 {minutes} 分鐘後再試"
                                   "(重複嘗試不會讓等待時間變長)"}
 
+        # 救援碼流程。兩支都放在節流之後 —— 救援碼是可以被暴力猜的東西。
+        if path == "/api/auth/recover":
+            try:
+                fresh = self.auth.reset_with_recovery_code(
+                    payload.get("username"), payload.get("code"),
+                    payload.get("password"))
+            except AuthError as e:
+                return self._auth_error_status(e), {"error": str(e)}
+            # 刻意不順便登入(OWASP):要求重新登入一次,才能確認新密碼
+            # 真的被記住了,而不是等下次要用時才發現又進不去。
+            return 200, {"recoveryCode": fresh}
+
+        if path == "/api/auth/recovery-code":
+            try:
+                fresh = self.auth.regenerate_recovery_code(token, payload.get("password"))
+            except AuthError as e:
+                return self._auth_error_status(e), {"error": str(e)}
+            return 200, {"recoveryCode": fresh}
+
         try:
             if path == "/api/auth/register":
                 result = self.auth.register(payload.get("username"), payload.get("password"))
@@ -637,10 +656,15 @@ class Application:
         except AuthError as e:
             return self._auth_error_status(e), {"error": str(e)}
 
-        return 200, {
+        body = {
             **self._user_payload(result.user),
             SET_SESSION_KEY: result.token,
         }
+        # 註冊才會帶救援碼。明碼只有這一刻存在,前端必須當場顯示給
+        # 使用者抄下來 —— 之後連我們自己都拿不回來(資料庫裡只剩雜湊)。
+        if result.recovery_code:
+            body["recoveryCode"] = result.recovery_code
+        return 200, body
 
     # --- 健檢紀錄 ---
 

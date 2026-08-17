@@ -48,6 +48,40 @@ _SCRYPT_P = 1
 _SALT_BYTES = 16
 
 
+# 救援碼的字母表。**刻意拿掉 0、O、1、I、L 這些看起來一樣的字元** ——
+# 這組碼的使用情境是抄在筆記本上、幾個月後再照著打回去,分不出是 0 還是 O
+# 的話,使用者會以為自己記錯而放棄,而那正是這個功能唯一要解決的問題。
+# 因為它們從來不會出現,也就沒有「要還原成哪一個」的問題。
+# 剩下 31 個字元,16 個字約 79 位元亂度,猜不完。
+RECOVERY_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+RECOVERY_GROUPS = 4
+RECOVERY_GROUP_LEN = 4
+
+
+def new_recovery_code() -> str:
+    """產生一組人抄得動的救援碼,例如 K7QM-3XPR-9WFT-2HDN。
+
+    分組加連字號只是為了好抄好念;比對前會正規化,所以使用者打不打
+    連字號、打大寫還是小寫都算數。
+    """
+    chars = [secrets.choice(RECOVERY_ALPHABET)
+             for _ in range(RECOVERY_GROUPS * RECOVERY_GROUP_LEN)]
+    groups = ["".join(chars[i:i + RECOVERY_GROUP_LEN])
+              for i in range(0, len(chars), RECOVERY_GROUP_LEN)]
+    return "-".join(groups)
+
+
+def normalize_recovery_code(raw) -> str:
+    """把使用者打的救援碼還原成可以比對的形式。
+
+    抄下來的碼再打回去時,連字號、空白、大小寫幾乎一定會有出入 ——
+    這些都不該構成「碼錯了」,那只會讓一個本來有效的救援碼被拒絕。
+    """
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip().upper().replace("-", "").replace(" ", "")
+
+
 class AuthError(Exception):
     """帳號相關錯誤的共同基底,方便 server.py 一次接住。"""
 
@@ -87,6 +121,9 @@ class User(NamedTuple):
 class Authenticated(NamedTuple):
     user: User
     token: str
+    # 只有註冊那一次會帶著救援碼(明碼只在那一刻存在,之後資料庫裡
+    # 只剩雜湊)。登入、訪客、升級帳號都是 None。
+    recovery_code: Optional[str] = None
 
 
 def hash_password(password: str) -> str:
@@ -262,6 +299,52 @@ class Auth:
 
     # --- 註冊與登入 ---
 
+    def issue_recovery_code(self, user_id: int) -> str:
+        """產生一組新的救援碼,存雜湊、回傳明碼。
+
+        **明碼只有這一刻存在**,存進資料庫的是雜湊 —— 所以呼叫端必須
+        當場拿給使用者看,之後任何人(包括我們自己)都再也看不到它。
+        這跟密碼是同一個道理:能被讀出來的備用鑰匙就不是備用鑰匙。
+        """
+        code = new_recovery_code()
+        self.store.set_recovery_hash(user_id, hash_password(normalize_recovery_code(code)))
+        return code
+
+    def reset_with_recovery_code(self, username, code, new_password) -> str:
+        """用救援碼重設密碼,回傳**下一組**救援碼。
+
+        刻意不順便登入(OWASP):重設完要求重新登入一次,才能確認新密碼
+        真的被記住了,而不是等下次要用時才發現又進不去。
+
+        成功後一定要做三件事,少一件都留下漏洞:
+          1. 舊救援碼作廢並換新的 —— 一次性才有意義,否則它就是一把
+             永遠有效、而且不會過期的第二密碼。
+          2. 既有 session 全部登出 —— 會走到這一步,常常正是因為擔心
+             帳號被別人拿走。
+          3. 新密碼照樣要過強度檢查 —— 不能因為走的是救援流程就放行
+             一組弱密碼。
+        """
+        name = normalize_username(username) if isinstance(username, str) else ""
+        row = self.store.get_user_by_username(name) if name else None
+        typed = normalize_recovery_code(code)
+
+        stored = row.get("recovery_hash") if row else None
+        if stored:
+            accepted = verify_password(typed, stored)
+        else:
+            # 帳號不存在、或存在但沒設過救援碼:照樣做一次同樣成本的雜湊
+            # 再失敗。直接回傳的話,「查無此人」會比「碼不對」快得多,
+            # 可以靠回應時間掃出哪些帳號真的存在。
+            verify_password(typed or "x", hash_password("dummy"))
+            accepted = False
+        if not accepted:
+            raise InvalidCredentials("帳號或救援碼錯誤")
+
+        pw = validate_password(new_password, username=name)
+        self.store.set_password_hash(row["id"], hash_password(pw))
+        self.store.delete_sessions_for_user(row["id"])
+        return self.issue_recovery_code(row["id"])
+
     def register(self, username, password) -> Authenticated:
         name = normalize_username(username)
         pw = validate_password(password, username=name)
@@ -269,7 +352,29 @@ class Auth:
             raise UsernameTaken("這個使用者名稱已經有人用了")
         user_id = self.store.create_user(name, hash_password(pw), is_guest=False)
         self._ensure_farm(user_id, f"{name} 的牧場")
-        return Authenticated(User(user_id, name, False), self._issue_session(user_id))
+        # 註冊當下就發一組救援碼。**這是唯一能在忘記密碼之前先準備好的
+        # 時機** —— 等到密碼忘了才想補,已經進不去了。
+        code = self.issue_recovery_code(user_id)
+        return Authenticated(User(user_id, name, False), self._issue_session(user_id),
+                             recovery_code=code)
+
+    def regenerate_recovery_code(self, token, password) -> str:
+        """已登入的人重新產生一組救援碼(舊的立刻失效)。
+
+        給兩種人用:救援碼弄丟了想換一組,以及在這個功能出現之前就註冊、
+        因此手上根本沒有碼的既有帳號。
+
+        要重新驗密碼 —— 不然借到一支沒鎖的手機就能印出一把長期有效的
+        備用鑰匙,之後隨時回來接管這個帳號。
+        """
+        user = self.resolve_session(token)
+        if user is None:
+            raise InvalidCredentials("尚未登入")
+        if not user.is_guest:
+            row = self.store.get_user_by_id(user.id)
+            if not row or not verify_password(str(password), row["password_hash"]):
+                raise InvalidCredentials("密碼錯誤")
+        return self.issue_recovery_code(user.id)
 
     def login(self, username, password) -> Authenticated:
         try:

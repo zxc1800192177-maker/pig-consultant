@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_id INTEGER REFERENCES farms(id);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'owner';
 
+-- 救援碼(忘記密碼用)與電子信箱,都是後來才加的,所以既有帳號是 NULL ——
+-- 「還沒設定」與「設定了」必須分得出來,不能用空字串當預設值。
+--
+-- recovery_hash 存的是雜湊,不是救援碼本身。理由跟密碼一樣:救援碼可以
+-- 直接拿來重設密碼,等於第二把鑰匙,資料庫外洩時不能讓人直接撿去用。
+ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+
 -- username 只在正式帳號上要求唯一。訪客的 username 是 NULL,
 -- 而 SQL 的 UNIQUE 允許多個 NULL,但部分索引講得更明白也更安全。
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique
@@ -258,6 +266,34 @@ class Store:
         """訪客升級為正式帳號。user_id 不變,既有資料因此自動延續。
 
         回傳 False 代表該使用者已經不是訪客(不該被覆寫掉密碼)。
+        """
+        raise NotImplementedError
+
+    def set_recovery_hash(self, user_id: int, recovery_hash: Optional[str]) -> None:
+        """設定(或清掉)救援碼的雜湊。
+
+        救援碼是**一次性**的:用掉之後一定要換一組新的,否則同一組碼可以
+        被重複拿來重設密碼,等於一把永遠有效的備用鑰匙。
+        """
+        raise NotImplementedError
+
+    def set_email(self, user_id: int, email: Optional[str]) -> None:
+        raise NotImplementedError
+
+    def set_password_hash(self, user_id: int, password_hash: str) -> None:
+        raise NotImplementedError
+
+    def delete_sessions_for_user(self, user_id: int) -> int:
+        """把這個人所有的登入狀態清掉,回傳清掉幾個。
+
+        重設密碼後一定要做(OWASP)—— 會走到重設,常常正是因為擔心帳號
+        被別人拿走,只換密碼而讓對方原本那張 cookie 繼續有效等於沒趕人。
+        """
+        raise NotImplementedError
+
+    def find_user_by_email(self, email: str) -> Optional[dict]:
+        """信箱找人。找不到回 None —— 呼叫端必須讓「找不到」與「找到了」
+        對外看起來一模一樣,否則這就成了查詢誰有註冊的工具。
         """
         raise NotImplementedError
 
@@ -495,6 +531,8 @@ class InMemoryStore(Store):
             "is_guest": is_guest,
             "farm_id": None,
             "role": "owner",
+            "recovery_hash": None,
+            "email": None,
         }
         return user_id
 
@@ -511,6 +549,37 @@ class InMemoryStore(Store):
             return None
         for user in self.users.values():
             if user["username"] == username:
+                return dict(user)
+        return None
+
+    def set_recovery_hash(self, user_id, recovery_hash) -> None:
+        user = self.users.get(user_id)
+        if user is not None:
+            user["recovery_hash"] = recovery_hash
+
+    def set_email(self, user_id, email) -> None:
+        user = self.users.get(user_id)
+        if user is not None:
+            user["email"] = email
+
+    def set_password_hash(self, user_id, password_hash) -> None:
+        user = self.users.get(user_id)
+        if user is not None:
+            user["password_hash"] = password_hash
+
+    def delete_sessions_for_user(self, user_id) -> int:
+        before = len(self.sessions)
+        self.sessions = {t: s for t, s in self.sessions.items()
+                         if s["user_id"] != user_id}
+        return before - len(self.sessions)
+
+    def find_user_by_email(self, email):
+        # 比照 SQL 的 `WHERE email = NULL` 永不成立 —— 沒設定信箱的帳號
+        # 不可以被一個空的查詢撈出來。
+        if not email:
+            return None
+        for user in self.users.values():
+            if user.get("email") == email:
                 return dict(user)
         return None
 
@@ -965,30 +1034,61 @@ class PostgresStore(Store):
             ).fetchone()
             return row[0]
 
+    # 欄位清單只寫一次。分散在各個 SELECT 裡的話,加了欄位卻漏改其中一個
+    # 就會讓那條路徑安靜地少拿到資料 —— farm_id 就是這樣漏掉,害每個帳號
+    # 都被判成「還沒有對應的牧場」。
+    USER_COLS = "id, username, password_hash, is_guest, farm_id, role, recovery_hash, email"
+
     def get_user_by_id(self, user_id):
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, username, password_hash, is_guest, farm_id, role"
-                " FROM users WHERE id = %s",
-                (user_id,),
+                f"SELECT {self.USER_COLS} FROM users WHERE id = %s", (user_id,)
             ).fetchone()
         return self._user_row(row)
 
     def get_user_by_username(self, username):
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, username, password_hash, is_guest, farm_id, role"
-                " FROM users WHERE username = %s",
-                (username,),
+                f"SELECT {self.USER_COLS} FROM users WHERE username = %s", (username,)
             ).fetchone()
         return self._user_row(row)
+
+    def find_user_by_email(self, email):
+        if not email:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT {self.USER_COLS} FROM users WHERE email = %s", (email,)
+            ).fetchone()
+        return self._user_row(row)
+
+    def set_recovery_hash(self, user_id, recovery_hash) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE users SET recovery_hash = %s WHERE id = %s",
+                         (recovery_hash, user_id))
+
+    def set_email(self, user_id, email) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE users SET email = %s WHERE id = %s", (email, user_id))
+
+    def set_password_hash(self, user_id, password_hash) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE users SET password_hash = %s WHERE id = %s",
+                         (password_hash, user_id))
+
+    def delete_sessions_for_user(self, user_id) -> int:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "DELETE FROM sessions WHERE user_id = %s RETURNING token", (user_id,)
+            ).fetchall()
+        return len(rows)
 
     @staticmethod
     def _user_row(row):
         if not row:
             return None
         return {"id": row[0], "username": row[1], "password_hash": row[2], "is_guest": row[3],
-                "farm_id": row[4], "role": row[5]}
+                "farm_id": row[4], "role": row[5], "recovery_hash": row[6], "email": row[7]}
 
     def promote_guest(self, user_id, username, password_hash) -> bool:
         # WHERE is_guest 這個條件同時擋掉兩件事:重複升級,以及拿別人的
