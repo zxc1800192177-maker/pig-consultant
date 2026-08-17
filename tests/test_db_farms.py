@@ -276,6 +276,22 @@ class TestBothImplementationsAgree:
                         bad.append(f"{impl.__name__}.{name}: {got} != {want}")
         assert bad == [], "\n".join(bad)
 
+    def test_get_user_by_id_returns_farm_scoping_fields(self):
+        """簽章一致不代表回傳的資料一樣完整。PostgresStore.get_user_by_id/
+        get_user_by_username 曾經只 SELECT id、username、password_hash、
+        is_guest,漏了 farm_id 與 role —— InMemoryStore 因為整包 dict
+        本來就存了這兩個欄位,測試永遠過;真的部署到 Postgres 後,
+        resolve_session() 每次都讀到 farm_id=None,連剛註冊的帳號都被
+        誤判成「這個帳號還沒有對應的牧場」。這裡沒有真的 Postgres 可以連,
+        改成比對原始碼裡的 SQL 與回傳欄位,把這個坑釘住。
+        """
+        import inspect
+        from db import PostgresStore
+        for name in ("get_user_by_id", "get_user_by_username", "_user_row"):
+            source = inspect.getsource(getattr(PostgresStore, name))
+            assert "farm_id" in source, f"PostgresStore.{name} 少了 farm_id"
+            assert "role" in source, f"PostgresStore.{name} 少了 role"
+
 
 class TestDevMemoryStore:
     """本機開發用的記憶體 store。

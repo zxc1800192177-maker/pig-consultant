@@ -243,8 +243,18 @@ class Auth:
         row = self.store.get_user_by_id(user_id)
         if not row:
             return None
+
+        farm_id = row.get("farm_id")
+        role = row.get("role") or "owner"
+        if farm_id is None:
+            # v2 上線前就存在的帳號:當時 users 表還沒有 farm_id 欄位,
+            # ALTER TABLE 加欄位不會幫舊資料補值。這裡補建一次,不然
+            # 這種帳號會永遠卡在「這個帳號還沒有對應的牧場」,連匯入
+            # 資料都做不到 —— 這是實際發生過的問題,不是假設。
+            farm_id = self._ensure_farm(user_id, f"{row['username'] or '我'} 的牧場")
+            role = "owner"
         return User(id=row["id"], username=row["username"], is_guest=row["is_guest"],
-                    farm_id=row.get("farm_id"), role=row.get("role") or "owner")
+                    farm_id=farm_id, role=role)
 
     def logout(self, token: Optional[str]) -> None:
         if token:

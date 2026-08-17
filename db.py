@@ -864,7 +864,8 @@ class PostgresStore(Store):
     def get_user_by_id(self, user_id):
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, username, password_hash, is_guest FROM users WHERE id = %s",
+                "SELECT id, username, password_hash, is_guest, farm_id, role"
+                " FROM users WHERE id = %s",
                 (user_id,),
             ).fetchone()
         return self._user_row(row)
@@ -872,7 +873,8 @@ class PostgresStore(Store):
     def get_user_by_username(self, username):
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, username, password_hash, is_guest FROM users WHERE username = %s",
+                "SELECT id, username, password_hash, is_guest, farm_id, role"
+                " FROM users WHERE username = %s",
                 (username,),
             ).fetchone()
         return self._user_row(row)
@@ -881,7 +883,8 @@ class PostgresStore(Store):
     def _user_row(row):
         if not row:
             return None
-        return {"id": row[0], "username": row[1], "password_hash": row[2], "is_guest": row[3]}
+        return {"id": row[0], "username": row[1], "password_hash": row[2], "is_guest": row[3],
+                "farm_id": row[4], "role": row[5]}
 
     def promote_guest(self, user_id, username, password_hash) -> bool:
         # WHERE is_guest 這個條件同時擋掉兩件事:重複升級,以及拿別人的

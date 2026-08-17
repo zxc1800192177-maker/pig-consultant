@@ -473,3 +473,55 @@ class TestHealthCheckRetention:
             store.add_health_check(a.id, {"psy": float(i)})
 
         assert len(store.list_health_checks(b.id)) == 1
+
+
+class TestLegacyAccountsGetABackfilledFarm:
+    """v2 上線前(users 表還沒有 farm_id 欄位時)就存在的帳號,ALTER TABLE
+    加欄位不會幫舊資料補值,所以這些帳號的 farm_id 是 NULL。register()
+    與 guest_login() 都會在建立當下呼叫 _ensure_farm(),但這些帳號當初是
+    直接 INSERT 進 users 表的,從來沒經過這條路徑。
+
+    resolve_session() 在每個請求都會被呼叫,所以在這裡補一次是最不會
+    漏掉任何人的地方 —— 不然這些帳號會永遠卡在「這個帳號還沒有對應的
+    牧場」,連匯入資料都做不到(這正是實際發生過的問題)。
+    """
+
+    def _legacy_user_id(self, store):
+        """直接寫進 users 表,不經過 register()/_ensure_farm() ——
+        模擬 v2 上線前就存在、farm_id 從沒被設定過的帳號。
+        """
+        return store.create_user("oldtimer", hash_password("hunter2hunter2"))
+
+    def test_gets_a_farm_on_first_resolve(self, auth, store):
+        user_id = self._legacy_user_id(store)
+        token = auth._issue_session(user_id)
+
+        user = auth.resolve_session(token)
+
+        assert user.farm_id is not None
+        assert user.is_owner
+
+    def test_same_farm_on_every_later_request(self, auth, store):
+        """每次都補一座新牧場的話,舊帳號的資料就散在好幾座牧場裡看不全。"""
+        user_id = self._legacy_user_id(store)
+        token = auth._issue_session(user_id)
+
+        first = auth.resolve_session(token).farm_id
+        second = auth.resolve_session(token).farm_id
+
+        assert first == second
+
+    def test_backfilled_farm_is_a_real_usable_farm(self, auth, store):
+        user_id = self._legacy_user_id(store)
+        token = auth._issue_session(user_id)
+
+        farm_id = auth.resolve_session(token).farm_id
+
+        assert store.list_sows(farm_id, None) == []
+
+    def test_accounts_that_already_have_a_farm_are_left_alone(self, auth, store):
+        """已經補過的帳號(或本來就是新帳號)不該被重新分配。"""
+        registered = auth.register("farmer", "hunter2hunter2")
+        original_farm_id = auth.resolve_session(registered.token).farm_id
+
+        assert auth.resolve_session(registered.token).farm_id == original_farm_id
