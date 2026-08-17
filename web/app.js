@@ -283,7 +283,19 @@ async function startGuestSession() {
 
 async function logout() {
   await api("/api/auth/logout", postJson({}));
-  await refreshAccount();
+  // **整頁重新載入,不是只重讀資料。**
+  //
+  // 畫面上每一塊資料都存在模組層級的變數與已經畫好的 DOM 裡,登出時要
+  // 全部清掉才算乾淨 —— 而那件事原本靠「refreshAccount() 裡那一整串
+  // reload* 全部都成功」才成立。只要其中一個提早 return 或請求失敗
+  // (被限流的 429、換帳號當下的 409、網路不穩),那一區就會留著上一個
+  // 帳號的內容,下一個人登入後仍然看得到(實際回報過:換帳號後看到的
+  // 還是前一個帳號的母豬,重新整理才正常)。
+  //
+  // 重新載入是唯一能保證「不留下任何東西」的做法,成本只是一次本來就
+  // 很小的靜態檔載入(而且 service worker 對程式碼是網路優先,不會
+  // 拿到舊版)。換帳號本來就不是高頻動作。
+  location.reload();
 }
 
 // 帳號相關的按鈕散落在三個地方(頁首狀態列、登入引導、訪客提醒),
@@ -896,7 +908,16 @@ let allSows = [];
 const SOW_LIST_LIMIT = 10;
 
 async function reloadSows() {
-  if (!$("sowList") || !account.loggedIn) return;
+  if (!$("sowList")) return;
+  // 未登入時要**清空**,不能只是提早 return —— 提早 return 會把上一個
+  // 帳號的母豬留在 allSows 與畫面上(reloadBoars 一直是清空的,這裡
+  // 漏了,兩邊行為不一致正是換帳號看到別人資料的其中一條路徑)。
+  if (!account.loggedIn) {
+    sows = [];
+    allSows = [];
+    renderAnimalList();
+    return;
+  }
   const [active, all] = await Promise.all([api("/api/sows"), api("/api/sows?all=1")]);
   sows = active.ok ? active.data.sows : [];
   // 在場的排前面:大多數瀏覽情境還是想先看到目前在場的,而且這個場
