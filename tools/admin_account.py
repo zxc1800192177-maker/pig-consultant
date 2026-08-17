@@ -97,7 +97,16 @@ def cmd_reset(store: PostgresStore, args) -> None:
     with store._connect() as conn:
         conn.execute("UPDATE users SET password_hash = %s WHERE id = %s",
                      (hash_password(new), row["id"]))
-    print("密碼已重設,現在可以用新密碼登入了。資料完全沒有動到。")
+        # 一併把既有的登入狀態清掉(OWASP:重設密碼後要讓既有 session 失效)。
+        # 密碼會被重設,常常正是因為擔心帳號被別人拿走 —— 只改密碼而讓對方
+        # 原本那張 cookie 繼續有效的話,等於沒有把人請出去。
+        killed = conn.execute(
+            "DELETE FROM sessions WHERE user_id = %s RETURNING token", (row["id"],)
+        ).fetchall()
+
+    print(f"密碼已重設,資料完全沒有動到。")
+    if killed:
+        print(f"順帶登出了 {len(killed)} 個既有的登入狀態,請重新登入。")
 
 
 def cmd_delete(store: PostgresStore, args) -> None:
@@ -108,7 +117,7 @@ def cmd_delete(store: PostgresStore, args) -> None:
     print("(想保留資料的話,改用 reset 重設密碼就能登入了。)")
 
     # 要求把名稱完整打一次,而不是按 y —— 按 y 太容易在沒看清楚時按下去。
-    if input(f"確定要刪除的話,完整輸入帳號名稱:") != row["username"]:
+    if input("確定要刪除的話,完整輸入帳號名稱:") != row["username"]:
         sys.exit("名稱不符,沒有刪除任何東西。")
 
     store.delete_account(row["id"])

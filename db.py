@@ -64,12 +64,17 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_id INTEGER REFERENCES farms(id);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'owner';
 
--- 救援碼(忘記密碼用)與電子信箱,都是後來才加的,所以既有帳號是 NULL ——
+-- 救援碼(忘記密碼用)。後來才加的,所以既有帳號是 NULL ——
 -- 「還沒設定」與「設定了」必須分得出來,不能用空字串當預設值。
 --
--- recovery_hash 存的是雜湊,不是救援碼本身。理由跟密碼一樣:救援碼可以
--- 直接拿來重設密碼,等於第二把鑰匙,資料庫外洩時不能讓人直接撿去用。
+-- 存的是雜湊,不是救援碼本身。理由跟密碼一樣:救援碼可以直接拿來重設
+-- 密碼,等於第二把鑰匙,資料庫外洩時不能讓人直接撿去用。
 ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_hash TEXT;
+
+-- email 目前**沒有任何程式在用**。原本要做信箱重設密碼,評估後決定只用
+-- 救援碼(寄信要接第三方服務,而且信可能進垃圾桶、農民也不一定會收)。
+-- 欄位留著不刪:它已經建在正式資料庫上了,是空的、不影響任何查詢,
+-- 而砍掉正式環境的欄位是有風險的動作,換不到任何好處。
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
 
 -- username 只在正式帳號上要求唯一。訪客的 username 是 NULL,
@@ -277,9 +282,6 @@ class Store:
         """
         raise NotImplementedError
 
-    def set_email(self, user_id: int, email: Optional[str]) -> None:
-        raise NotImplementedError
-
     def set_password_hash(self, user_id: int, password_hash: str) -> None:
         raise NotImplementedError
 
@@ -288,12 +290,6 @@ class Store:
 
         重設密碼後一定要做(OWASP)—— 會走到重設,常常正是因為擔心帳號
         被別人拿走,只換密碼而讓對方原本那張 cookie 繼續有效等於沒趕人。
-        """
-        raise NotImplementedError
-
-    def find_user_by_email(self, email: str) -> Optional[dict]:
-        """信箱找人。找不到回 None —— 呼叫端必須讓「找不到」與「找到了」
-        對外看起來一模一樣,否則這就成了查詢誰有註冊的工具。
         """
         raise NotImplementedError
 
@@ -557,11 +553,6 @@ class InMemoryStore(Store):
         if user is not None:
             user["recovery_hash"] = recovery_hash
 
-    def set_email(self, user_id, email) -> None:
-        user = self.users.get(user_id)
-        if user is not None:
-            user["email"] = email
-
     def set_password_hash(self, user_id, password_hash) -> None:
         user = self.users.get(user_id)
         if user is not None:
@@ -572,16 +563,6 @@ class InMemoryStore(Store):
         self.sessions = {t: s for t, s in self.sessions.items()
                          if s["user_id"] != user_id}
         return before - len(self.sessions)
-
-    def find_user_by_email(self, email):
-        # 比照 SQL 的 `WHERE email = NULL` 永不成立 —— 沒設定信箱的帳號
-        # 不可以被一個空的查詢撈出來。
-        if not email:
-            return None
-        for user in self.users.values():
-            if user.get("email") == email:
-                return dict(user)
-        return None
 
     def promote_guest(self, user_id, username, password_hash) -> bool:
         user = self.users.get(user_id)
@@ -1053,23 +1034,10 @@ class PostgresStore(Store):
             ).fetchone()
         return self._user_row(row)
 
-    def find_user_by_email(self, email):
-        if not email:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                f"SELECT {self.USER_COLS} FROM users WHERE email = %s", (email,)
-            ).fetchone()
-        return self._user_row(row)
-
     def set_recovery_hash(self, user_id, recovery_hash) -> None:
         with self._connect() as conn:
             conn.execute("UPDATE users SET recovery_hash = %s WHERE id = %s",
                          (recovery_hash, user_id))
-
-    def set_email(self, user_id, email) -> None:
-        with self._connect() as conn:
-            conn.execute("UPDATE users SET email = %s WHERE id = %s", (email, user_id))
 
     def set_password_hash(self, user_id, password_hash) -> None:
         with self._connect() as conn:
