@@ -245,6 +245,43 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def apply_startup_reset(auth, username, password) -> Optional[str]:
+    """啟動時的一次性密碼重設。回傳一句要印進 log 的話,沒事做時回 None。
+
+    密碼弄丟的帳號會完全碰不到:登不進去,而「刪除帳號」與「產生救援碼」
+    都要求先登入。這是留給那種情況的最後手段。
+
+    **絕對不會把新密碼印出來** —— Render 的 log 是留存的,印出去等於把
+    密碼寫進一個比資料庫更容易被看到的地方。
+
+    任何錯誤都只回訊息、不拋例外:這段在伺服器啟動時跑,為了一個修不好的
+    重設而讓整個網站起不來,是把小問題換成大問題。
+    """
+    if not username or not password:
+        return None
+
+    try:
+        name = normalize_username(username)
+    except ValidationError as e:
+        return f"[啟動重設] 使用者名稱不合規則({e}),沒有做任何事"
+
+    row = auth.store.get_user_by_username(name)
+    if row is None:
+        return f"[啟動重設] 找不到帳號「{name}」,沒有做任何事"
+
+    try:
+        validate_password(password, username=name)
+    except ValidationError as e:
+        return f"[啟動重設] 新密碼不符合規則({e}),沒有做任何事"
+
+    auth.store.set_password_hash(row["id"], hash_password(password))
+    # 重設密碼後既有登入一律作廢(OWASP)。
+    killed = auth.store.delete_sessions_for_user(row["id"])
+    return (f"[啟動重設] 已重設「{name}」的密碼,並登出 {killed} 個既有登入。"
+            "請立刻到後台把 ADMIN_RESET_USERNAME 與 ADMIN_RESET_PASSWORD "
+            "兩個環境變數刪掉,否則每次重新部署都會把密碼改回這一組。")
+
+
 class Auth:
     def __init__(self, store: Store):
         self.store = store

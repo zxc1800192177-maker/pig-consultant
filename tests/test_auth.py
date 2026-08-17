@@ -475,6 +475,67 @@ class TestHealthCheckRetention:
         assert len(store.list_health_checks(b.id)) == 1
 
 
+class TestStartupReset:
+    """最後手段:密碼弄丟、完全進不去時,靠環境變數在啟動時重設一次。
+
+    它跑在伺服器啟動流程裡,所以最重要的性質是「不管遇到什麼都不能讓
+    網站起不來」,其次是「不可以把新密碼寫進 log」。
+    """
+
+    def _reset(self, auth, username, password):
+        from auth import apply_startup_reset
+        return apply_startup_reset(auth, username, password)
+
+    def test_does_nothing_when_not_configured(self, auth):
+        """沒設定就是完全不動作 —— 這是平常每一次部署的情況。"""
+        auth.register("farmer", "hunter2hunter2")
+        assert self._reset(auth, "", "") is None
+        assert self._reset(auth, "farmer", "") is None
+        assert self._reset(auth, "", "whatever-pass-1") is None
+        assert auth.login("farmer", "hunter2hunter2")
+
+    def test_resets_the_password(self, auth):
+        auth.register("farmer", "hunter2hunter2")
+        message = self._reset(auth, "farmer", "brand-new-pass-9")
+
+        assert message and "farmer" in message
+        assert auth.login("farmer", "brand-new-pass-9")
+        with pytest.raises(InvalidCredentials):
+            auth.login("farmer", "hunter2hunter2")
+
+    def test_never_writes_the_new_password_into_the_log(self, auth):
+        """Render 的 log 會留存,印出去等於把密碼放在比資料庫更好看到的地方。"""
+        auth.register("farmer", "hunter2hunter2")
+        message = self._reset(auth, "farmer", "brand-new-pass-9")
+        assert "brand-new-pass-9" not in message
+
+    def test_tells_you_to_remove_the_variables(self, auth):
+        """留著的話每次重新部署都會把密碼改回去,而且沒人會知道為什麼。"""
+        auth.register("farmer", "hunter2hunter2")
+        message = self._reset(auth, "farmer", "brand-new-pass-9")
+        assert "ADMIN_RESET_USERNAME" in message
+
+    def test_existing_sessions_are_logged_out(self, auth):
+        result = auth.register("farmer", "hunter2hunter2")
+        self._reset(auth, "farmer", "brand-new-pass-9")
+        assert auth.resolve_session(result.token) is None
+
+    def test_unknown_account_is_reported_not_raised(self, auth):
+        """打錯帳號名稱不該讓整個網站起不來。"""
+        message = self._reset(auth, "no-such-farm", "brand-new-pass-9")
+        assert "找不到" in message
+
+    def test_weak_password_is_refused_without_crashing(self, auth):
+        auth.register("farmer", "hunter2hunter2")
+        message = self._reset(auth, "farmer", "123")
+
+        assert "沒有做任何事" in message
+        assert auth.login("farmer", "hunter2hunter2"), "舊密碼不該被動到"
+
+    def test_bad_username_is_refused_without_crashing(self, auth):
+        assert self._reset(auth, "x", "brand-new-pass-9") is not None
+
+
 class TestRecoveryCodeFormat:
     """救援碼會被抄在紙上、幾個月後再打回去 —— 抄寫與重打的每一種
     常見出入都不該讓一組有效的碼被拒絕。

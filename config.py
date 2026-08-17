@@ -198,3 +198,15 @@ MAX_RECENT_EVENT_DAYS = 14     # 補登前幾天的記錄時要看得到那幾�
 
 # 匯入的檔案上限。32,814 筆的實際檔案是 1.45 MB,10 MB 已很寬裕。
 MAX_IMPORT_BYTES = int(os.environ.get("MAX_IMPORT_BYTES", str(10 * 1024 * 1024)))
+
+# --- 一次性的密碼重設(密碼弄丟、完全進不去時用) ---
+#
+# 兩個都設定時,伺服器**啟動時**會重設該帳號的密碼,然後就結束了。
+# 用完請立刻把這兩個變數刪掉,否則每次重新部署都會把密碼改回這一組。
+#
+# 為什麼不做成網頁上的功能:那等於在正式站開一個「不用密碼就能改別人
+# 密碼」的網址,守衛寫錯一次就是災難。這裡改用環境變數,唯一的觸發方式
+# 是有部署權限 —— 而有部署權限的人本來就能改程式、改資料庫連線,
+# 所以這不會多出任何攻擊面。
+ADMIN_RESET_USERNAME = os.environ.get("ADMIN_RESET_USERNAME", "").strip()
+ADMIN_RESET_PASSWORD = os.environ.get("ADMIN_RESET_PASSWORD", "")

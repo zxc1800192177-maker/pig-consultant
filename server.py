@@ -21,7 +21,10 @@ from typing import Dict, List, Optional, Tuple
 import config
 import importer
 import schedule
-from auth import Auth, AuthError, InvalidCredentials, NotGuest, UsernameTaken, ValidationError
+from auth import (
+    Auth, AuthError, InvalidCredentials, NotGuest, UsernameTaken, ValidationError,
+    apply_startup_reset,
+)
 from db import select_store
 from ai.consultant import Consultant
 from ai.transport import (
@@ -1912,6 +1915,14 @@ def main():
         print("警告: 尚未登入/設定金鑰,請確認 claude auth login 或 ANTHROPIC_API_KEY")
     else:
         print(f"AI 傳輸層就緒:{mode}")
+
+    # 一次性的密碼重設(見 config.ADMIN_RESET_USERNAME)。放在啟動流程裡
+    # 而不是做成網址,所以外面打不到 —— 唯一的觸發方式是有部署權限。
+    if APP.auth is not None:
+        notice = apply_startup_reset(
+            APP.auth, config.ADMIN_RESET_USERNAME, config.ADMIN_RESET_PASSWORD)
+        if notice:
+            print(notice)
 
     print(f"豬豬顧問啟動: http://{config.HOST}:{config.PORT}")
     ThreadedServer((config.HOST, config.PORT), Handler).serve_forever()
