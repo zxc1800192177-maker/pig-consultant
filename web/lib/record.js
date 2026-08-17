@@ -65,12 +65,26 @@ export const RECORD_FORMS = {
       { key: "born_alive", label: "活仔數", type: "int", min: 0, max: 30, required: true },
       { key: "stillborn", label: "死胎", type: "int", min: 0, max: 30 },
       { key: "mummified", label: "木乃伊", type: "int", min: 0, max: 30 },
+      // 分娩當天常會併窩、寄養調整,留給這頭母豬養的頭數因此可能跟活仔數
+      // 不一樣(使用者決定)。跟離乳評分同樣的道理:**可以不填**,沒填
+      // 不補值(憲法第三條第 6 款)—— 不代表「跟活仔數一樣」,只是沒記。
+      { key: "raised", label: "飼養頭數", type: "int", min: 0, max: 30,
+        hint: "分娩當天併窩、寄養調整後,實際留給這頭母豬養的頭數,可以不填" },
+      // 使用者決定:預設沒有助產,有的話使用者自己勾選 —— 跟上面幾個
+      // 「沒填代表沒記」的欄位不同,這裡沒勾**就是**答案(沒有助產),
+      // 不是「不確定」,所以是有預設值的勾選框,不是留白的欄位。
+      { key: "assisted", label: "有助產", type: "checkbox" },
     ],
   },
   WN: {
     label: "離乳", target: "sow",
     fields: [
       { key: "weaned", label: "離乳頭數", type: "int", min: 0, max: 30, required: true },
+      // 使用者決定:預設 0,大多數窩沒有這個問題,不必每筆都手動填 0 ——
+      // 有的話使用者自己改數字。跟上面的離乳頭數不同,這裡沒改就是
+      // 明確的「0 隻」,不是沒填(欄位一開始就帶著 0)。
+      { key: "hernia_count", label: "單睪/賀尼亞頭數", type: "int", min: 0, max: 30,
+        default: 0 },
       // 使用者要求的自評項目。**可以不評** —— 沒評分顯示「—」,不補值。
       { key: "wean_score", label: "離乳仔豬評分", type: "score",
         hint: "1~5 分,由你自己評。不想評可以留空" },
@@ -220,6 +234,15 @@ export function buildDetail(code, raw) {
 
   for (const field of spec.fields) {
     const value = raw[field.key];
+
+    // 勾選框自成一格:沒勾**就是**預設答案(沒有),不是「不確定」,
+    // 所以不走下面「空白就跳過、必填才報錯」那一套 —— 勾選框本來就
+    // 不會是必填,也永遠有值可讀。
+    if (field.type === "checkbox") {
+      if (value === true) detail[field.key] = true;
+      continue;
+    }
+
     const blank = value === undefined || value === null || value === "";
 
     if (blank) {
@@ -281,7 +304,13 @@ export function recordSummary(event) {
   if (d.pen_name) bits.push(`移至 ${d.pen_name}`);
   if (d.born_alive != null) bits.push(`活仔 ${d.born_alive}`);
   if (d.stillborn) bits.push(`死胎 ${d.stillborn}`);
+  // 沒填代表沒記,不代表「跟活仔數一樣」,所以不顯示不補值
+  if (d.raised != null) bits.push(`飼養 ${d.raised}`);
+  // 沒助產是預設情形,不特別標;有助產才值得在摘要裡點出來
+  if (d.assisted) bits.push("助產");
   if (d.weaned != null) bits.push(`離乳 ${d.weaned} 隻`);
+  // 0 是預設情形,不特別標;有才值得在摘要裡點出來(跟死胎同樣的道理)
+  if (d.hernia_count) bits.push(`單睪/賀尼亞 ${d.hernia_count}`);
   // 未評分不顯示,也不補「—」以外的東西
   if (d.wean_score != null) bits.push(`評分 ${d.wean_score} 分`);
   if (d.count != null) bits.push(`${d.count} 隻`);

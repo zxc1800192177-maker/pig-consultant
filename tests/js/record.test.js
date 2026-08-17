@@ -42,6 +42,12 @@ describe("表單定義", () => {
     assert.equal(createsNewAnimal("MT"), false);
   });
 
+  it("是否助產是勾選框,不是必填,預設沒有(使用者決定)", () => {
+    const field = formFor("FW").fields.find((f) => f.key === "assisted");
+    assert.equal(field.type, "checkbox");
+    assert.ok(!field.required);
+  });
+
   it("會改變母豬狀態的事件都要先講清楚", () => {
     // 胎次 +1、耳號改號這些是不可逆的,按下去之前要知道
     for (const code of ["FW", "WN", "SAL", "DTH", "MV"]) {
@@ -251,6 +257,37 @@ describe("整理表單內容", () => {
     assert.ok(problems[0].includes("活仔數"));
   });
 
+  it("飼養頭數可以不填,不算漏填", () => {
+    // 分娩當天併窩、寄養調整後留給這頭母豬養的頭數,常常跟活仔數不同
+    // (使用者決定),沒填不代表跟活仔數一樣,單純是沒記。
+    const { detail, problems } = buildDetail("FW", { born_alive: "12" });
+    assert.deepEqual(problems, []);
+    assert.ok(!("raised" in detail));
+  });
+
+  it("填了飼養頭數就存成數字,不必等於活仔數", () => {
+    const { detail, problems } = buildDetail(
+      "FW", { born_alive: "12", raised: "10" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.raised, 10);
+  });
+
+  it("是否助產:不勾就是預設的沒有,不存進 detail,也不算漏填", () => {
+    // 跟飼養頭數不同 —— 這裡沒勾**就是**答案(沒有助產),不是不確定,
+    // 所以不必是必填,也不會被要求另外填寫什麼(使用者決定)。
+    const { detail, problems } = buildDetail(
+      "FW", { born_alive: "12", assisted: false });
+    assert.deepEqual(problems, []);
+    assert.ok(!("assisted" in detail));
+  });
+
+  it("是否助產:勾了就存成 true", () => {
+    const { detail, problems } = buildDetail(
+      "FW", { born_alive: "12", assisted: true });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.assisted, true);
+  });
+
   it("非必填漏掉不報錯", () => {
     const { problems } = buildDetail("DTH", {});
     assert.deepEqual(problems, []);
@@ -356,6 +393,36 @@ describe("離乳仔豬評分", () => {
   });
 });
 
+describe("單睪/賀尼亞頭數", () => {
+  // 使用者決定:預設 0,大多數窩沒有這個問題,不必每筆都手動填 ——
+  // 有的話使用者自己改數字。跟「飼養頭數」那種留白代表沒記的欄位不同,
+  // 這裡欄位本身就帶著預設值 0。
+  it("表單定義帶預設值 0,不是必填", () => {
+    const field = formFor("WN").fields.find((f) => f.key === "hernia_count");
+    assert.equal(field.type, "int");
+    assert.equal(field.default, 0);
+    assert.ok(!field.required);
+  });
+
+  it("送 0 就存成 0,是有效的答案不是沒填", () => {
+    const { detail, problems } = buildDetail(
+      "WN", { weaned: "11", hernia_count: "0" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.hernia_count, 0);
+  });
+
+  it("填了非 0 的數字照樣收", () => {
+    const { detail, problems } = buildDetail(
+      "WN", { weaned: "11", hernia_count: "2" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.hernia_count, 2);
+  });
+
+  it("超出範圍照樣被擋下來,不因為有預設值就跳過檢查", () => {
+    assert.ok(buildDetail("WN", { weaned: "11", hernia_count: "99" }).problems.length);
+  });
+});
+
 describe("發情穩定度", () => {
   // 使用者要求:配種表單裡三個選項,✓/△/✗,同樣可以不評
   it("三個選項,符號是 ✓ △ ✗", () => {
@@ -411,9 +478,35 @@ describe("已記錄清單", () => {
     assert.ok(extra.includes("死胎 2"));
   });
 
+  it("填了飼養頭數才顯示,沒填不補成活仔數", () => {
+    const withRaised = recordSummary(
+      ev({ type: "FW", detail: { born_alive: 12, raised: 10 } }));
+    assert.ok(withRaised.extra.includes("飼養 10"));
+
+    const without = recordSummary(ev({ type: "FW", detail: { born_alive: 12 } }));
+    assert.doesNotMatch(without.extra, /飼養/);
+  });
+
+  it("有助產才在摘要標出來,沒助產是預設情形不特別標", () => {
+    const assisted = recordSummary(
+      ev({ type: "FW", detail: { born_alive: 12, assisted: true } }));
+    assert.ok(assisted.extra.includes("助產"));
+
+    const notAssisted = recordSummary(ev({ type: "FW", detail: { born_alive: 12 } }));
+    assert.doesNotMatch(notAssisted.extra, /助產/);
+  });
+
   it("未評分不顯示評分", () => {
     const { extra } = recordSummary(ev({ type: "WN", detail: { weaned: 11 } }));
     assert.doesNotMatch(extra, /評分/);
+  });
+
+  it("單睪/賀尼亞是 0(預設情形)就不特別標,有才顯示", () => {
+    const zero = recordSummary(ev({ type: "WN", detail: { weaned: 11, hernia_count: 0 } }));
+    assert.doesNotMatch(zero.extra, /賀尼亞/);
+
+    const some = recordSummary(ev({ type: "WN", detail: { weaned: 11, hernia_count: 2 } }));
+    assert.ok(some.extra.includes("單睪/賀尼亞 2"));
   });
 
   it("有評分才顯示", () => {

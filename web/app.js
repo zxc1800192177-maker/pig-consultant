@@ -1541,6 +1541,16 @@ function fieldMarkup(field) {
         ${boars.map((b) => `<option value="${escapeHtml(b.earTag)}"></option>`).join("")}
       </datalist>`;
   }
+  if (field.type === "checkbox") {
+    // 跟 bool 不一樣:bool 是必須二選一的問題(有懷孕/沒懷孕),這裡是
+    // 有預設值的勾選框 —— 不勾就是「沒有」,不必強迫使用者每筆都選一次
+    // (使用者決定)。
+    return `
+      <label class="fld fld-checkbox">
+        <input type="checkbox" id="f_${field.key}">
+        <span>${escapeHtml(field.label)}</span>
+      </label>${hint}`;
+  }
   if (field.type === "bool") {
     return `
       <div class="fld"><span>${escapeHtml(field.label)}</span>
@@ -1608,9 +1618,12 @@ function fieldMarkup(field) {
   }
   const type = field.type === "date" ? "date"
              : field.type === "int" || field.type === "decimal" ? "number" : "text";
+  // 有預設值的欄位(例如單睪/賀尼亞頭數預設 0,使用者決定)直接把值畫
+  // 進輸入框 —— 使用者不改就是這個數字,不是留白等著被當成沒填。
   return `
     <label class="fld"><span>${escapeHtml(field.label)}</span>
       <input type="${type}" id="f_${field.key}"
+             ${field.default !== undefined ? `value="${escapeHtml(String(field.default))}"` : ""}
              ${field.type === "decimal" ? 'step="0.1"' : ""}
              ${field.type === "int" ? 'inputmode="numeric"' : ""}></label>${hint}`;
 }
@@ -1631,7 +1644,11 @@ function todayIso() {
 function readRecordFields(spec) {
   const raw = {};
   for (const field of spec.fields) {
-    if (["bool", "score", "choice", "tri"].includes(field.type)) {
+    if (field.type === "checkbox") {
+      // 原生勾選框讀 .checked,不是 .is-active —— 沒勾就是預設的
+      // false,不是「還沒填」。
+      raw[field.key] = $(`f_${field.key}`)?.checked ?? false;
+    } else if (["bool", "score", "choice", "tri"].includes(field.type)) {
       const picked = document.querySelector(
         `[data-field="${field.key}"] .is-active`);
       let val = picked ? picked.dataset.val : "";

@@ -160,6 +160,24 @@ body { padding-bottom: 96px; }
    跟在 .chips 後面,留一點空隙才不會貼在按鈕上。 */
 .fld-other { margin-top: 10px; }
 
+/* 「有助產」這類預設沒有、有的話自己勾的勾選框(使用者決定)——
+   跟其他欄位「文字在上、輸入框在下」的直式排列不同,勾選框要跟文字
+   並排,label 包住 input 讓點文字也能勾選。
+
+   刻意做成跟背景融在一起的低調樣式(使用者決定),不是搶眼的強調色 ——
+   這是預設情形以外的例外註記,不必像「記錄」按鈕那樣跳出來。整個框
+   借用跟其他輸入框同一套底色/邊框(surface-2/border),字也用跟提示
+   文字同一色階(ink-soft),不是滿彩度的 ink/accent。 */
+.fld-checkbox {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  padding: 11px 13px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.fld-checkbox span { margin-bottom: 0; font-size: 15px; color: var(--ink-soft); }
+.fld-checkbox input[type="checkbox"] {
+  width: 20px; height: 20px; flex-shrink: 0; accent-color: var(--ink-soft);
+}
+
 /* 配種一次記多頭:耳號輸入框旁邊的「+」。輸入框吃掉剩下的寬度,
    按鈕維持固定大小,巡欄時單手也點得到。 */
 .rec-tag-row { display: flex; gap: 8px; }
