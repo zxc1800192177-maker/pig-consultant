@@ -1726,6 +1726,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        # 瀏覽器的快取**以網址為鍵**,跟哪個帳號登入無關。/api/sows 這種
+        # 每個牧場內容都不同、網址卻一模一樣的請求,少了這個標頭就可能在
+        # 同一台電腦換帳號登入時,端出上一個帳號留在磁碟快取裡的回應 ——
+        # 也就是把 A 牧場的資料顯示給 B 看(憲法第十一條)。
+        #
+        # 靜態檔用的 no-cache 不夠:那只要求「用之前先問」,回應照樣寫進
+        # 磁碟,拿得到這台電腦的人就翻得出別人的牧場資料。no-store 才是
+        # 「不准存」。API 回應本來就很小,不快取沒有效能問題。
+        self.send_header("Cache-Control", "no-store")
         if set_token:
             self.send_header(
                 "Set-Cookie",

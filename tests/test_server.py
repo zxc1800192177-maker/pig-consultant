@@ -457,10 +457,30 @@ class TestStaticCacheHeaders:
         assert again.status == 304
 
     def test_api_responses_do_not_get_the_static_header(self):
-        """API 與 SSE 各自送自己的標頭,靜態檔的規則不可外溢。"""
+        """API 與 SSE 各自送自己的標頭,靜態檔的規則不可外溢。
+
+        靜態檔是 no-cache(用之前先問),API 要比它更嚴 —— 見下面那條。
+        """
         resp = self._get("/api/health")
         assert resp.status == 200
-        assert resp.getheader("Cache-Control") is None
+        assert resp.getheader("Cache-Control") != "no-cache"
+
+    @pytest.mark.parametrize("path", ["/api/health", "/api/sows", "/api/monthly-report"])
+    def test_api_responses_are_never_stored(self, path):
+        """API 回應一律 no-store。
+
+        瀏覽器的快取是**以網址為鍵**的,跟哪個帳號登入無關。少了這個
+        標頭,同一台電腦上換一個帳號登入時,/api/sows 這種每個帳號內容
+        都不同、網址卻完全一樣的請求,可能被端出上一個帳號留在磁碟
+        快取裡的回應 —— 也就是把 A 牧場的資料顯示給 B 看(憲法第十一條)。
+
+        no-cache 不夠:那只要求「用之前先問」,回應仍然會被寫進磁碟,
+        別的使用者拿得到這台電腦就翻得出來。no-store 才是「不准存」。
+        """
+        resp = self._get(path)
+        assert resp.getheader("Cache-Control") == "no-store", (
+            f"{path} 沒有 no-store,換帳號登入時可能讀到上一個帳號的快取"
+        )
 
 
 # --- 帳號系統 ---
