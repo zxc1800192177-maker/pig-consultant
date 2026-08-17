@@ -190,6 +190,8 @@ MAX_PEN_NAME_CHARS = 30
 MAX_TASK_NAME_CHARS = 40       # 自訂工作的名稱
 MAX_CUSTOM_TASKS_PER_FARM = 100
 MAX_EVENT_FIELDS = 12          # 單筆事件的 detail 最多幾個欄位
+MAX_MARKET_DEATH_REASON_CHARS = 200
+MAX_MARKET_DEATH_WEIGHT_KG = 500  # 遠超過任何一頭豬的實際體重,純粹擋打錯的數字
 
 # 紀錄頁的「已記錄」清單。批次生產一週一批,整批同一天記完 —— 一天記
 # 三四十筆是常態,所以上限不能只給十幾筆,否則剛記的那批自己會被截掉。

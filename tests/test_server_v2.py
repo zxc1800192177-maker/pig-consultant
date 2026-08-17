@@ -273,6 +273,200 @@ class TestWorkerCanFixOwnMistake:
         assert app.handle_delete(f"/api/sow-events/{old}", owner)[0] == 200
 
 
+class TestUndoAnimalEntry:
+    """收回種豬進場:打錯耳號時整頭撤掉,不是留著記錄改欄位。
+
+    跟收回一般事件同一套權限規則(只能收回自己新增的最新一筆,牧場主
+    例外),但多一條**不分身分都擋**的資料完整性把關:這頭豬只要已經有
+    別的記錄(配種、分娩……),就不准收回進場,否則等於連那些真記錄
+    一起消失。
+    """
+
+    def test_worker_can_undo_own_freshly_added_sow(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, worker)[1]["id"]
+        assert app.handle_delete(f"/api/sows/{sow_id}", worker)[0] == 200
+        assert app.store.get_sow(farm_id, sow_id) is None
+
+    def test_worker_can_undo_own_freshly_added_boar(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        boar_id = _post(app, "/api/boars", {"earTag": "D6"}, worker)[1]["id"]
+        assert app.handle_delete(f"/api/boars/{boar_id}", worker)[0] == 200
+        assert app.store.get_boar(farm_id, boar_id) is None
+
+    def test_worker_cannot_undo_someone_elses_entry(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
+        assert app.handle_delete(f"/api/sows/{sow_id}", worker)[0] == 403
+        assert app.store.get_sow(farm_id, sow_id) is not None
+
+    def test_worker_cannot_undo_an_older_entry(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        old = _post(app, "/api/sows", {"earTag": "1183"}, worker)[1]["id"]
+        _post(app, "/api/sows", {"earTag": "2580"}, worker)
+        assert app.handle_delete(f"/api/sows/{old}", worker)[0] == 403
+
+    def test_owner_can_undo_anything_without_other_records(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, worker)[1]["id"]
+        assert app.handle_delete(f"/api/sows/{sow_id}", owner)[0] == 200
+
+    def test_cannot_undo_a_sow_that_already_has_other_records(self, farm):
+        """就算是牧場主也不行 —— 這不是權限問題,是資料完整性問題。"""
+        app, owner, farm_id = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, owner)
+        status, body = app.handle_delete(f"/api/sows/{sow_id}", owner)
+        assert status == 409
+        assert app.store.get_sow(farm_id, sow_id) is not None
+
+    def test_cannot_undo_a_boar_that_already_has_other_records(self, farm):
+        app, owner, farm_id = farm
+        boar_id = _post(app, "/api/boars", {"earTag": "D6"}, owner)[1]["id"]
+        _post(app, "/api/boar-events",
+              {"boarId": boar_id, "type": "SC", "date": "2026-02-03"}, owner)
+        status, body = app.handle_delete(f"/api/boars/{boar_id}", owner)
+        assert status == 409
+        assert app.store.get_boar(farm_id, boar_id) is not None
+
+    def test_missing_sow_is_404(self, farm):
+        app, owner, _ = farm
+        assert app.handle_delete("/api/sows/999", owner)[0] == 404
+
+    def test_recent_events_reports_cannot_undo_once_other_records_exist(self, farm):
+        """伺服器判定,不是前端自己算 —— 不能給使用者一個按了必定失敗的
+        按鈕(見 _recent_events)。母豬進場沒帶 entryDate 就不會落在
+        「最近」窗口裡(見 _add_sow),這裡要明確帶今天才進得了清單。
+        """
+        app, owner, farm_id = farm
+        today = date.today().isoformat()
+        sow_id = _post(app, "/api/sows",
+                       {"earTag": "1183", "entryDate": today}, owner)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, owner)
+
+        events = app.handle_get("/api/recent-events?days=1", owner)[1]["events"]
+        entry = next(e for e in events if e["kind"] == "sow-entry")
+        assert entry["canUndo"] is False
+
+    def test_recent_events_reports_can_undo_for_a_clean_entry(self, farm):
+        app, owner, _ = farm
+        today = date.today().isoformat()
+        _post(app, "/api/sows", {"earTag": "1183", "entryDate": today}, owner)
+
+        events = app.handle_get("/api/recent-events?days=1", owner)[1]["events"]
+        entry = next(e for e in events if e["kind"] == "sow-entry")
+        assert entry["canUndo"] is True
+
+
+class TestMarketDeath:
+    """肉豬死亡:不用耳號,只記日期、原因、公斤數(使用者決定)。
+    不掛在任何一頭母豬或公豬身上,收回規則比種豬進場單純 —— 沒有
+    「這頭豬還有沒有其他記錄」要檢查,因為根本沒有這頭豬。
+    """
+
+    def test_worker_can_record_it(self, farm):
+        """跟仔豬死亡、種豬死亡一樣是員工的日常記錄,不是牧場主專屬。"""
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        status, body = _post(app, "/api/market-deaths",
+                             {"date": "2026-02-04", "reason": "熱衰竭", "weightKg": 85.5},
+                             worker)
+        assert status == 200, body
+
+    def test_missing_reason_is_rejected(self, farm):
+        app, owner, _ = farm
+        status, body = _post(app, "/api/market-deaths",
+                             {"date": "2026-02-04", "weightKg": 85}, owner)
+        assert status == 400
+        assert "原因" in body["error"]
+
+    def test_missing_weight_is_rejected(self, farm):
+        app, owner, _ = farm
+        status, body = _post(app, "/api/market-deaths",
+                             {"date": "2026-02-04", "reason": "熱衰竭"}, owner)
+        assert status == 400
+        assert "公斤數" in body["error"]
+
+    def test_negative_weight_is_rejected(self, farm):
+        app, owner, _ = farm
+        status, _ = _post(app, "/api/market-deaths",
+                          {"date": "2026-02-04", "reason": "熱衰竭", "weightKg": -1}, owner)
+        assert status == 400
+
+    def test_bad_date_is_rejected(self, farm):
+        app, owner, _ = farm
+        status, _ = _post(app, "/api/market-deaths",
+                          {"date": "not-a-date", "reason": "熱衰竭", "weightKg": 85}, owner)
+        assert status == 400
+
+    def test_appears_in_recent_events_with_no_ear_tag(self, farm):
+        app, owner, _ = farm
+        _post(app, "/api/market-deaths",
+              {"date": date.today().isoformat(), "reason": "熱衰竭", "weightKg": 85.5}, owner)
+
+        events = app.handle_get("/api/recent-events?days=1", owner)[1]["events"]
+        row = next(e for e in events if e["kind"] == "market-death")
+        assert row["earTag"] == ""
+        assert row["detail"]["reason"] == "熱衰竭"
+        assert row["detail"]["weight_kg"] == 85.5
+
+    def test_worker_can_undo_own_latest(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        death_id = _post(app, "/api/market-deaths",
+                         {"date": "2026-02-04", "reason": "熱衰竭", "weightKg": 85},
+                         worker)[1]["id"]
+        assert app.handle_delete(f"/api/market-deaths/{death_id}", worker)[0] == 200
+        assert app.store.list_market_deaths(farm_id) == []
+
+    def test_worker_cannot_undo_someone_elses(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        death_id = _post(app, "/api/market-deaths",
+                         {"date": "2026-02-04", "reason": "熱衰竭", "weightKg": 85},
+                         owner)[1]["id"]
+        assert app.handle_delete(f"/api/market-deaths/{death_id}", worker)[0] == 403
+
+    def test_worker_cannot_undo_an_older_one(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        old = _post(app, "/api/market-deaths",
+                   {"date": "2026-02-04", "reason": "熱衰竭", "weightKg": 85},
+                   worker)[1]["id"]
+        _post(app, "/api/market-deaths",
+              {"date": "2026-02-05", "reason": "下痢", "weightKg": 60}, worker)
+        assert app.handle_delete(f"/api/market-deaths/{old}", worker)[0] == 403
+
+    def test_owner_can_undo_anything(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        old = _post(app, "/api/market-deaths",
+                   {"date": "2026-02-04", "reason": "熱衰竭", "weightKg": 85},
+                   worker)[1]["id"]
+        _post(app, "/api/market-deaths",
+              {"date": "2026-02-05", "reason": "下痢", "weightKg": 60}, worker)
+        assert app.handle_delete(f"/api/market-deaths/{old}", owner)[0] == 200
+
+    def test_missing_death_is_404(self, farm):
+        app, owner, _ = farm
+        assert app.handle_delete("/api/market-deaths/999", owner)[0] == 404
+
+    def test_does_not_leak_across_farms(self, farm):
+        app, owner, farm_id = farm
+        death_id = _post(app, "/api/market-deaths",
+                         {"date": "2026-02-04", "reason": "熱衰竭", "weightKg": 85},
+                         owner)[1]["id"]
+        other = _owner(app, "otherfarm")
+        assert app.handle_delete(f"/api/market-deaths/{death_id}", other)[0] == 404
+
+
 class TestEventSideEffects:
     """記錄即完成,而且連帶效果要真的發生 —— 否則使用者得自己去改狀態。"""
 
@@ -705,6 +899,16 @@ class TestResponsesAreSerializable:
         """轉出來的格式要是前端看得懂的 ISO 字串,不是 date 的 repr。"""
         payload = json.loads(to_json_bytes({"d": date(2026, 8, 13)}))
         assert payload["d"] == "2026-08-13"
+
+    def test_decimal_comes_out_as_a_number(self):
+        """肉豬死亡的公斤數是 NUMERIC 欄位,PostgresStore 讀回來是
+        Decimal —— InMemoryStore 測不到這個型別(它存的是 JSON 送進來的
+        原始型別,從沒真的變成 Decimal),所以在這裡直接補一個單元測試,
+        不必真的連 Postgres。
+        """
+        from decimal import Decimal
+        payload = json.loads(to_json_bytes({"weightKg": Decimal("85.5")}))
+        assert payload["weightKg"] == 85.5
 
     def test_unknown_types_still_raise(self):
         """只放行日期。什麼都靜靜轉成字串的話,真的組錯回應時不會有人發現。"""
@@ -1253,13 +1457,15 @@ class TestBoarCard:
         app, token, _, boar_id = setup
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": "2026-08-17"}, token)
+              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat()}, token)
         _post(app, "/api/boar-events",
-              {"boarId": boar_id, "type": "SC", "date": "2026-08-17"}, token)
+              {"boarId": boar_id, "type": "SC", "date": date.today().isoformat()}, token)
 
         events = app.handle_get("/api/recent-events?days=1", token)[1]["events"]
         kinds = {e["kind"] for e in events}
-        assert kinds == {"sow", "boar"}
+        # boar-entry 也在裡面:setup 那頭公豬沒指定 entryDate,預設今天
+        # 進場,一樣落在「最近」的窗口內(見 _recent_events 的種豬進場)。
+        assert kinds == {"sow", "boar", "boar-entry"}
         boar_row = next(e for e in events if e["kind"] == "boar")
         assert boar_row["earTag"] == "D6"
         assert boar_row["canUndo"] is True

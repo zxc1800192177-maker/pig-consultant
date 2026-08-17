@@ -9,17 +9,20 @@ import { describe, it } from "node:test";
 import {
   ESTRUS_STABILITY_LABEL,
   ESTRUS_STABILITY_OPTIONS,
+  OTHER_REASON,
   RECORD_FORMS,
   SIDE_EFFECTS,
   ZONE_OPTIONS,
   buildDetail,
   createsNewAnimal,
   formFor,
+  hasOtherOption,
   recordSummary,
   recordedRow,
   supportsMultiSow,
   targetsBoar,
   targetsEither,
+  targetsNothing,
 } from "../../web/lib/record.js";
 
 describe("表單定義", () => {
@@ -83,6 +86,48 @@ describe("種豬死亡", () => {
   it("原因欄位不分物種,兩邊共用同一份定義", () => {
     const keys = formFor("DTH").fields.map((f) => f.key);
     assert.deepEqual(keys, ["reason"]);
+  });
+});
+
+describe("肉豬死亡", () => {
+  // 使用者要求:肉豬不用耳號,只要日期、原因、公斤數 —— 肉豬本來就不是
+  // 這個系統追蹤身分的對象。
+  it("target 是 none,不掛在任何一頭豬身上", () => {
+    assert.equal(formFor("MKD").target, "none");
+    assert.equal(targetsNothing("MKD"), true);
+    assert.equal(targetsNothing("MT"), false);
+  });
+
+  it("不認得的代碼不算 target none,不是拋例外", () => {
+    assert.equal(targetsNothing("ZZ"), false);
+  });
+
+  it("不是新增一頭豬,也不是母豬或公豬專屬", () => {
+    assert.equal(createsNewAnimal("MKD"), false);
+    assert.equal(targetsBoar("MKD"), false);
+    assert.equal(targetsEither("MKD"), false);
+  });
+
+  it("兩個欄位:原因跟重量,都是必填", () => {
+    const fields = formFor("MKD").fields;
+    assert.deepEqual(fields.map((f) => f.key), ["reason", "weight_kg"]);
+    assert.ok(fields.every((f) => f.required));
+  });
+
+  it("重量是 decimal 不是 int —— 公斤數可以有小數", () => {
+    assert.equal(formFor("MKD").fields.find((f) => f.key === "weight_kg").type, "decimal");
+  });
+
+  it("留空原因或重量都要擋下來", () => {
+    assert.ok(buildDetail("MKD", { weight_kg: "85" }).problems.length);
+    assert.ok(buildDetail("MKD", { reason: "熱衰竭" }).problems.length);
+  });
+
+  it("填了兩者就正常送出", () => {
+    const { detail, problems } = buildDetail("MKD", { reason: "熱衰竭", weight_kg: "85.5" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.reason, "熱衰竭");
+    assert.equal(detail.weight_kg, 85.5);
   });
 });
 
@@ -250,6 +295,39 @@ describe("整理表單內容", () => {
   });
 });
 
+describe("原因選了「其他」要能打字說明", () => {
+  // 仔豬死亡跟淘汰的原因都是從實際記錄取出來的固定選項,「其他」接住
+  // 選不到的長尾 —— 選了卻沒地方寫清楚是什麼,這筆資料就白記了。
+  it("仔豬死亡的原因有「其他」選項", () => {
+    assert.ok(hasOtherOption(formFor("PL").fields.find((f) => f.key === "reason")));
+  });
+
+  it("淘汰的原因有「其他」選項", () => {
+    assert.ok(hasOtherOption(formFor("SAL").fields.find((f) => f.key === "reason")));
+  });
+
+  it("不是 choice 類型就不算有「其他」", () => {
+    assert.equal(hasOtherOption({ type: "text" }), false);
+  });
+
+  it("choice 但選項裡沒有「其他」就不用準備打字框", () => {
+    assert.equal(hasOtherOption({ type: "choice", options: ZONE_OPTIONS }), false);
+  });
+
+  it("OTHER_REASON 就是選項清單裡「其他」那個值,兩邊用同一份定義", () => {
+    assert.ok(formFor("PL").fields.find((f) => f.key === "reason").options
+      .includes(OTHER_REASON));
+  });
+
+  it("打字說明的內容照樣進 reason,跟直接選固定選項一樣存法", () => {
+    // readRecordFields()(app.js)選到「其他」時會把打字框的內容換進來
+    // 當作 reason 的值送進 buildDetail() —— 這裡直接驗證那個值能正常存。
+    const { detail, problems } = buildDetail("PL", { count: "2", reason: "難產" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.reason, "難產");
+  });
+});
+
 describe("離乳仔豬評分", () => {
   // 使用者要求:1~5 分由牧場主自評,之前沒有這項評分就不用寫
   it("1 到 5 分都收", () => {
@@ -369,6 +447,50 @@ describe("已記錄清單", () => {
     });
     assert.match(html, /data-kind="boar"/);
     assert.match(html, /data-animal="5"/);
+  });
+
+  it("種豬進場摘要顯示品種", () => {
+    const { name, extra } = recordSummary({ type: "GA", detail: { breed: "Duroc" } });
+    assert.equal(name, "種豬進場");
+    assert.ok(extra.includes("Duroc"));
+  });
+
+  it("母豬進場(kind=sow-entry)收回按鈕帶母豬 id,打錯耳號時整頭撤掉", () => {
+    const html = recordedRow({
+      id: 12, sowId: 12, kind: "sow-entry", type: "GA", date: "2026-08-17",
+      earTag: "9001", detail: { breed: "" }, canUndo: true,
+    });
+    assert.match(html, /data-kind="sow-entry"/);
+    assert.match(html, /data-animal="12"/);
+  });
+
+  it("公豬進場(kind=boar-entry)收回按鈕帶的是公豬 id 不是母豬 id", () => {
+    const html = recordedRow({
+      id: 5, boarId: 5, kind: "boar-entry", type: "GA", date: "2026-08-17",
+      earTag: "D6", detail: { breed: "" }, canUndo: true,
+    });
+    assert.match(html, /data-kind="boar-entry"/);
+    assert.match(html, /data-animal="5"/);
+  });
+
+  it("肉豬死亡摘要顯示原因跟公斤數", () => {
+    const { name, extra } = recordSummary(
+      { type: "MKD", detail: { reason: "熱衰竭", weight_kg: 85.5 } });
+    assert.equal(name, "肉豬死亡");
+    assert.ok(extra.includes("熱衰竭"));
+    assert.ok(extra.includes("85.5 公斤"));
+  });
+
+  it("肉豬死亡(kind=market-death)沒有耳號、沒有 data-animal —— 不掛在任何一頭豬身上", () => {
+    const html = recordedRow({
+      id: 3, kind: "market-death", type: "MKD", date: "2026-08-17",
+      earTag: "", detail: { reason: "熱衰竭", weight_kg: 85.5 }, canUndo: true,
+    });
+    assert.match(html, /data-kind="market-death"/);
+    assert.doesNotMatch(html, /data-animal/);
+    // 沒有耳號時標題不該留下一格空白(以前的寫法是耳號永遠印在前面,
+    // 沒耳號就變成 " 肉豬死亡" 開頭多一個空格)。
+    assert.match(html, /class="done-t">肉豬死亡</);
   });
 
   it("耳號有跳脫", () => {

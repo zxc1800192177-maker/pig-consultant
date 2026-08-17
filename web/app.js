@@ -17,8 +17,8 @@ import {
   statusPills, taskGroup, timelineCaption, TIMELINE_LIMIT, visibleEvents, yearOfMonth,
 } from "./lib/v2.js";
 import {
-  SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, recordedRow,
-  supportsMultiSow, targetsBoar, targetsEither,
+  SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, hasOtherOption, OTHER_REASON,
+  recordedRow, supportsMultiSow, targetsBoar, targetsEither, targetsNothing,
 } from "./lib/record.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1416,6 +1416,7 @@ async function openRecordForm(code) {
     ${createsNewAnimal(code) ? newAnimalFields()
       : targetsEither(code) ? eitherAnimalFields()
       : targetsBoar(code) ? boarPickerField()
+      : targetsNothing(code) ? ""
       : supportsMultiSow(code) ? multiSowPickerField() : sowPickerField()}
     <label class="fld"><span>日期</span>
       <input type="date" id="recDate" value="${todayIso()}"></label>
@@ -1562,6 +1563,9 @@ function fieldMarkup(field) {
   if (field.type === "choice") {
     // 選項可以是純字串,也可以是 {value,label}(值跟顯示文字不同時,
     // 例如區域:存的是 mating,顯示的是「配種區」)。
+    // 選到「其他」時要跳出打字框讓使用者說清楚實際原因,不能就這樣存一個
+    // 不具體的「其他」——見 lib/record.js 的 OTHER_REASON。預設藏著,
+    // 點到「其他」才由下面 document 的委派點擊處理器切換顯示。
     return `
       <div class="fld"><span>${escapeHtml(field.label)}</span>
         <div class="chips" data-field="${field.key}">
@@ -1570,7 +1574,11 @@ function fieldMarkup(field) {
             return `<button type="button" class="chip" data-val="${escapeHtml(opt.value)}"
                     >${escapeHtml(opt.label)}</button>`;
           }).join("")}
-        </div>${hint}
+        </div>
+        ${hasOtherOption(field)
+          ? `<input type="text" id="f_${field.key}_other" class="fld-other is-hidden"
+                    placeholder="請輸入實際原因">`
+          : ""}${hint}
       </div>`;
   }
   if (field.type === "pen") {
@@ -1614,14 +1622,23 @@ function todayIso() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** 從表單讀出使用者填的值。分段按鈕與 chip 的值存在 .is-active 上。 */
+/** 從表單讀出使用者填的值。分段按鈕與 chip 的值存在 .is-active 上。
+ *
+ * choice 欄位選到「其他」時,真正要存的不是「其他」這兩個字,是打字框
+ * 裡使用者說明的實際原因 —— 沒打字就當沒填,讓 buildDetail() 既有的
+ * 必填檢查去擋(「請填寫原因」),不必另外寫一套錯誤訊息。
+ */
 function readRecordFields(spec) {
   const raw = {};
   for (const field of spec.fields) {
     if (["bool", "score", "choice", "tri"].includes(field.type)) {
       const picked = document.querySelector(
         `[data-field="${field.key}"] .is-active`);
-      raw[field.key] = picked ? picked.dataset.val : "";
+      let val = picked ? picked.dataset.val : "";
+      if (field.type === "choice" && val === OTHER_REASON) {
+        val = ($(`f_${field.key}_other`)?.value || "").trim();
+      }
+      raw[field.key] = val;
     } else {
       raw[field.key] = $(`f_${field.key}`)?.value ?? "";
     }
@@ -1658,6 +1675,19 @@ async function submitRecord() {
     closeRecordForm();
     showBanner(`${detail.earTag} 已進場`, "ok");
     await Promise.all([reloadSows(), reloadBoars(), reloadRecent()]);
+    return;
+  }
+
+  // 肉豬死亡不掛在任何一頭豬身上 —— 沒有耳號可選,也不影響母豬/公豬
+  // 清單、工作清單或提醒,所以送出後只需要重讀「已記錄」。
+  if (targetsNothing(recordCode)) {
+    const { ok, data } = await api("/api/market-deaths", postJson({
+      date: when, reason: detail.reason, weightKg: detail.weight_kg,
+    }));
+    if (!ok) return showRecordError(data.error || "記錄失敗");
+    closeRecordForm();
+    showBanner(`${spec.label}已記錄`, "ok");
+    await reloadRecent();
     return;
   }
 
@@ -1762,9 +1792,29 @@ async function reloadRecent() {
 }
 
 async function undoRecord(eventId, kind, animalId) {
-  const path = kind === "boar" ? `/api/boar-events/${eventId}` : `/api/sow-events/${eventId}`;
+  // 種豬進場打錯耳號時整頭收回(這頭豬根本不該存在),跟收回一筆事件是
+  // 不同的 API —— 走 /api/sows or /api/boars 本身,不是 sow-events/
+  // boar-events(那頭豬還在,只是少一筆記錄)。
+  const path = kind === "boar" ? `/api/boar-events/${eventId}`
+    : kind === "sow" ? `/api/sow-events/${eventId}`
+    : kind === "boar-entry" ? `/api/boars/${eventId}`
+    : kind === "sow-entry" ? `/api/sows/${eventId}`
+    : `/api/market-deaths/${eventId}`;               // "market-death"
   const { ok, data } = await api(path, { method: "DELETE" });
   if (!ok) return showBanner(data.error || "收不回來", "warn");
+
+  if (kind === "market-death") {
+    // 沒有耳號、沒有動物身分,不影響任何一張卡、工作或提醒。
+    await reloadRecent();
+    return;
+  }
+
+  if (kind === "sow-entry" || kind === "boar-entry") {
+    // 這頭豬已經整個消失了,不會是「目前開著的那張卡」還存在的情況 ——
+    // 不嘗試重開,只重讀清單。
+    await Promise.all([reloadSows(), reloadBoars(), reloadRecent()]);
+    return;
+  }
 
   if (kind === "boar") {
     // 公豬事件(採精)沒有連帶效果,不必牽動工作/提醒/欄位。
@@ -1949,6 +1999,15 @@ document.addEventListener("click", (e) => {
   if (chip) {
     chip.parentElement.querySelectorAll(".chip")
       .forEach((c) => c.classList.toggle("is-active", c === chip));
+    // 選到「其他」才顯示打字框(見 fieldMarkup 的 choice 分支);換回別的
+    // 固定選項就藏起來 —— 讀值時(readRecordFields)只有目前選到「其他」
+    // 才會去看這個框,藏起來的舊字不會被誤用,純粹是畫面乾淨。
+    const otherInput = chip.closest(".fld")?.querySelector(".fld-other");
+    if (otherInput) {
+      const isOther = chip.dataset.val === OTHER_REASON;
+      otherInput.classList.toggle("is-hidden", !isOther);
+      if (isOther) otherInput.focus();
+    }
     return;
   }
   const rec = e.target.closest("[data-rec]");

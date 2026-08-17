@@ -156,6 +156,10 @@ body { padding-bottom: 96px; }
 .fld-h { display: block; margin-top: 5px; font-size: 11.5px;
          color: var(--ink-faint); font-style: normal; }
 
+/* 選「其他」時跳出的打字框(見 lib/record.js 的 OTHER_REASON)。
+   跟在 .chips 後面,留一點空隙才不會貼在按鈕上。 */
+.fld-other { margin-top: 10px; }
+
 /* 配種一次記多頭:耳號輸入框旁邊的「+」。輸入框吃掉剩下的寬度,
    按鈕維持固定大小,巡欄時單手也點得到。 */
 .rec-tag-row { display: flex; gap: 8px; }

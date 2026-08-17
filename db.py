@@ -158,6 +158,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS boars_tag_unique ON boars (farm_id, ear_tag, e
 ALTER TABLE boars ADD COLUMN IF NOT EXISTS sire_tag TEXT NOT NULL DEFAULT '';
 ALTER TABLE boars ADD COLUMN IF NOT EXISTS dam_tag TEXT NOT NULL DEFAULT '';
 
+-- 哪個使用者新增的這筆進場記錄,「收回種豬進場」要靠這個判斷能不能收回
+-- (比照 sow_events/boar_events 的 recorded_by)。舊資料沒有這欄,一律是
+-- NULL,效果等同「只有牧場主能收回」——這對匯入或早期資料是對的:
+-- 那些本來就不該被員工用這個快速收回按鈕動到。
+ALTER TABLE sows ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id);
+ALTER TABLE boars ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id);
+
 -- detail 用 JSONB:八種事件各自需要的欄位差很多(分娩要活產/死產/木乃伊,
 -- 仔豬損失要數量/原因,驗孕只要 +/-),但都只是「這次事件的附註」,
 -- 不會被單獨查詢 —— 與 health_checks.values 同一個判斷。
@@ -201,6 +208,21 @@ CREATE TABLE IF NOT EXISTS boar_events (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS boar_events_farm_idx ON boar_events (farm_id, event_date DESC);
+
+-- 肉豬(育肥豬)死亡:不掛在任何一頭母豬或公豬身上 —— 肉豬本來就不是
+-- 這個系統追蹤身分的對象(沒有耳號進場記錄,母豬/公豬表也不是為牠們
+-- 設計的),硬塞進 sow_events/boar_events 得先假造一個不存在的動物身分。
+-- 獨立一張表,只記使用者要的三件事:什麼時候、為什麼、幾公斤。
+CREATE TABLE IF NOT EXISTS market_deaths (
+  id SERIAL PRIMARY KEY,
+  farm_id INTEGER NOT NULL REFERENCES farms(id) ON DELETE CASCADE,
+  event_date DATE NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  weight_kg NUMERIC,
+  recorded_by INTEGER REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS market_deaths_farm_idx ON market_deaths (farm_id, event_date DESC);
 
 CREATE TABLE IF NOT EXISTS custom_tasks (
   id SERIAL PRIMARY KEY,
@@ -381,7 +403,7 @@ class Store:
 
     # --- 母豬 ---
     def add_sow(self, farm_id, ear_tag, entry_date=None, birth_date=None,
-                breed="", sire_tag="", dam_tag="", parity=0) -> int:
+                breed="", sire_tag="", dam_tag="", parity=0, created_by=None) -> int:
         raise NotImplementedError
 
     def list_sows(self, farm_id: int, status: Optional[str] = None) -> List[dict]:
@@ -402,7 +424,7 @@ class Store:
 
     # --- 公豬 ---
     def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
-                 sire_tag="", dam_tag="") -> int:
+                 sire_tag="", dam_tag="", created_by=None) -> int:
         raise NotImplementedError
 
     def list_boars(self, farm_id: int, status: Optional[str] = None) -> List[dict]:
@@ -417,6 +439,9 @@ class Store:
     def update_boar(self, farm_id: int, boar_id: int, **fields) -> bool:
         raise NotImplementedError
 
+    def delete_boar(self, farm_id: int, boar_id: int) -> bool:
+        raise NotImplementedError
+
     # --- 公豬事件 ---
     def add_boar_event(self, farm_id, boar_id, event_type, event_date,
                        detail=None, recorded_by=None) -> int:
@@ -426,6 +451,17 @@ class Store:
         raise NotImplementedError
 
     def delete_boar_event(self, farm_id: int, event_id: int) -> bool:
+        raise NotImplementedError
+
+    # --- 肉豬死亡 ---
+    def add_market_death(self, farm_id, event_date, reason="", weight_kg=None,
+                         recorded_by=None) -> int:
+        raise NotImplementedError
+
+    def list_market_deaths(self, farm_id: int) -> List[dict]:
+        raise NotImplementedError
+
+    def delete_market_death(self, farm_id: int, death_id: int) -> bool:
         raise NotImplementedError
 
     # --- 母豬事件 ---
@@ -483,6 +519,7 @@ class InMemoryStore(Store):
         self.boars = []
         self.sow_events = []
         self.boar_events = []
+        self.market_deaths = []
         self.custom_tasks = []
         self.task_done = []
         self._next_user_id = 1
@@ -730,7 +767,7 @@ class InMemoryStore(Store):
         return False
 
     def add_sow(self, farm_id, ear_tag, entry_date=None, birth_date=None,
-                breed="", sire_tag="", dam_tag="", parity=0) -> int:
+                breed="", sire_tag="", dam_tag="", parity=0, created_by=None) -> int:
         dup = [s for s in self._owned(self.sows, farm_id, ear_tag=ear_tag)
                if s["entry_date"] == entry_date]
         if dup:
@@ -741,6 +778,7 @@ class InMemoryStore(Store):
             "entry_date": entry_date, "birth_date": birth_date, "breed": breed,
             "sire_tag": sire_tag, "dam_tag": dam_tag, "parity": parity,
             "status": "active", "pen_id": None, "photo_url": "",
+            "created_by": created_by,
         })
         return sow_id
 
@@ -777,12 +815,13 @@ class InMemoryStore(Store):
         return False
 
     def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
-                 sire_tag="", dam_tag="") -> int:
+                 sire_tag="", dam_tag="", created_by=None) -> int:
         boar_id = self._new_id("boar")
         self.boars.append({
             "id": boar_id, "farm_id": farm_id, "ear_tag": ear_tag,
             "entry_date": entry_date, "breed": breed,
             "sire_tag": sire_tag, "dam_tag": dam_tag, "status": "active",
+            "created_by": created_by,
         })
         return boar_id
 
@@ -807,6 +846,15 @@ class InMemoryStore(Store):
         rows[0].update(fields)
         return True
 
+    def delete_boar(self, farm_id, boar_id) -> bool:
+        before = len(self.boars)
+        self.boars = [b for b in self.boars
+                     if not (b["id"] == boar_id and b["farm_id"] == farm_id)]
+        if len(self.boars) < before:
+            self.boar_events = [e for e in self.boar_events if e["boar_id"] != boar_id]
+            return True
+        return False
+
     def add_boar_event(self, farm_id, boar_id, event_type, event_date,
                        detail=None, recorded_by=None) -> int:
         event_id = self._new_id("boar_event")
@@ -829,6 +877,26 @@ class InMemoryStore(Store):
         self.boar_events = [e for e in self.boar_events
                             if not (e["id"] == event_id and e["farm_id"] == farm_id)]
         return len(self.boar_events) < before
+
+    def add_market_death(self, farm_id, event_date, reason="", weight_kg=None,
+                         recorded_by=None) -> int:
+        death_id = self._new_id("market_death")
+        self.market_deaths.append({
+            "id": death_id, "farm_id": farm_id, "event_date": event_date,
+            "reason": reason, "weight_kg": weight_kg, "recorded_by": recorded_by,
+        })
+        return death_id
+
+    def list_market_deaths(self, farm_id):
+        rows = self._owned(self.market_deaths, farm_id)
+        rows.sort(key=lambda r: (r["event_date"], r["id"]))
+        return [dict(r) for r in rows]
+
+    def delete_market_death(self, farm_id, death_id) -> bool:
+        before = len(self.market_deaths)
+        self.market_deaths = [d for d in self.market_deaths
+                              if not (d["id"] == death_id and d["farm_id"] == farm_id)]
+        return len(self.market_deaths) < before
 
     def add_sow_event(self, farm_id, sow_id, event_type, event_date,
                       detail=None, recorded_by=None, seq=0) -> int:
@@ -1204,7 +1272,7 @@ class PostgresStore(Store):
     # B 牧場資料的漏洞(憲法第十一條),沒有例外。
 
     SOW_COLS = ("id, farm_id, ear_tag, entry_date, birth_date, breed, sire_tag,"
-                " dam_tag, parity, status, pen_id, photo_url")
+                " dam_tag, parity, status, pen_id, photo_url, created_by")
     EVENT_COLS = ("id, farm_id, sow_id, event_type, event_date, detail,"
                   " seq, recorded_by, excluded")
 
@@ -1265,14 +1333,14 @@ class PostgresStore(Store):
             return row is not None
 
     def add_sow(self, farm_id, ear_tag, entry_date=None, birth_date=None,
-                breed="", sire_tag="", dam_tag="", parity=0) -> int:
+                breed="", sire_tag="", dam_tag="", parity=0, created_by=None) -> int:
         with self._connect() as conn:
             return conn.execute(
                 "INSERT INTO sows (farm_id, ear_tag, entry_date, birth_date, breed,"
-                " sire_tag, dam_tag, parity) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
+                " sire_tag, dam_tag, parity, created_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
                 " RETURNING id",
                 (farm_id, ear_tag, entry_date, birth_date, breed,
-                 sire_tag, dam_tag, parity)).fetchone()[0]
+                 sire_tag, dam_tag, parity, created_by)).fetchone()[0]
 
     def list_sows(self, farm_id, status=None):
         sql = f"SELECT {self.SOW_COLS} FROM sows WHERE farm_id = %s"
@@ -1322,14 +1390,16 @@ class PostgresStore(Store):
             return row is not None
 
     def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
-                 sire_tag="", dam_tag="") -> int:
+                 sire_tag="", dam_tag="", created_by=None) -> int:
         with self._connect() as conn:
             return conn.execute(
-                "INSERT INTO boars (farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag)"
-                " VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
-                (farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag)).fetchone()[0]
+                "INSERT INTO boars (farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag,"
+                " created_by) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag,
+                 created_by)).fetchone()[0]
 
-    BOAR_COLS = "id, farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag, status"
+    BOAR_COLS = ("id, farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag, status,"
+                 " created_by")
 
     def list_boars(self, farm_id, status=None):
         sql = f"SELECT {self.BOAR_COLS} FROM boars WHERE farm_id = %s"
@@ -1368,6 +1438,13 @@ class PostgresStore(Store):
                 list(fields.values()) + [boar_id, farm_id]).fetchone()
             return row is not None
 
+    def delete_boar(self, farm_id, boar_id) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "DELETE FROM boars WHERE id = %s AND farm_id = %s RETURNING id",
+                (boar_id, farm_id)).fetchone()
+            return row is not None
+
     BOAR_EVENT_COLS = ("id, farm_id, boar_id, event_type, event_date, detail,"
                        " recorded_by, excluded")
 
@@ -1398,6 +1475,29 @@ class PostgresStore(Store):
             row = conn.execute(
                 "DELETE FROM boar_events WHERE id = %s AND farm_id = %s RETURNING id",
                 (event_id, farm_id)).fetchone()
+            return row is not None
+
+    MARKET_DEATH_COLS = "id, farm_id, event_date, reason, weight_kg, recorded_by"
+
+    def add_market_death(self, farm_id, event_date, reason="", weight_kg=None,
+                         recorded_by=None) -> int:
+        with self._connect() as conn:
+            return conn.execute(
+                "INSERT INTO market_deaths (farm_id, event_date, reason, weight_kg,"
+                " recorded_by) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+                (farm_id, event_date, reason, weight_kg, recorded_by)).fetchone()[0]
+
+    def list_market_deaths(self, farm_id):
+        with self._connect() as conn:
+            return self._rows(conn.execute(
+                f"SELECT {self.MARKET_DEATH_COLS} FROM market_deaths WHERE farm_id = %s"
+                " ORDER BY event_date, id", (farm_id,)), self.MARKET_DEATH_COLS)
+
+    def delete_market_death(self, farm_id, death_id) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "DELETE FROM market_deaths WHERE id = %s AND farm_id = %s RETURNING id",
+                (death_id, farm_id)).fetchone()
             return row is not None
 
     def add_sow_event(self, farm_id, sow_id, event_type, event_date,

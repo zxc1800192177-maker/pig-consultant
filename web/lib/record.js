@@ -28,6 +28,20 @@ export const ZONE_OPTIONS = [
   { value: "farrowing", label: "產房" },
 ];
 
+/** 原因選單裡的「其他」——選到這個時要跳出一個框給使用者打字說明實際
+ * 原因,不能就這樣存一個不具體的「其他」進資料庫。固定選項本來就是從
+ * 實際記錄裡最常見的幾種原因取出來的(見 PL/SAL 的欄位定義),「其他」
+ * 存在的意義正是接住那些選不到的長尾,選了卻沒有地方寫清楚是什麼,
+ * 這筆資料就白記了。
+ */
+export const OTHER_REASON = "其他";
+
+/** 這個 choice 欄位是不是有「其他」選項,要不要準備打字框給它用。 */
+export function hasOtherOption(field) {
+  if (field.type !== "choice") return false;
+  return field.options.some((o) => (typeof o === "string" ? o : o.value) === OTHER_REASON);
+}
+
 /** 每種事件要填什麼。`type` 決定畫成什麼元件與怎麼收值。 */
 export const RECORD_FORMS = {
   MT: {
@@ -92,6 +106,18 @@ export const RECORD_FORMS = {
     fields: [{ key: "reason", label: "原因", type: "text" }],
   },
   AB: { label: "流產", target: "sow", fields: [] },
+  MKD: {
+    // 肉豬(育肥豬)不掛在任何一頭母豬或公豬身上 —— 牠們本來就不是這個
+    // 系統追蹤身分的對象,沒有耳號、沒有進場記錄。target: "none" 讓表單
+    // 不畫耳號欄位,只記使用者要的三件事:日期、原因、公斤數
+    // (使用者決定)。
+    label: "肉豬死亡", target: "none",
+    fields: [
+      { key: "reason", label: "死亡原因", type: "text", required: true },
+      { key: "weight_kg", label: "重量", type: "decimal", min: 0, max: 500,
+        required: true, hint: "公斤(kg)" },
+    ],
+  },
   SAL: {
     label: "淘汰", target: "sow",
     fields: [{ key: "reason", label: "原因", type: "choice", required: true,
@@ -163,6 +189,13 @@ export function targetsBoar(code) {
  */
 export function targetsEither(code) {
   return formFor(code)?.target === "either";
+}
+
+/** 這種事件不掛在任何一頭豬身上 —— 目前只有肉豬死亡:肉豬不是這個
+ * 系統追蹤身分的對象,沒有耳號可選(使用者決定)。
+ */
+export function targetsNothing(code) {
+  return formFor(code)?.target === "none";
 }
 
 /** 這種事件可以一次對多頭母豬記錄同一組內容 —— 目前只有配種:同一天、
@@ -239,6 +272,7 @@ export function recordSummary(event) {
   const d = event.detail || {};
   const bits = [];
 
+  if (d.breed) bits.push(d.breed);
   if (d.boar_tag) bits.push(`公豬 ${d.boar_tag}`);
   if (d.estrus_stability) {
     const symbol = ESTRUS_STABILITY_LABEL[d.estrus_stability];
@@ -258,27 +292,32 @@ export function recordSummary(event) {
   if (d.motility != null) bits.push(`活力 ${d.motility}%`);
   if (d.concentration != null) bits.push(`濃度 ${d.concentration} 億/mL`);
   if (d.doses != null) bits.push(`${d.doses} 劑`);
+  if (d.weight_kg != null) bits.push(`${d.weight_kg} 公斤`);
 
   return { name, extra: bits.join(" ・ ") };
 }
 
-/** 已記錄清單裡的一列。母豬事件跟公豬事件(kind: "boar")合併顯示,
- * 收回按鈕要分得出該打哪個 API、該重新整理哪一張卡 —— 沒有 kind 時
- * 一律當母豬事件,舊呼叫端(單純母豬事件)不用跟著改。
+/** 已記錄清單裡的一列。母豬事件、公豬事件(kind: "boar")、種豬進場
+ * (kind: "sow-entry"/"boar-entry",打錯耳號時整筆收回,不是改一筆事件)、
+ * 肉豬死亡(kind: "market-death",不掛在任何一頭豬身上,沒有耳號也沒有
+ * 動物 id)合併顯示,收回按鈕要分得出該打哪個 API、該重新整理哪一張卡
+ * —— 沒有 kind 時一律當母豬事件,舊呼叫端(單純母豬事件)不用跟著改。
  */
 export function recordedRow(event) {
   const { name, extra } = recordSummary(event);
   const kind = event.kind || "sow";
-  const animalId = kind === "boar" ? event.boarId : event.sowId;
+  const animalId = (kind === "boar" || kind === "boar-entry") ? event.boarId
+    : kind === "market-death" ? null
+    : event.sowId;
   return `
     <div class="done-row">
       <div class="done-b">
-        <div class="done-t">${escapeHtml(event.earTag || "")} ${escapeHtml(name)}</div>
+        <div class="done-t">${event.earTag ? `${escapeHtml(event.earTag)} ` : ""}${escapeHtml(name)}</div>
         <div class="done-s">${escapeHtml(extra || event.date)}</div>
       </div>
       ${event.canUndo
         ? `<button class="btn-ghost undo" data-undo="${event.id}" data-kind="${kind}"
-           data-animal="${animalId}">收回</button>`
+           ${animalId != null ? `data-animal="${animalId}"` : ""}>收回</button>`
         : ""}
     </div>`;
 }

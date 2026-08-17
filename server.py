@@ -14,6 +14,7 @@ import socketserver
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from http.cookies import SimpleCookie
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
@@ -196,6 +197,11 @@ def to_json_bytes(payload: dict) -> bytes:
     def _default(value):
         if isinstance(value, (date, datetime)):
             return value.isoformat()
+        # 肉豬死亡的公斤數是 NUMERIC 欄位,psycopg 讀回來是 Decimal ——
+        # JSONB 裡的數字(例如採精的精液濃度)不會有這個問題,那些從沒
+        # 真的變成 Python Decimal,是這個欄位第一次真的用到 NUMERIC。
+        if isinstance(value, Decimal):
+            return float(value)
         raise TypeError(f"無法序列化的型別:{type(value).__name__}")
 
     return json.dumps(payload, ensure_ascii=False, default=_default).encode("utf-8")
@@ -529,6 +535,8 @@ class Application:
             return self._add_boar(payload, token)
         if path == "/api/boar-events":
             return self._add_boar_event(payload, token)
+        if path == "/api/market-deaths":
+            return self._add_market_death(payload, token)
         if path == "/api/custom-tasks":
             return self._add_custom_task(payload, token)
         if path == "/api/custom-tasks/done":
@@ -567,6 +575,24 @@ class Application:
             if event_id is None:
                 return 400, {"error": "編號格式錯誤"}
             return self._delete_boar_event(token, event_id)
+
+        if path.startswith("/api/market-deaths/"):
+            death_id = self._path_id(path)
+            if death_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            return self._delete_market_death(token, death_id)
+
+        if path.startswith("/api/sows/"):
+            sow_id = self._path_id(path)
+            if sow_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            return self._delete_sow_entry(token, sow_id)
+
+        if path.startswith("/api/boars/"):
+            boar_id = self._path_id(path)
+            if boar_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            return self._delete_boar_entry(token, boar_id)
 
         if path.startswith("/api/custom-tasks/"):
             task_id = self._path_id(path)
@@ -774,6 +800,7 @@ class Application:
                 breed=_text(payload.get("breed"), config.MAX_BREED_CHARS),
                 sire_tag=_text(payload.get("sireTag"), config.MAX_EAR_TAG_CHARS),
                 dam_tag=_text(payload.get("damTag"), config.MAX_EAR_TAG_CHARS),
+                created_by=user.id,
             )
         except ValueError as e:
             return 409, {"error": str(e)}
@@ -1404,6 +1431,7 @@ class Application:
             breed=_text(payload.get("breed"), config.MAX_BREED_CHARS),
             sire_tag=_text(payload.get("sireTag"), config.MAX_EAR_TAG_CHARS),
             dam_tag=_text(payload.get("damTag"), config.MAX_EAR_TAG_CHARS),
+            created_by=user.id,
         )
         return 200, {"id": boar_id, "earTag": tag}
 
@@ -1474,6 +1502,69 @@ class Application:
 
         return 200, {"id": event_id}
 
+    @staticmethod
+    def _market_death_payload(row) -> dict:
+        # detail 巢狀放 reason/weight_kg,跟其他事件的形狀一致(_event_payload/
+        # _boar_event_payload 都是這樣)—— recordSummary()/recordedRow()
+        # (web/lib/record.js)都是從 event.detail 讀欄位,不必為肉豬死亡
+        # 另外寫一套摘要邏輯。
+        return {
+            "id": row["id"],
+            "date": _iso(row["event_date"]),
+            "detail": {"reason": row.get("reason") or "", "weight_kg": row.get("weight_kg")},
+            "recordedBy": row.get("recorded_by"),
+        }
+
+    def _add_market_death(self, payload, token) -> Tuple[int, dict]:
+        """肉豬死亡:不掛在任何一頭母豬或公豬身上 —— 肉豬不是這個系統
+        追蹤身分的對象(沒有耳號進場記錄),只記使用者要的三件事:
+        日期、原因、公斤數(使用者決定)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        when = _date(payload.get("date"))
+        if when is None:
+            return 400, {"error": "日期格式錯誤"}
+
+        reason = _text(payload.get("reason"), config.MAX_MARKET_DEATH_REASON_CHARS)
+        if not reason:
+            return 400, {"error": "請填寫死亡原因"}
+
+        weight = payload.get("weightKg")
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) \
+                or not 0 <= weight <= config.MAX_MARKET_DEATH_WEIGHT_KG:
+            return 400, {"error": f"公斤數請填 0 到 {config.MAX_MARKET_DEATH_WEIGHT_KG}"}
+
+        death_id = self.store.add_market_death(
+            farm_id, when, reason=reason, weight_kg=weight, recorded_by=user.id)
+        return 200, {"id": death_id}
+
+    def _delete_market_death(self, token, death_id) -> Tuple[int, dict]:
+        """跟 _delete_event 同樣的收回規則:員工只能刪自己記的、且是
+        最新一筆(憲法第十一條第 5 款)。這裡沒有動物身分,不必像
+        _delete_sow_entry 那樣另外檢查「有沒有其他記錄接著」。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        deaths = self.store.list_market_deaths(farm_id)
+        target = next((d for d in deaths if d["id"] == death_id), None)
+        if target is None:
+            return 404, {"error": "找不到這筆記錄"}
+
+        if not user.is_owner:
+            newest = max(deaths, key=lambda d: (d["event_date"], d["id"]))
+            if target["recorded_by"] != user.id:
+                return 403, {"error": "只能修正自己記的那一筆"}
+            if target["id"] != newest["id"]:
+                return 403, {"error": "只能修正最新一筆,較舊的請牧場主處理"}
+
+        self.store.delete_market_death(farm_id, death_id)
+        return 200, {"ok": True}
+
     def _delete_boar_event(self, token, event_id) -> Tuple[int, dict]:
         """跟 _delete_event 同樣的收回規則:員工只能刪自己記的、且是
         最新一筆(憲法第十一條第 5 款)。
@@ -1497,6 +1588,59 @@ class Application:
         self.store.delete_boar_event(farm_id, event_id)
         return 200, {"ok": True}
 
+    def _delete_sow_entry(self, token, sow_id) -> Tuple[int, dict]:
+        """收回一筆種豬進場(母豬)。打錯耳號是很容易發生的事,而進場記錄
+        本身跟一般事件不一樣 —— 它不是「母豬身上發生了一件事」,是「這頭
+        母豬存不存在」,所以收回是整筆刪掉,不是留著記錄改個欄位。
+
+        **只有這頭母豬完全沒有其他記錄時才能收回**,不分牧場主或員工 ——
+        這不是權限問題,是資料完整性問題:一旦配種、分娩之類的真實記錄
+        接上去了,刪掉她等於連那些記錄一起消失,不能因為「牧場主按了
+        收回」就允許。權限規則(只能收回自己新增的最新一筆)另外把關,
+        跟 _delete_event 同一套(憲法第十一條第 5 款)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        sow = self.store.get_sow(farm_id, sow_id)
+        if sow is None:
+            return 404, {"error": "找不到這頭母豬"}
+        if self.store.list_sow_events(farm_id, sow_id):
+            return 409, {"error": "這頭母豬已經有其他記錄,不能收回進場"}
+
+        if not user.is_owner:
+            newest = max(self.store.list_sows(farm_id, None), key=lambda s: s["id"])
+            if sow.get("created_by") != user.id:
+                return 403, {"error": "只能收回自己新增的那一筆"}
+            if sow["id"] != newest["id"]:
+                return 403, {"error": "只能收回最新一筆,較舊的請牧場主處理"}
+
+        self.store.delete_sow(farm_id, sow_id)
+        return 200, {"ok": True}
+
+    def _delete_boar_entry(self, token, boar_id) -> Tuple[int, dict]:
+        """收回一筆種豬進場(公豬)。跟 _delete_sow_entry 同一套規則。"""
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        boar = self.store.get_boar(farm_id, boar_id)
+        if boar is None:
+            return 404, {"error": "找不到這頭公豬"}
+        if self.store.list_boar_events(farm_id, boar_id):
+            return 409, {"error": "這頭公豬已經有其他記錄,不能收回進場"}
+
+        if not user.is_owner:
+            newest = max(self.store.list_boars(farm_id, None), key=lambda b: b["id"])
+            if boar.get("created_by") != user.id:
+                return 403, {"error": "只能收回自己新增的那一筆"}
+            if boar["id"] != newest["id"]:
+                return 403, {"error": "只能收回最新一筆,較舊的請牧場主處理"}
+
+        self.store.delete_boar(farm_id, boar_id)
+        return 200, {"ok": True}
+
     def _recent_events(self, token, path) -> Tuple[int, dict]:
         """最近記錄的事件,給紀錄頁的「已記錄」清單用。母豬事件跟公豬事件
         (採精)合併成一份清單 —— 巡欄時連續記好幾筆,使用者
@@ -1510,6 +1654,16 @@ class Application:
 
         兩種事件各自的「最新一筆」分開算 —— 員工能不能收回一筆母豬
         事件,跟他今天有沒有記過公豬事件無關。
+
+        種豬進場也混進這份清單(kind 帶 "-entry" 後綴),打錯耳號跟記錯
+        一筆事件是同一種「剛剛手滑」,理當用同一個收回機制找得到、
+        改得回來 —— 差別只在進場沒有一筆真的事件可以指,所以這裡現組
+        一列假的,`canUndo` 判法見 _delete_sow_entry/_delete_boar_entry
+        (多一條「完全沒有其他記錄」的資料完整性把關)。
+
+        肉豬死亡(kind: "market-death")也在這份清單裡,但它是一筆真的
+        記錄(在 market_deaths 表裡,不是現組的假列),不掛在任何母豬或
+        公豬身上,收回規則跟一般事件相同,不需要種豬進場那條額外把關。
         """
         farm_id, user, err = self._need_farm(token)
         if err:
@@ -1526,8 +1680,17 @@ class Application:
                        or (e["recorded_by"] == user.id
                            and newest is not None and e["id"] == newest["id"]))
 
+        def can_undo_entry(animal, newest_id, has_events):
+            if has_events:
+                return False
+            return bool(user.is_owner
+                       or (animal.get("created_by") == user.id
+                           and newest_id is not None and animal["id"] == newest_id))
+
+        all_sows = self.store.list_sows(farm_id, None)
+        sow_tags = {s["id"]: s["ear_tag"] for s in all_sows}
+
         sow_events = self.store.list_sow_events(farm_id)
-        sow_tags = {s["id"]: s["ear_tag"] for s in self.store.list_sows(farm_id, None)}
         sow_newest = max(sow_events, key=lambda e: (e["event_date"], e["id"]), default=None)
         recent = [
             {**self._event_payload(e), "kind": "sow",
@@ -1536,14 +1699,49 @@ class Application:
             for e in sow_events if e["event_date"] >= since
         ]
 
+        newest_sow_id = max((s["id"] for s in all_sows), default=None)
+        recent += [
+            {"id": s["id"], "sowId": s["id"], "kind": "sow-entry", "type": "GA",
+             "date": _iso(s["entry_date"]),
+             "detail": {"breed": s.get("breed") or ""},
+             "earTag": s["ear_tag"],
+             "canUndo": can_undo_entry(
+                 s, newest_sow_id, bool(self.store.list_sow_events(farm_id, s["id"])))}
+            for s in all_sows if s.get("entry_date") and s["entry_date"] >= since
+        ]
+
+        all_boars = self.store.list_boars(farm_id, None)
+        boar_tags = {b["id"]: b["ear_tag"] for b in all_boars}
+
         boar_events = self.store.list_boar_events(farm_id)
-        boar_tags = {b["id"]: b["ear_tag"] for b in self.store.list_boars(farm_id)}
         boar_newest = max(boar_events, key=lambda e: (e["event_date"], e["id"]), default=None)
         recent += [
             {**self._boar_event_payload(e), "kind": "boar",
              "earTag": boar_tags.get(e["boar_id"], ""),
              "canUndo": can_undo(e, boar_newest)}
             for e in boar_events if e["event_date"] >= since
+        ]
+
+        newest_boar_id = max((b["id"] for b in all_boars), default=None)
+        recent += [
+            {"id": b["id"], "boarId": b["id"], "kind": "boar-entry", "type": "GA",
+             "date": _iso(b["entry_date"]),
+             "detail": {"breed": b.get("breed") or ""},
+             "earTag": b["ear_tag"],
+             "canUndo": can_undo_entry(
+                 b, newest_boar_id, bool(self.store.list_boar_events(farm_id, b["id"])))}
+            for b in all_boars if b.get("entry_date") and b["entry_date"] >= since
+        ]
+
+        # 肉豬死亡不掛在任何母豬或公豬身上,自成一份「最新一筆」,跟母豬
+        # 事件、公豬事件的收回權限各自獨立判斷(理由同上,兩者互不影響)。
+        deaths = self.store.list_market_deaths(farm_id)
+        death_newest = max(deaths, key=lambda d: (d["event_date"], d["id"]), default=None)
+        recent += [
+            {**self._market_death_payload(d), "kind": "market-death",
+             "type": "MKD", "earTag": "",
+             "canUndo": can_undo(d, death_newest)}
+            for d in deaths if d["event_date"] >= since
         ]
 
         recent.sort(key=lambda e: (e["date"], e["id"]), reverse=True)

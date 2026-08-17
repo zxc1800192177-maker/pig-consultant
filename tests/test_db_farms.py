@@ -67,6 +67,11 @@ class TestFarmIsolation:
         store.add_custom_task(a, "消毒豬舍", date(2026, 8, 11), "weekly")
         assert store.list_custom_tasks(b) == []
 
+    def test_market_deaths(self, store, two_farms):
+        a, b = two_farms
+        store.add_market_death(a, date(2026, 2, 4), reason="熱衰竭", weight_kg=85)
+        assert store.list_market_deaths(b) == []
+
     def test_cannot_read_another_farms_sow_by_id(self, store, two_farms):
         """知道 id 也拿不到 —— 光靠「前端只會傳自己的 id」不算數。"""
         a, b = two_farms
@@ -78,6 +83,18 @@ class TestFarmIsolation:
         sow = store.add_sow(a, "1183")
         assert store.delete_sow(b, sow) is False
         assert len(store.list_sows(a)) == 1
+
+    def test_cannot_delete_another_farms_boar(self, store, two_farms):
+        a, b = two_farms
+        boar = store.add_boar(a, "D6")
+        assert store.delete_boar(b, boar) is False
+        assert len(store.list_boars(a)) == 1
+
+    def test_cannot_delete_another_farms_market_death(self, store, two_farms):
+        a, b = two_farms
+        death = store.add_market_death(a, date(2026, 2, 4), reason="熱衰竭", weight_kg=85)
+        assert store.delete_market_death(b, death) is False
+        assert len(store.list_market_deaths(a)) == 1
 
     def test_cannot_update_another_farms_sow(self, store, two_farms):
         a, b = two_farms
@@ -299,6 +316,56 @@ class TestBothImplementationsAgree:
 
         assert postgres_fields == memory_fields, (
             f"兩邊的使用者欄位對不起來:"
+            f"只有 Postgres 有 {postgres_fields - memory_fields}、"
+            f"只有記憶體版有 {memory_fields - postgres_fields}"
+        )
+
+    def test_both_stores_return_the_same_sow_fields(self):
+        """同一類問題也可能發生在母豬身上 —— 加了 created_by 這種新欄位
+        時,PostgresStore 的 SOW_COLS 忘記加,InMemoryStore 因為整包
+        dict 本來就有,測試永遠過。
+        """
+        from db import InMemoryStore, PostgresStore
+
+        memory = InMemoryStore()
+        farm = memory.create_farm("HYD")
+        sow_id = memory.add_sow(farm, "1183")
+        memory_fields = set(memory.get_sow(farm, sow_id))
+        postgres_fields = {c.strip() for c in PostgresStore.SOW_COLS.split(",")}
+
+        assert postgres_fields == memory_fields, (
+            f"兩邊的母豬欄位對不起來:"
+            f"只有 Postgres 有 {postgres_fields - memory_fields}、"
+            f"只有記憶體版有 {memory_fields - postgres_fields}"
+        )
+
+    def test_both_stores_return_the_same_boar_fields(self):
+        from db import InMemoryStore, PostgresStore
+
+        memory = InMemoryStore()
+        farm = memory.create_farm("HYD")
+        boar_id = memory.add_boar(farm, "D6")
+        memory_fields = set(memory.get_boar(farm, boar_id))
+        postgres_fields = {c.strip() for c in PostgresStore.BOAR_COLS.split(",")}
+
+        assert postgres_fields == memory_fields, (
+            f"兩邊的公豬欄位對不起來:"
+            f"只有 Postgres 有 {postgres_fields - memory_fields}、"
+            f"只有記憶體版有 {memory_fields - postgres_fields}"
+        )
+
+    def test_both_stores_return_the_same_market_death_fields(self):
+        from db import InMemoryStore, PostgresStore
+        from datetime import date as _date
+
+        memory = InMemoryStore()
+        farm = memory.create_farm("HYD")
+        memory.add_market_death(farm, _date(2026, 2, 4), reason="熱衰竭", weight_kg=85)
+        memory_fields = set(memory.list_market_deaths(farm)[0])
+        postgres_fields = {c.strip() for c in PostgresStore.MARKET_DEATH_COLS.split(",")}
+
+        assert postgres_fields == memory_fields, (
+            f"兩邊的肉豬死亡欄位對不起來:"
             f"只有 Postgres 有 {postgres_fields - memory_fields}、"
             f"只有記憶體版有 {memory_fields - postgres_fields}"
         )
@@ -549,3 +616,94 @@ class TestDedupeIndexStaysCorrect:
         again = store.add_sow(farm, "1183", entry_date=date(2026, 1, 1))
         ev_id = store.add_sow_event(farm, again, "FW", date(2026, 2, 4))
         assert store.set_event_excluded(farm, ev_id, True) is True
+
+
+class TestDeleteBoar:
+    """收回「種豬進場」用的底層方法 —— 整頭連他的事件一起刪掉,不是只
+    刪一筆記錄(見 server._delete_boar_entry)。
+    """
+
+    def test_deletes_the_boar(self, store):
+        farm = store.create_farm("HYD")
+        boar = store.add_boar(farm, "D6")
+        assert store.delete_boar(farm, boar) is True
+        assert store.list_boars(farm) == []
+
+    def test_cascades_his_events(self, store):
+        farm = store.create_farm("HYD")
+        boar = store.add_boar(farm, "D6")
+        store.add_boar_event(farm, boar, "SC", date(2026, 2, 4))
+        store.delete_boar(farm, boar)
+        assert store.list_boar_events(farm) == []
+
+    def test_missing_boar_returns_false(self, store):
+        farm = store.create_farm("HYD")
+        assert store.delete_boar(farm, 999) is False
+
+
+class TestMarketDeath:
+    """肉豬死亡不掛在任何一頭母豬或公豬身上 —— 這裡只驗證這張獨立表
+    自己的行為,farm 隔離另外在 TestFarmIsolation 測過。
+    """
+
+    def test_records_the_three_things_asked_for(self, store):
+        """使用者要求:不用耳號,只要日期、原因、公斤數。"""
+        farm = store.create_farm("HYD")
+        death_id = store.add_market_death(
+            farm, date(2026, 2, 4), reason="熱衰竭", weight_kg=85.5)
+        row = store.list_market_deaths(farm)[0]
+        assert row["id"] == death_id
+        assert row["event_date"] == date(2026, 2, 4)
+        assert row["reason"] == "熱衰竭"
+        assert row["weight_kg"] == 85.5
+
+    def test_no_animal_reference_of_any_kind(self, store):
+        """跟 sow_events/boar_events 不一樣,這張表沒有 sow_id/boar_id ——
+        肉豬本來就不是這個系統追蹤身分的對象。
+        """
+        farm = store.create_farm("HYD")
+        store.add_market_death(farm, date(2026, 2, 4), reason="熱衰竭", weight_kg=85)
+        row = store.list_market_deaths(farm)[0]
+        assert "sow_id" not in row
+        assert "boar_id" not in row
+
+    def test_delete_removes_it(self, store):
+        farm = store.create_farm("HYD")
+        death_id = store.add_market_death(farm, date(2026, 2, 4), reason="熱衰竭",
+                                          weight_kg=85)
+        assert store.delete_market_death(farm, death_id) is True
+        assert store.list_market_deaths(farm) == []
+
+    def test_missing_death_returns_false(self, store):
+        farm = store.create_farm("HYD")
+        assert store.delete_market_death(farm, 999) is False
+
+    def test_sorted_by_date_then_id(self, store):
+        farm = store.create_farm("HYD")
+        later = store.add_market_death(farm, date(2026, 3, 1), reason="下痢", weight_kg=60)
+        earlier = store.add_market_death(farm, date(2026, 2, 4), reason="熱衰竭",
+                                         weight_kg=85)
+        rows = store.list_market_deaths(farm)
+        assert [r["id"] for r in rows] == [earlier, later]
+
+
+class TestCreatedBy:
+    """進場記錄要記得是誰新增的,收回權限才判得出來(比照事件的
+    recorded_by)。
+    """
+
+    def test_sow_remembers_who_created_her(self, store):
+        farm = store.create_farm("HYD")
+        sow_id = store.add_sow(farm, "1183", created_by=42)
+        assert store.get_sow(farm, sow_id)["created_by"] == 42
+
+    def test_boar_remembers_who_created_him(self, store):
+        farm = store.create_farm("HYD")
+        boar_id = store.add_boar(farm, "D6", created_by=42)
+        assert store.get_boar(farm, boar_id)["created_by"] == 42
+
+    def test_defaults_to_none(self, store):
+        """匯入或沒帶這個參數的呼叫端(例如 importer.py)不該炸掉。"""
+        farm = store.create_farm("HYD")
+        sow_id = store.add_sow(farm, "1183")
+        assert store.get_sow(farm, sow_id)["created_by"] is None
