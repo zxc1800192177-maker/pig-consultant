@@ -122,11 +122,11 @@ def repeat_label(rule: str) -> str:
     return REPEAT_LABELS.get(rule, rule)
 
 
-# 母豬目前狀態。「配種待驗孕」與「懷孕中」刻意分開 —— 配種了不等於懷孕,
-# 這個場目前有 50 頭驗孕陰性。混為一談會讓畫面宣稱一件還沒確認的事。
+# 母豬目前狀態。配種了、沒登記驗孕陰性就算懷孕中(使用者決定)——
+# 「驗孕陰性」仍然是獨立的狀態(回到待配種),只是不再有「配種待驗孕」
+# 這個模糊的中間狀態。
 SOW_STATE_LABELS = {
     "pregnant": "懷孕中",
-    "mated": "配種待驗孕",
     "lactating": "哺乳中",
     "open": "待配種",
     "exited": "已離群",
@@ -135,7 +135,6 @@ SOW_STATE_LABELS = {
 # 狀態旁邊那個「第幾天」要說清楚是從哪天算起,不然只是一個沒有意義的數字。
 SOW_DAY_LABELS = {
     "pregnant": "懷孕第 {n} 天",
-    "mated": "配種後 {n} 天",
     "lactating": "哺乳第 {n} 天",
     "open": "已空 {n} 天",
 }

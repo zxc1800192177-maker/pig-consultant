@@ -32,9 +32,9 @@ DEFAULTS = {
     "preg_check_days": 26,        # 配種 → 驗孕
     "open_sow_alert_days": 30,    # 離乳/驗孕陰性後多久沒動作要提醒
 
-    # 確認懷孕(驗孕陽性)後幾天,從配種區移至待產區。**只認陽性驗孕記錄**
-    # (使用者決定)—— 這個場很多母豬從沒驗孕過,若配種滿 60 天不管有沒有
-    # 驗過都觸發,會提醒大量根本不確定有沒有懷孕的母豬搬去待產區。
+    # 配種後幾天,從配種區移至待產區。**配種了、沒登記驗孕陰性就當懷孕**
+    # (使用者決定)—— 不必等驗孕陽性才觸發,這個場很少逐頭驗孕,等驗孕
+    # 的話大多數其實已經懷孕的母豬會一直卡在配種區。
     "to_gestation_zone_days": 60,
 
     # 總產房欄位數。**使用者自己填,不是算出來的**(使用者決定)——
@@ -228,10 +228,11 @@ def sow_status(sow: dict, events: List[dict], today: date,
     文字一律不在這裡組 —— 那在 core/labels.py(憲法:使用者看得到的字
     只該有一份定義)。
 
-    **配種後未驗孕不等於懷孕。** 分成「配種待驗孕」與「懷孕中」兩種狀態:
-    這個場目前有 50 頭驗孕陰性,把她們一律當懷孕會排出永遠不會發生的
-    分娩工作(先前分娩預測平均誤差被拉到 +8.9 天就是這個原因)。
-    但預產期兩種狀態都給 —— 還沒驗孕的那幾天照樣要準備產房。
+    **配種後沒登記驗孕陰性,就當她懷孕。**(使用者決定)這個場配種後
+    很少逐頭驗孕,曾經要求「只有陽性驗孕才算懷孕」,結果大多數其實已經
+    懷孕的母豬一直卡在模糊狀態,產房、待產區的提醒都推算不出來。
+    驗孕陰性仍然作數 —— `current_cycle()` 一驗到陰性就把 `mate` 重置掉,
+    根本不會走到這個分支,所以這裡不用再另外判斷陰性。
     """
     cfg = settings_with_defaults(settings)
     c = current_cycle(events)
@@ -246,22 +247,22 @@ def sow_status(sow: dict, events: List[dict], today: date,
 
     if c["mate"] and not c["farrow"]:
         due = c["mate"] + timedelta(days=cfg["gestation_days"])
-        state = "pregnant" if c["preg_positive"] else "mated"
         # 預產日過了卻沒有分娩記錄:她要嘛生了沒登記,要嘛沒保住。
         # 兩種都需要有人去看,所以不能把一個已經過去的日期當成未來的
         # 「預產」顯示 —— 實測 200 頭裡有 88 頭的預產日已過,最久的過了
         # 611 天,那樣的畫面等於在說謊。
         overdue = (today - due).days
-        result = {"state": state, "since": c["mate"],
+        result = {"state": "pregnant", "since": c["mate"],
                   "day": (today - c["mate"]).days, "due": due,
                   "overdue_days": overdue if overdue > 0 else None,
                   "move_in_due": due - timedelta(days=cfg["pre_farrow_move_days"])}
 
-        # 「配種待驗孕」本身就代表還沒確認懷孕 —— 但這件事原本只出現在
-        # 狀態列,時間軸裡完全看不出來:2580 配種 143 天、從沒驗孕過,
-        # 時間軸裡就是少了一列「驗孕」,使用者得自己數才會發現。
-        # 這裡把「該驗孕了」這件事變成明確的資料,畫面才有東西可以顯示。
-        if state == "mated":
+        # 還沒有「真的驗過且結果是陽性」時,時間軸仍要提示「還沒驗孕」——
+        # 這件事原本只出現在狀態列,時間軸裡完全看不出來:2580 配種
+        # 143 天、從沒驗孕過,時間軸裡就是少了一列「驗孕」,使用者得自己
+        # 數才會發現。只是現在這件事不再影響她被不被當成懷孕,單純只是
+        # 「還沒確認,建議去驗」的提示。
+        if c["preg_positive"] is not True:
             check_due = c["mate"] + timedelta(days=cfg["preg_check_days"])
             check_overdue = (today - check_due).days
             result["preg_checked"] = c["preg_check"] is not None
@@ -311,14 +312,13 @@ def tasks_for_sow(sow: dict, events: List[dict], cfg: dict) -> List[Task]:
                         f"懷孕第 {cfg['induction_day']} 天"))
         out.append(Task(FARROW_DUE, sid, tag, due_farrow, "預產日"))
 
-        # 移至待產區:**只認陽性驗孕**(使用者決定)。配種待驗孕的母豬
-        # 留在配種區,不會因為滿 60 天就被當成懷孕搬走 —— 這個場很多
-        # 母豬從沒驗孕過,不這樣限制的話會提醒大量根本不確定懷孕與否
-        # 的母豬搬去待產區。
-        if c["preg_positive"] and c["preg_check"]:
-            out.append(Task(MOVE_TO_GESTATION, sid, tag,
-                            c["preg_check"] + timedelta(days=cfg["to_gestation_zone_days"]),
-                            f"確認懷孕滿 {cfg['to_gestation_zone_days']} 天"))
+        # 移至待產區:配種了、沒登記驗孕陰性,就當懷孕看待(使用者決定),
+        # 從配種日起算,不必等驗孕陽性 —— 這個場很少逐頭驗孕,原本只認
+        # 陽性驗孕的規則,會讓大多數其實已經懷孕的母豬一直卡在配種區,
+        # 提醒不出待產區該準備。
+        out.append(Task(MOVE_TO_GESTATION, sid, tag,
+                        mated + timedelta(days=cfg["to_gestation_zone_days"]),
+                        f"懷孕第 {cfg['to_gestation_zone_days']} 天"))
 
     elif c["farrow"] and not c["wean"]:
         out.append(Task(WEAN_DUE, sid, tag,

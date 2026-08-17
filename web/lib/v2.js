@@ -343,15 +343,18 @@ export function statusPills(status) {
 
 /** 時間軸裡「還沒驗孕」的提示,插在最上方。
  *
- * 這是原本缺席的資訊:「配種待驗孕」只出現在狀態列,時間軸裡完全看不
- * 出來 —— 2580 配種 143 天、從沒驗孕過,時間軸就是少了一列「驗孕」,
- * 使用者得自己數才會發現。這裡不是一筆真的事件(不能收回、沒有 id),
- * 所以獨立成一個提示區塊而不是塞進 eventRow。
+ * 這是原本缺席的資訊:配種後沒驗孕不會出現在狀態列以外的地方,時間軸
+ * 裡完全看不出來 —— 2580 配種 143 天、從沒驗孕過,時間軸就是少了一列
+ * 「驗孕」,使用者得自己數才會發現。這裡不是一筆真的事件(不能收回、
+ * 沒有 id),所以獨立成一個提示區塊而不是塞進 eventRow。
  *
- * 文字全部由後端給(core/labels.pending_check_note)—— 判斷邏輯只有一份。
+ * 只認 pregCheckNote 存不存在,不看 state —— 配種了、沒登記驗孕陰性
+ * 現在一律算懷孕中(state 一定是 "pregnant"),真正決定要不要提示的是
+ * 後端有沒有給這個欄位(core/labels.pending_check_note,判斷邏輯只有
+ * 一份)。
  */
 export function pendingCheckRow(status) {
-  if (!status || status.state !== "mated" || !status.pregCheckNote) return "";
+  if (!status || !status.pregCheckNote) return "";
   return `<div class="tl-pending"><b>驗孕</b>${escapeHtml(status.pregCheckNote)}</div>`;
 }
 

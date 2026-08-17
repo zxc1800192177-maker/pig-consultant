@@ -309,9 +309,8 @@ body { padding-bottom: 96px; }
   background: var(--surface-2); color: var(--ink-soft);
   border: 1px solid var(--border);
 }
-/* 狀態本身用顏色分開。「配種待驗孕」刻意不是懷孕的顏色 —— 那還沒確認。 */
+/* 狀態本身用顏色分開。 */
 .pill-pregnant { background: var(--good); border-color: var(--good); color: #fff; }
-.pill-mated { border-color: var(--good); color: var(--good); }
 .pill-lactating { background: var(--accent); border-color: var(--accent); color: #fff; }
 .pill-open { border-color: var(--warn, var(--accent)); color: var(--warn, var(--accent)); }
 .pill-exited { opacity: .65; }

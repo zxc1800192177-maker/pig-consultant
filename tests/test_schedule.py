@@ -72,7 +72,9 @@ class TestCycleTracking:
 
 
 class TestTasksAfterMating:
-    """配種之後會排出四件事:驗孕、移入產房、催產、分娩。"""
+    """配種之後會排出五件事:驗孕、移入產房、催產、分娩、移至待產區
+    (沒登記驗孕陰性就當懷孕,使用者決定)。
+    """
 
     MATED = date(2026, 2, 3)
 
@@ -80,8 +82,9 @@ class TestTasksAfterMating:
     def tasks(self):
         return tasks_for_sow(sow(), [ev(1, "MT", self.MATED)], D)
 
-    def test_all_four(self, tasks):
-        assert kinds(tasks) == {CHECK_DUE, MOVE_IN, INDUCE, FARROW_DUE}
+    def test_all_five(self, tasks):
+        assert kinds(tasks) == {CHECK_DUE, MOVE_IN, INDUCE, FARROW_DUE,
+                                schedule.MOVE_TO_GESTATION}
 
     def test_farrow_is_gestation_days_later(self, tasks):
         assert due_of(tasks, FARROW_DUE) == self.MATED + timedelta(days=114)
@@ -106,25 +109,26 @@ class TestTasksAfterMating:
 
 
 class TestMoveToGestationZone:
-    """配種區 → 待產區。使用者明確決定:只認陽性驗孕記錄,不是配種滿
-    60 天就觸發 —— 這個場很多母豬從沒驗孕過。
+    """配種區 → 待產區。使用者明確決定:配種了、沒登記驗孕陰性就當懷孕,
+    從配種日起算,不必等驗孕陽性 —— 這個場很多母豬從沒驗孕過。
     """
 
     MATED = date(2026, 2, 3)
     CHECKED = MATED + timedelta(days=26)
 
-    def test_fires_after_a_positive_check(self):
+    def test_fires_from_the_mating_date_after_a_positive_check(self):
         tasks = tasks_for_sow(sow(), [
             ev(1, "MT", self.MATED),
             ev(1, "PD", self.CHECKED, {"positive": True}),
         ], D)
         assert schedule.MOVE_TO_GESTATION in kinds(tasks)
-        assert due_of(tasks, schedule.MOVE_TO_GESTATION) == self.CHECKED + timedelta(days=60)
+        assert due_of(tasks, schedule.MOVE_TO_GESTATION) == self.MATED + timedelta(days=60)
 
-    def test_does_not_fire_without_any_check(self):
-        """配種後從沒驗孕,不能因為滿 60 天就當成懷孕搬去待產區。"""
+    def test_fires_without_any_check(self):
+        """配種後從沒驗孕,沒登記「沒懷孕」就當懷孕,一樣要排到待產區。"""
         tasks = tasks_for_sow(sow(), [ev(1, "MT", self.MATED)], D)
-        assert schedule.MOVE_TO_GESTATION not in kinds(tasks)
+        assert schedule.MOVE_TO_GESTATION in kinds(tasks)
+        assert due_of(tasks, schedule.MOVE_TO_GESTATION) == self.MATED + timedelta(days=60)
 
     def test_does_not_fire_after_a_negative_check(self):
         tasks = tasks_for_sow(sow(), [
@@ -133,13 +137,14 @@ class TestMoveToGestationZone:
         ], D)
         assert schedule.MOVE_TO_GESTATION not in kinds(tasks)
 
-    def test_does_not_fire_when_the_result_is_unrecorded(self):
-        """有驗但結果沒填,跟根本沒驗孕是不同的問題,但一樣不算確認懷孕。"""
+    def test_fires_when_the_result_is_unrecorded(self):
+        """有驗但結果沒填,跟根本沒驗孕是不同的問題,但一樣不是「沒懷孕」——
+        照樣當懷孕看待。"""
         tasks = tasks_for_sow(sow(), [
             ev(1, "MT", self.MATED),
             ev(1, "PD", self.CHECKED, {}),
         ], D)
-        assert schedule.MOVE_TO_GESTATION not in kinds(tasks)
+        assert schedule.MOVE_TO_GESTATION in kinds(tasks)
 
     def test_interval_is_configurable(self):
         cfg = schedule.settings_with_defaults({"to_gestation_zone_days": 45})
@@ -147,7 +152,7 @@ class TestMoveToGestationZone:
             ev(1, "MT", self.MATED),
             ev(1, "PD", self.CHECKED, {"positive": True}),
         ], cfg)
-        assert due_of(tasks, schedule.MOVE_TO_GESTATION) == self.CHECKED + timedelta(days=45)
+        assert due_of(tasks, schedule.MOVE_TO_GESTATION) == self.MATED + timedelta(days=45)
 
 
 class TestTasksAfterFarrowing:
@@ -593,12 +598,13 @@ class TestSowStatus:
     MATED = date(2026, 3, 1)
     TODAY = date(2026, 5, 1)
 
-    def test_mated_but_unchecked_is_not_called_pregnant(self):
-        """配種了不等於懷孕。這個場目前有 50 頭驗孕陰性 —— 一律當懷孕
-        會讓畫面宣稱一件還沒確認的事。
+    def test_mated_but_unchecked_counts_as_pregnant(self):
+        """配種了、沒登記驗孕陰性,就當懷孕(使用者決定)—— 這個場很少
+        逐頭驗孕,只認陽性驗孕的話,大多數其實已經懷孕的母豬會一直卡在
+        模糊狀態。
         """
         s = schedule.sow_status(sow(), [ev(1, "MT", self.MATED)], self.TODAY)
-        assert s["state"] == "mated"
+        assert s["state"] == "pregnant"
 
     def test_positive_check_makes_her_pregnant(self):
         events = [ev(1, "MT", self.MATED),
@@ -982,7 +988,7 @@ class TestPendingPregnancyCheck:
         s = schedule.sow_status(sow(), events, self.MATED + timedelta(days=30))
         # 有記錄但結果不明,跟「根本沒驗」是不同的問題
         assert s["preg_checked"] is True
-        assert s["state"] == "mated"       # 結果不明,還是算未確認懷孕
+        assert s["state"] == "pregnant"    # 結果不明,不是「沒懷孕」,照樣當懷孕
 
     def test_no_overdue_before_the_check_window(self):
         s = schedule.sow_status(sow(), [ev(1, "MT", self.MATED)],

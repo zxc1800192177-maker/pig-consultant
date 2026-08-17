@@ -510,10 +510,9 @@ describe("母豬目前狀態", () => {
     assert.ok(html.includes("預計離乳 5/12"));
   });
 
-  it("狀態帶自己的 class,配種待驗孕與懷孕中分得開", () => {
-    // 兩者用同一個顏色的話,畫面等於宣稱一件還沒確認的事
+  it("狀態帶自己的 class,懷孕中與待配種分得開", () => {
     assert.match(statusPills(status()), /pill-pregnant/);
-    assert.match(statusPills(status({ state: "mated", label: "配種待驗孕" })), /pill-mated/);
+    assert.match(statusPills(status({ state: "open", label: "待配種" })), /pill-open/);
   });
 
   it("沒有狀態就什麼都不畫", () => {
@@ -647,7 +646,7 @@ describe("死胎集中在最早一胎的說明", () => {
 
 describe("預產日已過", () => {
   const status = (over = {}) => ({
-    state: "mated", label: "配種待驗孕", dayLabel: "配種後 143 天",
+    state: "pregnant", label: "懷孕中", dayLabel: "懷孕第 143 天",
     since: "2026-03-24", due: "2026-07-16", weanDue: null,
     overdueLabel: "", ...over,
   });
@@ -685,19 +684,19 @@ describe("驗孕事件的燈號", () => {
 
 describe("時間軸裡的「還沒驗孕」提示", () => {
   const status = (over = {}) => ({
-    state: "mated", label: "配種待驗孕", dayLabel: "配種後 143 天",
+    state: "pregnant", label: "懷孕中", dayLabel: "懷孕第 143 天",
     pregCheckNote: "尚未驗孕,已超過建議驗孕時間(配種後 26 天)共 117 天",
     ...over,
   });
 
-  it("配種待驗孕時畫出提示", () => {
+  it("還沒驗孕時畫出提示(配種了、沒登記陰性一樣算懷孕中)", () => {
     const html = pendingCheckRow(status());
     assert.match(html, /class="tl-pending"/);
     assert.ok(html.includes("117"));
   });
 
   it("已確認懷孕就不畫 —— 沒有這件事可提示", () => {
-    assert.equal(pendingCheckRow(status({ state: "pregnant", pregCheckNote: "" })), "");
+    assert.equal(pendingCheckRow(status({ pregCheckNote: "" })), "");
   });
 
   it("待配種狀態也不畫 —— 她已經驗過了", () => {
