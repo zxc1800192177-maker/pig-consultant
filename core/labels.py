@@ -96,7 +96,17 @@ TASK_LABELS = {
     "wean": "離乳",
     "mate": "配種",
     "preg_check": "驗孕",
+    "move_to_mating": "移至配種區",
+    "move_to_gestation": "移至待產區",
 }
+
+# 三個區域的名稱。跟 schedule.ZONES 的值(mating/gestation/farrowing)
+# 一一對應 —— 使用者看得到的字只該有一份定義。
+ZONE_LABELS = {"mating": "配種區", "gestation": "待產區", "farrowing": "產房"}
+
+
+def zone_label(zone: str) -> str:
+    return ZONE_LABELS.get(zone, zone)
 
 
 def task_label(kind: str) -> str:
@@ -223,6 +233,13 @@ def performance_basis() -> str:
     return "由事件記錄計算,非 AI 生成 ・ 級距是與本場其他母豬比較,不是全國常模"
 
 
+def boar_performance_basis() -> str:
+    """公豬卡配種績效的說明。不分級 —— 公豬頭數遠比母豬少,場內三分位
+    在這裡只是把幾頭公豬硬排名,不是有意義的評價。
+    """
+    return "由母豬那邊的配種記錄比對耳號算出來,非 AI 生成"
+
+
 # 「值得檢視」的理由。**措辭不得出現「淘汰」** —— 這個場實際的淘汰原因
 # 裡「年齡太大」佔 48.0%,「生產性能差」只佔 2.9%,系統算得出來的正好是
 # 最少被拿來當決策依據的那一項(憲法第三條第 6 款)。
@@ -254,8 +271,10 @@ SETTING_TEXT = {
         ("驗孕時機", "配種後幾天驗孕", "天"),
     "open_sow_alert_days":
         ("空胎提醒", "離乳或驗孕陰性後多久沒動作就提醒", "天"),
+    "to_gestation_zone_days":
+        ("移至待產區", "確認懷孕(驗孕陽性)後幾天,從配種區移至待產區", "天"),
     "farrowing_pens":
-        ("總產房數量", "全場有幾個產房位。填 0 表示還沒設定,提醒就不會判斷空間夠不夠", "欄"),
+        ("總產房數", "產房共有幾欄。填了才能提醒產房空間夠不夠", "欄"),
     "review_decline_litters":
         ("連續下滑胎數", "活仔數連續下滑幾胎才列入「值得檢視」", "胎"),
     "review_npd_days":

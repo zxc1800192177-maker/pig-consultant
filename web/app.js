@@ -11,13 +11,14 @@ import {
 import { SseParser } from "./lib/sse.js";
 import { addFactor, removeFactor } from "./lib/factors.js";
 import {
-  alertRow, buildAlerts, customTaskRow, customTaskSetting, eventName, eventRow,
-  formatWeek, performanceGrid,
+  alertRow, boarPerformanceGrid, boarRow, buildAlerts, customTaskRow, customTaskSetting,
+  eventName, eventRow, formatWeek, performanceGrid,
   pendingCheckRow, reviewRow, settingRow, shiftDate, sowRow, statusPills, taskGroup,
   timelineCaption, TIMELINE_LIMIT, visibleEvents,
 } from "./lib/v2.js";
 import {
   SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, recordedRow,
+  targetsBoar, targetsEither,
 } from "./lib/record.js";
 
 const $ = (id) => document.getElementById(id);
@@ -882,7 +883,14 @@ async function reloadSows() {
     ? [...all.data.sows].sort((a, b) => (a.status === "active") === (b.status === "active")
         ? 0 : a.status === "active" ? -1 : 1)
     : [];
-  renderSowList();
+  renderAnimalList();
+}
+
+// 母豬/公豬清單切換(已確認的設計決定:公豬卡跟母豬卡同頁切換)。
+let animalView = "sow";
+
+function renderAnimalList() {
+  return animalView === "boar" ? renderBoarList() : renderSowList();
 }
 
 function renderSowList() {
@@ -903,6 +911,29 @@ function renderSowList() {
   // 只畫前 10 筆。451 頭全畫會讓搜尋時每次輸入都卡一下,而且捲很久也
   // 找不到 —— 這份清單的用法是「搜尋耳號找某一頭」,不是從頭讀到尾。
   list.innerHTML = shown.slice(0, SOW_LIST_LIMIT).map(sowRow).join("")
+    + (shown.length > SOW_LIST_LIMIT
+        ? `<p class="hint">只顯示前 ${SOW_LIST_LIMIT} 頭,請輸入耳號縮小範圍。</p>` : "");
+}
+
+function renderBoarList() {
+  const list = $("sowList");
+  if (!list) return;
+
+  // 瀏覽/搜尋用 allBoars(含已死亡)—— 死亡的公豬還是要看得到、找得到,
+  // 不能整個從畫面上消失。記錄表單的選單另外用在場的 boars(見
+  // reloadBoars),兩者刻意分開,理由跟母豬那邊的 sows/allSows 一樣。
+  const q = ($("sowSearch")?.value || "").trim().toLowerCase();
+  const shown = q ? allBoars.filter((b) => b.earTag.toLowerCase().includes(q)) : allBoars;
+  $("sowCount").textContent = q
+    ? `符合 ${shown.length} 頭 / 在場 ${boars.length} 頭`
+    : `在場 ${boars.length} 頭 ・ 歷史共 ${allBoars.length} 頭`;
+
+  if (!shown.length) {
+    list.innerHTML = `<p class="hint">${allBoars.length
+      ? "沒有符合的耳號。" : "還沒有公豬資料,可以到「紀錄」記一筆種豬進場。"}</p>`;
+    return;
+  }
+  list.innerHTML = shown.slice(0, SOW_LIST_LIMIT).map(boarRow).join("")
     + (shown.length > SOW_LIST_LIMIT
         ? `<p class="hint">只顯示前 ${SOW_LIST_LIMIT} 頭,請輸入耳號縮小範圍。</p>` : "");
 }
@@ -951,6 +982,44 @@ async function openSow(sowId) {
   box.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+// 目前開著的是哪一頭公豬的卡片,理由跟 openSowId 一樣。
+let openBoarId = null;
+
+async function openBoar(boarId) {
+  const { ok, data } = await api(`/api/boars/${boarId}`);
+  if (!ok) return showBanner(data.error || "讀不到這頭公豬", "warn");
+  openBoarId = boarId;
+
+  const b = data.boar;
+  const box = $("sowDetail");
+  box.classList.remove("is-hidden");
+  const shownEvents = visibleEvents(data.events, TIMELINE_LIMIT);
+  box.innerHTML = `
+    <div class="card">
+      <div class="head-top">
+        <div>
+          <div class="tag">${escapeHtml(b.earTag)}</div>
+          <div class="breed">${escapeHtml(b.breed || "品種未填")}${
+            b.entryDate ? ` ・ ${b.entryDate} 進場` : ""}</div>
+        </div>
+        ${b.status === "dead" ? '<span class="sow-exited-badge">已死亡</span>' : ""}
+      </div>
+      <div class="meta">
+        <div><span>父系耳號</span><br><b>${escapeHtml(b.sireTag || "—")}</b></div>
+        <div><span>母系耳號</span><br><b>${escapeHtml(b.damTag || "—")}</b></div>
+      </div>
+    </div>
+    ${boarPerformanceGrid(data.performance)}
+    <div class="card">
+      <h3>事件時間軸</h3>
+      <p class="hint">${timelineCaption(data.events.length, shownEvents.length)}</p>
+      <div class="tl" style="margin-top:12px">
+        ${shownEvents.map(eventRow).join("")}
+      </div>
+    </div>`;
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 // ── 匯入 ──
 let importText = "";
 
@@ -976,15 +1045,20 @@ async function previewImport(file) {
       <br><span class="hint">${codes}</span>
       ${data.badLineCount
         ? `<br><span class="hint">${data.badLineCount} 行無法解析,會略過</span>` : ""}
-      ${data.boarEvents && !data.boarEventsImported ? `<br><span class="hint">
-        公豬會建起來(配種記錄要選),但採精與精液品質那
-        ${data.boarEvents} 筆事件目前還不會匯入</span>` : ""}
+      ${data.semenCollections ? `<br><span class="hint">
+        公豬會建起來(配種記錄要選),其中 ${data.semenCollections} 筆採精記錄會一併匯入${
+          data.semenCollectionsSkipped
+            ? `(另有 ${data.semenCollectionsSkipped} 筆耳號看不出對應哪頭公豬,略過)` : ""}
+        </span>` : ""}
+      ${data.semenQualityRows ? `<br><span class="hint">
+        ${data.semenQualityRows} 筆精液品質(SP)記錄不在這個版本的匯入範圍內,不會寫入</span>` : ""}
     </div>
     ${data.oddBoarTags?.length ? `
       <div class="notice notice-warn" style="margin-top:12px">
         有 <b>${data.oddBoarTags.length}</b> 個公豬耳號看起來像日期,
-        可能是原始檔案填錯欄位。<b>資料照樣匯入不會改動</b>,
-        但它們會出現在配種記錄的公豬選單裡。
+        可能是原始檔案填錯欄位。<b>身分照樣建起來不會改動</b>,
+        會出現在配種記錄的公豬選單裡;但這些耳號底下的採精記錄
+        無法歸戶,不會匯入。
         <br><span class="hint">${escapeHtml(data.oddBoarTags.slice(0, 6).join("、"))}${
           data.oddBoarTags.length > 6 ? " …" : ""}</span>
       </div>` : ""}
@@ -1018,9 +1092,13 @@ async function commitImport() {
   }
   $("importResult").innerHTML = `
     <div class="notice notice-good">匯入完成:${data.sows} 頭母豬、${data.events} 筆事件${
+      data.semenCollections ? `、${data.semenCollections} 筆採精記錄` : ""}${
       data.excluded ? `,其中 ${data.excluded} 筆不納入統計` : ""}。</div>`;
   importText = "";
-  await Promise.all([reloadSows(), reloadTasks(), reloadAlerts()]);
+  // 公豬清單也要重讀 —— 匯入會建立公豬身分(而且現在還會一併帶進
+  // 採精記錄),不重讀的話公豬頁的清單跟紀錄頁的耳號選單會停在
+  // 匯入前的樣子(第一次匯入時甚至是空的)。
+  await Promise.all([reloadSows(), reloadBoars(), reloadTasks(), reloadAlerts()]);
 }
 
 // ── v2 事件接線 ──
@@ -1037,17 +1115,32 @@ document.addEventListener("click", (e) => {
     return;
   }
   const row = e.target.closest(".sow-row");
-  if (row) return openSow(Number(row.dataset.sow));
+  if (row) {
+    if (row.dataset.boar) return openBoar(Number(row.dataset.boar));
+    return openSow(Number(row.dataset.sow));
+  }
 
   const tag = e.target.closest(".etag");
   if (tag) { showTab("sows"); return openSow(Number(tag.dataset.sow)); }
+
+  const view = e.target.closest("[data-animal-view]");
+  if (view) {
+    animalView = view.dataset.animalView;
+    document.querySelectorAll("[data-animal-view]")
+      .forEach((b) => b.classList.toggle("is-active", b === view));
+    $("animalHeading").textContent = animalView === "boar" ? "公豬資訊" : "母豬資訊";
+    const search = $("sowSearch");
+    if (search) search.value = "";
+    $("sowDetail")?.classList.add("is-hidden");
+    return renderAnimalList();
+  }
 
   if (e.target.id === "importConfirm") return commitImport();
   if (e.target.id === "weekPrev") { weekStart = shiftDate(weekStart, -7); return reloadTasks(); }
   if (e.target.id === "weekNext") { weekStart = shiftDate(weekStart, 7); return reloadTasks(); }
 });
 
-$("sowSearch")?.addEventListener("input", renderSowList);
+$("sowSearch")?.addEventListener("input", renderAnimalList);
 $("importPick")?.addEventListener("click", () => $("importFile")?.click());
 $("importFile")?.addEventListener("change", (e) => {
   const file = e.target.files?.[0];
@@ -1057,16 +1150,29 @@ $("importFile")?.addEventListener("change", (e) => {
 
 // ── 紀錄頁 ──
 
+// 跟 sows/allSows 同樣的分法:boars 只有在場的,記錄表單的耳號選單
+// (配種/採精/種豬死亡)用這份 —— 已經死亡的公豬不該出現在這些選單裡。
+// allBoars 含已死亡的,公豬頁的清單/搜尋用這份。
 let boars = [];
+let allBoars = [];
+let pens = [];               // 移欄表單用,含即時佔用狀態
 let recordCode = null;      // 目前開著的表單是哪一種事件
 
 async function reloadBoars() {
   // 未登入就別發這個請求。少了這道守衛,登入畫面上會固定丟一個 401 到
   // console —— 假錯誤最麻煩的地方是它會蓋掉真的錯誤,這次就是這樣多花了
   // 很多時間在追一個早就不存在的變數。
-  if (!account.loggedIn) { boars = []; return; }
-  const { ok, data } = await api("/api/boars");
-  boars = ok ? data.boars : [];
+  if (!account.loggedIn) { boars = []; allBoars = []; return; }
+  const [active, all] = await Promise.all([api("/api/boars"), api("/api/boars?all=1")]);
+  boars = active.ok ? active.data.boars : [];
+  allBoars = all.ok ? all.data.boars : [];
+  renderAnimalList();
+}
+
+async function reloadPens() {
+  if (!account.loggedIn) { pens = []; return; }
+  const { ok, data } = await api("/api/pens");
+  pens = ok ? data.pens : [];
 }
 
 function closeRecordForm() {
@@ -1075,10 +1181,14 @@ function closeRecordForm() {
   $("recForm").innerHTML = "";
 }
 
-function openRecordForm(code) {
+async function openRecordForm(code) {
   const spec = formFor(code);
   if (!spec) return;
   recordCode = code;
+
+  // 欄位佔用狀態隨時在變,打開表單當下重抓一次才不會讓使用者選到
+  // 其實已經有豬的欄位(其他事件的表單不需要這個,沒有額外請求)。
+  if (code === "MV") await reloadPens();
 
   const box = $("recForm");
   box.classList.remove("is-hidden");
@@ -1089,7 +1199,9 @@ function openRecordForm(code) {
     </div>
     ${SIDE_EFFECTS[code]
       ? `<p class="rec-warn-note">送出後:${escapeHtml(SIDE_EFFECTS[code])}</p>` : ""}
-    ${createsNewAnimal(code) ? newAnimalFields() : sowPickerField()}
+    ${createsNewAnimal(code) ? newAnimalFields()
+      : targetsEither(code) ? eitherAnimalFields()
+      : targetsBoar(code) ? boarPickerField() : sowPickerField()}
     <label class="fld"><span>日期</span>
       <input type="date" id="recDate" value="${todayIso()}"></label>
     ${spec.fields.map(fieldMarkup).join("")}
@@ -1111,12 +1223,34 @@ function sowPickerField() {
     </datalist>`;
 }
 
+function boarPickerField() {
+  return `
+    <label class="fld"><span>公豬耳號</span>
+      <input list="boarPickTags" id="recBoar" placeholder="輸入或選擇耳號"
+             autocomplete="off"></label>
+    <datalist id="boarPickTags">
+      ${boars.map((b) => `<option value="${escapeHtml(b.earTag)}"></option>`).join("")}
+    </datalist>`;
+}
+
 function newAnimalFields() {
   return `
     <div class="seg" id="recKind">
       <button type="button" class="seg-b is-active" data-kind="sow">母豬</button>
       <button type="button" class="seg-b" data-kind="boar">公豬</button>
     </div>`;
+}
+
+// 種豬死亡:記在母豬還是公豬身上,由記錄當下選 —— 跟 newAnimalFields
+// 用同一顆切換鈕,差別是這裡選了之後耳號選單要跟著換(選母豬就找
+// 母豬、選公豬就找公豬),不是像種豬進場那樣兩邊欄位長得一樣。
+function eitherAnimalFields() {
+  return `
+    <div class="seg" id="recKind">
+      <button type="button" class="seg-b is-active" data-kind="sow">母豬</button>
+      <button type="button" class="seg-b" data-kind="boar">公豬</button>
+    </div>
+    <div id="recAnimalPicker">${sowPickerField()}</div>`;
 }
 
 function fieldMarkup(field) {
@@ -1151,14 +1285,31 @@ function fieldMarkup(field) {
       </div>`;
   }
   if (field.type === "choice") {
+    // 選項可以是純字串,也可以是 {value,label}(值跟顯示文字不同時,
+    // 例如區域:存的是 mating,顯示的是「配種區」)。
     return `
       <div class="fld"><span>${escapeHtml(field.label)}</span>
         <div class="chips" data-field="${field.key}">
-          ${field.options.map((o) =>
-            `<button type="button" class="chip" data-val="${escapeHtml(o)}"
-             >${escapeHtml(o)}</button>`).join("")}
+          ${field.options.map((o) => {
+            const opt = typeof o === "string" ? { value: o, label: o } : o;
+            return `<button type="button" class="chip" data-val="${escapeHtml(opt.value)}"
+                    >${escapeHtml(opt.label)}</button>`;
+          }).join("")}
         </div>${hint}
       </div>`;
+  }
+  if (field.type === "pen") {
+    // 直接打欄位編號,不是從清單選 —— 一區動輒幾百個欄位,要求先建好
+    // 清單才能用根本不會有人做(使用者要求)。datalist 只是輔助,
+    // 打過的編號會出現在建議裡,但永遠可以打一個新的。
+    return `
+      <label class="fld"><span>${escapeHtml(field.label)}</span>
+        <input list="penNames" id="f_${field.key}" placeholder="輸入欄位編號"
+               autocomplete="off"></label>
+      <datalist id="penNames">
+        ${[...new Set(pens.map((p) => p.name))]
+          .map((n) => `<option value="${escapeHtml(n)}"></option>`).join("")}
+      </datalist>${hint}`;
   }
   if (field.type === "tri") {
     // 跟 score 同樣的按鈕群,只是選項是 {value, label} —— 存的值(穩定
@@ -1173,10 +1324,11 @@ function fieldMarkup(field) {
       </div>`;
   }
   const type = field.type === "date" ? "date"
-             : field.type === "int" ? "number" : "text";
+             : field.type === "int" || field.type === "decimal" ? "number" : "text";
   return `
     <label class="fld"><span>${escapeHtml(field.label)}</span>
       <input type="${type}" id="f_${field.key}"
+             ${field.type === "decimal" ? 'step="0.1"' : ""}
              ${field.type === "int" ? 'inputmode="numeric"' : ""}></label>${hint}`;
 }
 
@@ -1234,6 +1386,30 @@ async function submitRecord() {
     return;
   }
 
+  // 種豬死亡(target: "either")記在母豬還是公豬,由記錄當下的切換鈕
+  // 決定;採精(target: "boar")固定是公豬。兩者都走公豬事件的路徑。
+  const isBoarTarget = targetsBoar(recordCode) || (targetsEither(recordCode)
+    && document.querySelector("#recKind .is-active")?.dataset.kind === "boar");
+
+  if (isBoarTarget) {
+    const boarTag = ($("recBoar")?.value || "").trim();
+    const boar = boars.find((b) => b.earTag === boarTag);
+    if (!boar) return showRecordError(boarTag ? `找不到耳號 ${boarTag}` : "請選擇公豬");
+
+    const { ok, data } = await api("/api/boar-events", postJson({
+      boarId: boar.id, type: recordCode, date: when, detail,
+    }));
+    if (!ok) return showRecordError(data.error || "記錄失敗");
+
+    closeRecordForm();
+    showBanner(`${boarTag} ${spec.label}已記錄`, "ok");
+    // 種豬死亡會改變狀態跟耳號(民國年後綴),公豬清單要跟著重讀 ——
+    // 採精沒有這個連帶效果,但重讀一次不影響正確性,程式碼簡單很多。
+    await Promise.all([reloadBoars(), reloadRecent()]);
+    if (openBoarId === boar.id) await openBoar(boar.id);
+    return;
+  }
+
   const tag = ($("recSow")?.value || "").trim();
   const sow = sows.find((s) => s.earTag === tag);
   if (!sow) return showRecordError(tag ? `找不到耳號 ${tag}` : "請選擇母豬");
@@ -1245,8 +1421,10 @@ async function submitRecord() {
 
   closeRecordForm();
   showBanner(`${tag} ${spec.label}已記錄`, "ok");
-  // 記錄會改變狀態(胎次、產房、耳號),所以整批重讀而不是只補一列
-  await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
+  // 記錄會改變狀態(胎次、產房、耳號),所以整批重讀而不是只補一列。
+  await Promise.all([
+    reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts(),
+  ]);
   // 剛記的這頭若正好是開著的那張卡,一併重新整理 —— 否則死亡/淘汰後
   // 耳號的民國年後綴、狀態、生產表現都會停在記錄之前的樣子。
   if (openSowId === sow.id) await openSow(sow.id);
@@ -1264,13 +1442,24 @@ async function reloadRecent() {
     || '<p class="hint">最近 7 天還沒有記錄。</p>';
 }
 
-async function undoRecord(eventId, sowId) {
-  const { ok, data } = await api(`/api/sow-events/${eventId}`, { method: "DELETE" });
+async function undoRecord(eventId, kind, animalId) {
+  const path = kind === "boar" ? `/api/boar-events/${eventId}` : `/api/sow-events/${eventId}`;
+  const { ok, data } = await api(path, { method: "DELETE" });
   if (!ok) return showBanner(data.error || "收不回來", "warn");
-  await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
+
+  if (kind === "boar") {
+    // 公豬事件(採精)沒有連帶效果,不必牽動工作/提醒/欄位。
+    await reloadRecent();
+    if (openBoarId === animalId) await openBoar(animalId);
+    return;
+  }
+
+  await Promise.all([
+    reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts(),
+  ]);
   // 收回的若是目前開著的那張卡的事件,同樣要重新整理 —— 理由跟
   // submitRecord() 那邊一樣。
-  if (openSowId === sowId) await openSow(sowId);
+  if (openSowId === animalId) await openSow(animalId);
 }
 
 // ── 值得檢視 ──
@@ -1365,13 +1554,18 @@ async function deleteCustomTask(taskId) {
   await Promise.all([reloadCustomTaskSettings(), reloadTasks()]);
 }
 
-
 // 分段按鈕、chip、收回、記錄 —— 全部走事件委派,因為這些元素是動態畫的。
 document.addEventListener("click", (e) => {
   const seg = e.target.closest(".seg-b");
   if (seg) {
     seg.parentElement.querySelectorAll(".seg-b")
       .forEach((b) => b.classList.toggle("is-active", b === seg));
+    // 種豬死亡:換了母豬/公豬,耳號選單要跟著換 —— 種豬進場的同一顆
+    // 切換鈕不需要這個,兩邊欄位本來就長得一樣,沒有 #recAnimalPicker。
+    const picker = seg.closest("#recKind") && $("recAnimalPicker");
+    if (picker) {
+      picker.innerHTML = seg.dataset.kind === "boar" ? boarPickerField() : sowPickerField();
+    }
     return;
   }
   const chip = e.target.closest(".chip");
@@ -1384,7 +1578,8 @@ document.addEventListener("click", (e) => {
   if (rec) return openRecordForm(rec.dataset.rec);
 
   const undo = e.target.closest("[data-undo]");
-  if (undo) return undoRecord(Number(undo.dataset.undo), Number(undo.dataset.sow));
+  if (undo) return undoRecord(Number(undo.dataset.undo), undo.dataset.kind,
+                              Number(undo.dataset.animal));
 
   const delTask = e.target.closest("[data-del-task]");
   if (delTask) return deleteCustomTask(Number(delTask.dataset.delTask));

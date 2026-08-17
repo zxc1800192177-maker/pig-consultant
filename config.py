@@ -183,7 +183,7 @@ FARM_TIMEZONE = os.environ.get("FARM_TIMEZONE", "Asia/Taipei")
 # 上限比照憲法第九條:用量保護的參數寫在設定,不埋在邏輯深處。
 # 數字參考這個牧場的實際規模(451 頭在場、1,690 頭歷史)並留餘裕。
 MAX_SOWS_PER_FARM = int(os.environ.get("MAX_SOWS_PER_FARM", "5000"))
-MAX_PENS_PER_FARM = int(os.environ.get("MAX_PENS_PER_FARM", "500"))
+MAX_PENS_PER_FARM = int(os.environ.get("MAX_PENS_PER_FARM", "3000"))  # 三區各數百欄
 MAX_EAR_TAG_CHARS = 30
 MAX_BREED_CHARS = 30
 MAX_PEN_NAME_CHARS = 30

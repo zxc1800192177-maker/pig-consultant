@@ -40,7 +40,9 @@ EVENT_CODES = {
     "FON": "FON",  # 寄養移入
     "FOF": "FOF",  # 寄養移出
 }
-# 公豬專屬,匯入到 boar_events
+# 公豬專屬,分流進 result.boar_rows(不進 result.rows)。三個代碼裡只有
+# SC 真的會寫進 boar_events —— BA 只用來建立公豬身分,SP 不是這個 app
+# 認得的事件類型(精蟲活力/濃度已併進 SC 表單),見 import_into() 的說明。
 BOAR_CODES = {"BA": "BA", "SC": "SC", "SP": "SP"}
 # 明確略過(不是錯誤,是這個版本用不到):HD 發情、SA 其他、RT 轉欄
 SKIPPED_CODES = {"HD", "SA", "RT"}
@@ -280,16 +282,22 @@ def summarize(result: ParseResult) -> dict:
     """給匯入預覽畫面的統計。**上傳後先看這個再確認**,尤其是別的牧場的
     檔案格式可能不同 —— 預覽能在寫入前就看出解析錯誤。
     """
+    odd_tags = set(odd_boar_tags(result))
+    semen = [r for r in result.boar_rows if r.code == "SC"]
     return {
         "sows": len({r.ear_tag for r in result.rows}),
         "boars": len({r.ear_tag for r in result.boar_rows}),
         "events": len(result.rows),
-        # 公豬的**身分**會建起來(配種記錄要選公豬),但採精與精液品質那些
-        # 事件本身還沒有地方放。預覽必須講清楚差別 —— 報一個「275 筆」
-        # 然後什麼都不寫,使用者會以為資料已經進去了。
+        # 公豬的**身分**會建起來(配種記錄要選公豬)。採精(SC)事件本身會
+        # 寫進 boar_events;精液品質(SP)不寫 —— 精蟲活力/濃度已經併進
+        # SC 表單,SP 不再是這個 app 認得的事件類型(使用者決定的範圍,
+        # 見 schedule.KNOWN_BOAR_EVENTS)。BA 只用來建立身分,本來就不是
+        # 事件。耳號長得像民國日期的 SC 列對不到真公豬,略過並回報筆數。
         "boarEvents": len(result.boar_rows),
-        "boarEventsImported": False,
-        "oddBoarTags": odd_boar_tags(result),
+        "semenCollections": len(semen),
+        "semenCollectionsSkipped": len([r for r in semen if r.ear_tag in odd_tags]),
+        "semenQualityRows": len([r for r in result.boar_rows if r.code == "SP"]),
+        "oddBoarTags": sorted(odd_tags),
         "byCode": dict(collections.Counter(r.code for r in result.rows)),
         "dateRange": (
             [min(r.when for r in result.rows).isoformat(),
@@ -345,9 +353,9 @@ def import_into(store, farm_id: int, result: ParseResult,
             dam_tag=detail.get("dam_tag", ""),
         )
 
-    # 公豬的身分。事件(BA 採精、SC/SP 精液品質)還沒有地方放,但**豬要先
-    # 建起來** —— 配種記錄要從公豬清單裡選,少了這一步,匯入完資料的牧場
-    # 打開配種表單會看到一個空的選單。
+    # 公豬的身分。**豬要先建起來** —— 配種記錄要從公豬清單裡選,少了這一
+    # 步,匯入完資料的牧場打開配種表單會看到一個空的選單。(採精事件本身
+    # 見下面的區塊;BA 只在這裡用來抓身分,它自己不是事件。)
     #
     # 進場日期取她自己最早那筆事件的日期:檔案沒有公豬的進場記錄,而用
     # 今天當進場日會讓一頭 2020 年就在的公豬看起來是今天剛到的。
@@ -364,6 +372,40 @@ def import_into(store, farm_id: int, result: ParseResult,
             continue                    # 重跑匯入不重複建(冪等)
         store.add_boar(farm_id, tag, entry_date=when)
         boars_added += 1
+
+    # 公豬的採精(SC)事件寫進 boar_events。精液品質(SP)不寫 —— 現在的
+    # 表單/事件類型設計已經把精蟲活力、濃度併進 SC,SP 不再是這個 app
+    # 認得的事件類型(schedule.KNOWN_BOAR_EVENTS 沒有它),硬寫進去畫面
+    # 也顯示不出名字,是使用者決定的範圍。BA 只用來建立身分,本來就
+    # 不是事件。
+    #
+    # 耳號長得像民國日期的列(odd_boar_tags)對不到真公豬,跳過不寫,
+    # 只回報筆數 —— 跟母豬事件的異常一樣,不默默修正也不默默丟掉。
+    boar_tag_to_id = {b["ear_tag"]: b["id"] for b in store.list_boars(farm_id)}
+    odd_tags = set(odd_boar_tags(result))
+    existing_boar_keys = {
+        (e["boar_id"], e["event_type"], e["event_date"],
+         json.dumps(e["detail"], sort_keys=True, ensure_ascii=False))
+        for e in store.list_boar_events(farm_id)
+    }
+
+    semen_written = 0
+    semen_skipped = 0
+    for row in result.boar_rows:
+        if row.code != "SC":
+            continue
+        if row.ear_tag in odd_tags:
+            semen_skipped += 1
+            continue
+        boar_id = boar_tag_to_id[row.ear_tag]
+        key = (boar_id, row.code, row.when,
+               json.dumps(row.detail, sort_keys=True, ensure_ascii=False))
+        if key in existing_boar_keys:
+            continue                        # 重跑匯入不重複寫(冪等)
+        store.add_boar_event(farm_id, boar_id, row.code, row.when, row.detail,
+                             recorded_by=recorded_by)
+        existing_boar_keys.add(key)
+        semen_written += 1
 
     # 同一頭豬、同一天、同樣內容的重複行編號。
     #
@@ -406,4 +448,5 @@ def import_into(store, farm_id: int, result: ParseResult,
         store.update_sow(farm_id, sow_id, **fields)
 
     return {"sows": len(tag_to_id), "events": written, "excluded": len(excluded),
-            "boars": boars_added}
+            "boars": boars_added, "semenCollections": semen_written,
+            "semenCollectionsSkipped": semen_skipped}

@@ -56,6 +56,12 @@ class TestFarmIsolation:
         store.add_sow_event(a, sow, "FW", date(2026, 2, 4))
         assert store.list_sow_events(b) == []
 
+    def test_boar_events(self, store, two_farms):
+        a, b = two_farms
+        boar = store.add_boar(a, "D6")
+        store.add_boar_event(a, boar, "SC", date(2026, 2, 4))
+        assert store.list_boar_events(b) == []
+
     def test_custom_tasks(self, store, two_farms):
         a, b = two_farms
         store.add_custom_task(a, "消毒豬舍", date(2026, 8, 11), "weekly")

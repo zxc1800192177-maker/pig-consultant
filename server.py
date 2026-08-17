@@ -447,13 +447,18 @@ class Application:
         if route == "/api/alerts":
             return self._alerts(token)
         if route == "/api/pens":
-            return self._pens(token)
+            return self._pens(token, path)
         if route == "/api/review":
             return self._review(token)
         if route == "/api/settings":
             return self._get_settings(token)
         if route == "/api/boars":
-            return self._list_boars(token)
+            return self._list_boars(token, path)
+        if route.startswith("/api/boars/"):
+            boar_id = self._path_id(route)
+            if boar_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            return self._boar_detail(token, boar_id)
         if route == "/api/custom-tasks":
             return self._list_custom_tasks(token)
         if route == "/api/recent-events":
@@ -510,6 +515,8 @@ class Application:
             return self._add_pen(payload, token)
         if path == "/api/boars":
             return self._add_boar(payload, token)
+        if path == "/api/boar-events":
+            return self._add_boar_event(payload, token)
         if path == "/api/custom-tasks":
             return self._add_custom_task(payload, token)
         if path == "/api/custom-tasks/done":
@@ -543,11 +550,23 @@ class Application:
                 return 400, {"error": "編號格式錯誤"}
             return self._delete_event(token, event_id)
 
+        if path.startswith("/api/boar-events/"):
+            event_id = self._path_id(path)
+            if event_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            return self._delete_boar_event(token, event_id)
+
         if path.startswith("/api/custom-tasks/"):
             task_id = self._path_id(path)
             if task_id is None:
                 return 400, {"error": "編號格式錯誤"}
             return self._delete_custom_task(token, task_id)
+
+        if path.startswith("/api/pens/"):
+            pen_id = self._path_id(path)
+            if pen_id is None:
+                return 400, {"error": "編號格式錯誤"}
+            return self._delete_pen(token, pen_id)
 
         return 404, {"error": "not found"}
 
@@ -727,6 +746,11 @@ class Application:
         status = schedule.sow_status(sow, grouped.get(sow_id, []), _today(), cfg)
         performance = schedule.performance_with_tiers(sow_id, sows, grouped)
 
+        pen = None
+        if sow.get("pen_id"):
+            pen = next((p for p in self.store.list_pens(farm_id)
+                       if p["id"] == sow["pen_id"]), None)
+
         return 200, {
             "sow": self._sow_payload(sow),
             "status": {
@@ -743,6 +767,8 @@ class Application:
                     status["preg_checked"], status["day"],
                     cfg["preg_check_days"], status["preg_check_overdue_days"],
                 ) if "preg_checked" in status else "",
+                "pen": {"name": pen["name"], "zone": pen["zone"],
+                       "zoneLabel": labels.zone_label(pen["zone"])} if pen else None,
             },
             "performance": performance and {
                 "litters": performance["litters"],
@@ -803,6 +829,38 @@ class Application:
                     or not 1 <= score <= 5:
                 return 400, {"error": "離乳評分請填 1 到 5,或留空不評"}
 
+        # 移欄:直接打欄位編號,不必先到設定頁一個一個新增 —— 一區動輒
+        # 幾百個欄位,要求先手動建一輪根本不會有人做(使用者要求)。
+        # 第一次用到某個編號就直接建立;之後同一區打同樣的編號會找到
+        # 同一個欄位,不會越用越多筆。
+        # detail 存人類看得懂的快照(欄位名稱、區域)而不是只存 id ——
+        # 之後這個欄位被刪除或改名,時間軸上這筆記錄仍看得懂當時搬去
+        # 了哪裡。
+        move_to_pen_id = None
+        if code == schedule.MOVE_PEN:
+            zone = detail.get("zone")
+            if zone not in schedule.ZONES:
+                return 400, {"error": "請選擇區域"}
+            name = detail.get("pen_name")
+            if not isinstance(name, str) or not name.strip():
+                return 400, {"error": "請填寫欄位編號"}
+            name = name.strip()[:config.MAX_PEN_NAME_CHARS]
+
+            pen = next((p for p in self.store.list_pens(farm_id, zone) if p["name"] == name),
+                      None)
+            if pen is None:
+                if len(self.store.list_pens(farm_id)) >= config.MAX_PENS_PER_FARM:
+                    return 400, {"error": f"產房欄位最多 {config.MAX_PENS_PER_FARM} 個"}
+                pen = {"id": self.store.add_pen(farm_id, name, zone), "name": name}
+
+            occupied_by = next(
+                (s for s in self.store.list_sows(farm_id, "active")
+                 if s.get("pen_id") == pen["id"] and s["id"] != sow_id), None)
+            if occupied_by is not None:
+                return 409, {"error": f"{pen['name']} 已經有 {occupied_by['ear_tag']} 在裡面"}
+            move_to_pen_id = pen["id"]
+            detail = {"pen_id": pen["id"], "pen_name": pen["name"], "zone": zone}
+
         event_id = self.store.add_sow_event(
             farm_id, sow_id, code, when, detail, recorded_by=user.id)
 
@@ -813,6 +871,8 @@ class Application:
             after["parity"] = (sow.get("parity") or 0) + 1
         elif code == "WN":
             after["pen_id"] = None            # 離乳後產房欄位空出來
+        elif code == schedule.MOVE_PEN:
+            after["pen_id"] = move_to_pen_id
         elif code in ("SAL", "DTH"):
             after["status"] = "culled" if code == "SAL" else "dead"
             after["pen_id"] = None
@@ -853,7 +913,20 @@ class Application:
                 return 403, {"error": "只能修正最新一筆,較舊的請牧場主處理"}
 
         self.store.delete_sow_event(farm_id, event_id)
+        if target["event_type"] == schedule.MOVE_PEN:
+            self._revert_pen_after_undo(farm_id, target["sow_id"])
         return 200, {"ok": True}
+
+    def _revert_pen_after_undo(self, farm_id, sow_id) -> None:
+        """收回一筆移欄記錄後,母豬目前的欄位要退回上一筆移欄記錄(或退回
+        沒有指派,若這是她第一筆移欄)。收回代表「這筆記錄不算數」,
+        不是「這頭豬還留在原地」—— 不退回的話,那個欄位會一直顯示被
+        佔用,擋住其他母豬移進去,而使用者已經按了「收回」以為復原了。
+        """
+        remaining = [e for e in self.store.list_sow_events(farm_id, sow_id)
+                    if e["event_type"] == schedule.MOVE_PEN]
+        pen_id = remaining[-1]["detail"].get("pen_id") if remaining else None
+        self.store.update_sow(farm_id, sow_id, pen_id=pen_id)
 
     def _tasks(self, token, path) -> Tuple[int, dict]:
         """這一週的工作。依工作類型分組,不按日期 —— 這個場跑批次生產,
@@ -904,12 +977,13 @@ class Application:
 
         sows = self.store.list_sows(farm_id, "active")
         events = self.store.list_sow_events(farm_id)
+        pens = self.store.list_pens(farm_id)
         cfg = self._farm_settings(farm_id)
         today = _today()
 
         return 200, {
             "openSows": schedule.overdue_sows(sows, events, today, cfg),
-            "pens": schedule.pen_pressure(sows, events, today, cfg),
+            "pens": schedule.pen_pressure(sows, events, pens, today, cfg),
         }
 
     def _farm_settings(self, farm_id) -> dict:
@@ -1033,12 +1107,29 @@ class Application:
                                      exclude_lines=exclude, recorded_by=user.id)
         return 200, stats
 
-    def _pens(self, token) -> Tuple[int, dict]:
+    def _pens(self, token, path) -> Tuple[int, dict]:
+        """產房欄位清單,含目前佔用者。
+
+        設定頁要顯示每一欄目前是誰佔用;紀錄頁的移欄表單要知道哪些欄位
+        是空的才能列出來選 —— 兩邊共用同一個端點,不必為此各自算一次。
+        """
         farm_id, user, err = self._need_farm(token)
         if err:
             return err
-        return 200, {"pens": [{"id": p["id"], "name": p["name"]}
-                              for p in self.store.list_pens(farm_id)]}
+
+        zone = _query(path, "zone")
+        pens = self.store.list_pens(farm_id, zone)
+        occupant = {s["pen_id"]: s for s in self.store.list_sows(farm_id, "active")
+                   if s.get("pen_id")}
+
+        return 200, {"pens": [
+            {"id": p["id"], "name": p["name"], "zone": p["zone"],
+             "zoneLabel": labels.zone_label(p["zone"]),
+             "occupant": ({"sowId": occupant[p["id"]]["id"],
+                          "earTag": occupant[p["id"]]["ear_tag"]}
+                         if p["id"] in occupant else None)}
+            for p in pens
+        ]}
 
     def _add_pen(self, payload, token) -> Tuple[int, dict]:
         farm_id, user, err = self._need_farm(token)
@@ -1051,10 +1142,31 @@ class Application:
         name = payload.get("name")
         if not isinstance(name, str) or not name.strip():
             return 400, {"error": "請填寫欄位編號"}
+
+        zone = payload.get("zone") or schedule.ZONE_FARROWING
+        if zone not in schedule.ZONES:
+            return 400, {"error": f"不認得的區域:{zone}"}
+
         if len(self.store.list_pens(farm_id)) >= config.MAX_PENS_PER_FARM:
             return 400, {"error": f"產房欄位最多 {config.MAX_PENS_PER_FARM} 個"}
         return 200, {"id": self.store.add_pen(
-            farm_id, name.strip()[:config.MAX_PEN_NAME_CHARS])}
+            farm_id, name.strip()[:config.MAX_PEN_NAME_CHARS], zone)}
+
+    def _delete_pen(self, token, pen_id) -> Tuple[int, dict]:
+        """刪除欄位。有母豬在裡面一樣可以刪(比照 ON DELETE SET NULL,
+        db.py 的 delete_pen 會把那頭母豬的 pen_id 清成 None)—— 這只是
+        「這個欄位不存在了」,不代表那頭母豬不存在,不該因為欄位設定
+        錯誤而擋住刪除。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        ok = self.store.delete_pen(farm_id, pen_id)
+        return (200, {"ok": True}) if ok else (404, {"error": "找不到這個欄位"})
 
     def _list_custom_tasks(self, token) -> Tuple[int, dict]:
         """自訂工作的設定清單(不是這週的排程,那在 /api/tasks)。
@@ -1135,16 +1247,45 @@ class Application:
             return 404, {"error": "找不到這項工作"}
         return 200, {"ok": True, "done": done}
 
-    def _list_boars(self, token) -> Tuple[int, dict]:
-        """公豬清單。配種記錄要選公豬,所以員工也讀得到。"""
+    @staticmethod
+    def _boar_payload(row) -> dict:
+        return {
+            "id": row["id"],
+            "earTag": row["ear_tag"],
+            "breed": row.get("breed") or "",
+            "status": row.get("status") or "active",
+            "sireTag": row.get("sire_tag") or "",
+            "damTag": row.get("dam_tag") or "",
+            "entryDate": _iso(row.get("entry_date")),
+        }
+
+    @staticmethod
+    def _boar_event_payload(row) -> dict:
+        return {
+            "id": row["id"],
+            "boarId": row["boar_id"],
+            "type": row["event_type"],
+            "date": _iso(row["event_date"]),
+            "detail": row.get("detail") or {},
+            "recordedBy": row.get("recorded_by"),
+        }
+
+    def _list_boars(self, token, path) -> Tuple[int, dict]:
+        """公豬清單。配種記錄要選公豬,所以員工也讀得到。
+
+        預設只回在場的 —— 記錄用的選單(配種/採精/種豬死亡)不該選到
+        已經死亡的公豬。跟母豬清單同樣的慣例:`?all=1` 才回全部
+        (含已死亡的),公豬頁的瀏覽/搜尋用這份,死亡的公豬還是要看得到、
+        找得到,不能整個從畫面上消失。
+        """
         farm_id, user, err = self._need_farm(token)
         if err:
             return err
-        return 200, {"boars": [{"id": b["id"], "earTag": b["ear_tag"],
-                                "breed": b.get("breed") or "",
-                                "sireTag": b.get("sire_tag") or "",
-                                "damTag": b.get("dam_tag") or ""}
-                               for b in self.store.list_boars(farm_id)]}
+        status = "active"
+        if "?" in path and "all" in path.split("?", 1)[1]:
+            status = None
+        return 200, {"boars": [self._boar_payload(b)
+                               for b in self.store.list_boars(farm_id, status)]}
 
     def _add_boar(self, payload, token) -> Tuple[int, dict]:
         """種豬進場。公豬走這裡,母豬走 /api/sows —— 兩者是不同的實體。"""
@@ -1169,13 +1310,109 @@ class Application:
         )
         return 200, {"id": boar_id, "earTag": tag}
 
+    def _boar_detail(self, token, boar_id) -> Tuple[int, dict]:
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        boar = self.store.get_boar(farm_id, boar_id)
+        if boar is None:
+            return 404, {"error": "找不到這頭公豬"}
+
+        events = self.store.list_boar_events(farm_id, boar_id)
+
+        # 配種績效比對的是全場母豬的配種記錄,不是這頭公豬自己的
+        # boar_events —— 他配過誰、配了幾次是記在母豬的 MT 事件裡。
+        sow_events = self.store.list_sow_events(farm_id)
+        performance = schedule.boar_performance(boar["ear_tag"], sow_events)
+
+        return 200, {
+            "boar": self._boar_payload(boar),
+            "performance": performance and {
+                **performance,
+                "basis": labels.boar_performance_basis(),
+            },
+            "events": [self._boar_event_payload(e) for e in events],
+        }
+
+    def _add_boar_event(self, payload, token) -> Tuple[int, dict]:
+        """公豬事件:採精、死亡。死亡跟母豬死亡是同一種事件(使用者決定
+        合併,改名「種豬死亡」)——分開存在 sow_events/boar_events 只是
+        因為公豬跟母豬本來就是不同資料表。跟母豬事件一樣是「記錄即
+        完成」,員工也能記 —— 配種記錄本來就是他在做的事(憲法第十一條)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        boar_id = payload.get("boarId")
+        if not isinstance(boar_id, int):
+            return 400, {"error": "請指定公豬"}
+        boar = self.store.get_boar(farm_id, boar_id)
+        if boar is None:
+            return 404, {"error": "找不到這頭公豬"}
+
+        code = payload.get("type")
+        if code not in schedule.KNOWN_BOAR_EVENTS:
+            return 400, {"error": f"不認得的事件類型:{code}"}
+
+        when = _date(payload.get("date"))
+        if when is None:
+            return 400, {"error": "日期格式錯誤"}
+
+        detail = payload.get("detail")
+        detail = detail if isinstance(detail, dict) else {}
+        detail = {k: v for k, v in list(detail.items())[:config.MAX_EVENT_FIELDS]}
+
+        event_id = self.store.add_boar_event(farm_id, boar_id, code, when, detail,
+                                             recorded_by=user.id)
+
+        # 跟母豬死亡同樣的連帶效果:離群時自動加民國年後綴,裸號釋放給
+        # 新豬(牧場既有慣例),用事件日期的年份而非今天。
+        if code == schedule.DEATH:
+            after = {"status": "dead"}
+            suffix = f"-D{when.year - 1911}"
+            if not boar["ear_tag"].endswith(suffix):
+                after["ear_tag"] = boar["ear_tag"] + suffix
+            self.store.update_boar(farm_id, boar_id, **after)
+
+        return 200, {"id": event_id}
+
+    def _delete_boar_event(self, token, event_id) -> Tuple[int, dict]:
+        """跟 _delete_event 同樣的收回規則:員工只能刪自己記的、且是
+        最新一筆(憲法第十一條第 5 款)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+
+        events = self.store.list_boar_events(farm_id)
+        target = next((e for e in events if e["id"] == event_id), None)
+        if target is None:
+            return 404, {"error": "找不到這筆記錄"}
+
+        if not user.is_owner:
+            newest = max(events, key=lambda e: (e["event_date"], e["id"]))
+            if target["recorded_by"] != user.id:
+                return 403, {"error": "只能修正自己記的那一筆"}
+            if target["id"] != newest["id"]:
+                return 403, {"error": "只能修正最新一筆,較舊的請牧場主處理"}
+
+        self.store.delete_boar_event(farm_id, event_id)
+        return 200, {"ok": True}
+
     def _recent_events(self, token, path) -> Tuple[int, dict]:
-        """最近記錄的事件,給紀錄頁的「已記錄」清單用。
+        """最近記錄的事件,給紀錄頁的「已記錄」清單用。母豬事件跟公豬事件
+        (採精)合併成一份清單 —— 巡欄時連續記好幾筆,使用者
+        要看到同一份「剛剛記了什麼」,不必分兩處確認。
 
         帶上 `canUndo`:能不能收回是**伺服器判定**的,不是前端自己算。
-        前端只用它決定要不要畫按鈕;真正的把關在 _delete_event
-        (員工只能改自己記的、且是最新一筆)。兩邊各判一次是刻意的 ——
-        前端那次是為了不給使用者一個按了必定失敗的按鈕。
+        前端只用它決定要不要畫按鈕;真正的把關在 _delete_event /
+        _delete_boar_event(員工只能改自己記的、且是最新一筆)。兩邊
+        各判一次是刻意的 —— 前端那次是為了不給使用者一個按了必定
+        失敗的按鈕。
+
+        兩種事件各自的「最新一筆」分開算 —— 員工能不能收回一筆母豬
+        事件,跟他今天有沒有記過公豬事件無關。
         """
         farm_id, user, err = self._need_farm(token)
         if err:
@@ -1185,27 +1422,35 @@ class Application:
         raw = _query(path, "days")
         if raw and raw.isdigit():
             days = min(int(raw), config.MAX_RECENT_EVENT_DAYS)
-
         since = _today() - timedelta(days=days - 1)
-        events = self.store.list_sow_events(farm_id)
-        tags = {s["id"]: s["ear_tag"] for s in self.store.list_sows(farm_id, None)}
 
-        newest = max(events, key=lambda e: (e["event_date"], e["id"]), default=None)
-        recent = [e for e in events if e["event_date"] >= since]
-        recent.sort(key=lambda e: (e["event_date"], e["id"]), reverse=True)
-        recent = recent[:config.MAX_RECENT_EVENTS]
+        def can_undo(e, newest):
+            return bool(user.is_owner
+                       or (e["recorded_by"] == user.id
+                           and newest is not None and e["id"] == newest["id"]))
 
-        return 200, {
-            "events": [
-                {**self._event_payload(e),
-                 "earTag": tags.get(e["sow_id"], ""),
-                 "canUndo": bool(user.is_owner
-                                 or (e["recorded_by"] == user.id
-                                     and newest is not None
-                                     and e["id"] == newest["id"]))}
-                for e in recent
-            ],
-        }
+        sow_events = self.store.list_sow_events(farm_id)
+        sow_tags = {s["id"]: s["ear_tag"] for s in self.store.list_sows(farm_id, None)}
+        sow_newest = max(sow_events, key=lambda e: (e["event_date"], e["id"]), default=None)
+        recent = [
+            {**self._event_payload(e), "kind": "sow",
+             "earTag": sow_tags.get(e["sow_id"], ""),
+             "canUndo": can_undo(e, sow_newest)}
+            for e in sow_events if e["event_date"] >= since
+        ]
+
+        boar_events = self.store.list_boar_events(farm_id)
+        boar_tags = {b["id"]: b["ear_tag"] for b in self.store.list_boars(farm_id)}
+        boar_newest = max(boar_events, key=lambda e: (e["event_date"], e["id"]), default=None)
+        recent += [
+            {**self._boar_event_payload(e), "kind": "boar",
+             "earTag": boar_tags.get(e["boar_id"], ""),
+             "canUndo": can_undo(e, boar_newest)}
+            for e in boar_events if e["event_date"] >= since
+        ]
+
+        recent.sort(key=lambda e: (e["date"], e["id"]), reverse=True)
+        return 200, {"events": recent[:config.MAX_RECENT_EVENTS]}
 
 
     def _grade(self, payload: dict) -> Tuple[int, dict]:

@@ -11,11 +11,14 @@ import {
   ESTRUS_STABILITY_OPTIONS,
   RECORD_FORMS,
   SIDE_EFFECTS,
+  ZONE_OPTIONS,
   buildDetail,
   createsNewAnimal,
   formFor,
   recordSummary,
   recordedRow,
+  targetsBoar,
+  targetsEither,
 } from "../../web/lib/record.js";
 
 describe("表單定義", () => {
@@ -37,9 +40,87 @@ describe("表單定義", () => {
 
   it("會改變母豬狀態的事件都要先講清楚", () => {
     // 胎次 +1、耳號改號這些是不可逆的,按下去之前要知道
-    for (const code of ["FW", "WN", "SAL", "DTH"]) {
+    for (const code of ["FW", "WN", "SAL", "DTH", "MV"]) {
       assert.ok(SIDE_EFFECTS[code], `${code} 沒有說明副作用`);
     }
+  });
+});
+
+describe("種豬死亡", () => {
+  // 使用者決定:公豬死亡跟母豬死亡合併成同一個事件,改名「種豬死亡」,
+  // 記在母豬還是公豬身上由記錄當下的切換鈕決定,不是表單本身寫死。
+  it("target 是 either,不是寫死 sow 或 boar", () => {
+    assert.equal(formFor("DTH").target, "either");
+    assert.equal(targetsEither("DTH"), true);
+    assert.equal(targetsEither("MT"), false);
+  });
+
+  it("不是母豬專屬,也不是公豬專屬", () => {
+    assert.equal(createsNewAnimal("DTH"), false);
+    assert.equal(targetsBoar("DTH"), false);
+  });
+
+  it("原因欄位不分物種,兩邊共用同一份定義", () => {
+    const keys = formFor("DTH").fields.map((f) => f.key);
+    assert.deepEqual(keys, ["reason"]);
+  });
+});
+
+describe("移欄", () => {
+  // 使用者要求:直接在紀錄頁打欄位編號,不必先到設定頁一個一個新增
+  // —— 一區動輒幾百個欄位,要求先手動建一輪根本不會有人做。
+  it("表單目標是既有母豬,不是新增一頭豬", () => {
+    assert.equal(formFor("MV").target, "sow");
+    assert.equal(createsNewAnimal("MV"), false);
+  });
+
+  it("兩個欄位:區域跟欄位編號", () => {
+    const fields = formFor("MV").fields;
+    assert.deepEqual(fields.map((f) => f.key), ["zone", "pen_name"]);
+    assert.equal(fields[0].type, "choice");
+    assert.equal(fields[1].type, "pen");
+  });
+
+  it("三個區域,對應後端的 mating/gestation/farrowing", () => {
+    assert.deepEqual(ZONE_OPTIONS.map((z) => z.value),
+      ["mating", "gestation", "farrowing"]);
+    assert.deepEqual(ZONE_OPTIONS.map((z) => z.label), ["配種區", "待產區", "產房"]);
+  });
+
+  it("區域選項就是 ZONE_OPTIONS,不是另一份定義", () => {
+    assert.equal(formFor("MV").fields[0].options, ZONE_OPTIONS);
+  });
+
+  it("填了區域跟編號就存成字串", () => {
+    const { detail, problems } = buildDetail("MV",
+      { zone: "mating", pen_name: "配-05" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.zone, "mating");
+    assert.equal(detail.pen_name, "配-05");
+  });
+
+  it("編號前後空白會裁掉,跟其他文字欄位一樣", () => {
+    const { detail } = buildDetail("MV", { zone: "mating", pen_name: "  37  " });
+    assert.equal(detail.pen_name, "37");
+  });
+
+  it("沒填區域要報錯", () => {
+    const { problems } = buildDetail("MV", { pen_name: "配-05" });
+    assert.ok(problems.length);
+    assert.ok(problems[0].includes("區域"));
+  });
+
+  it("沒填欄位編號要報錯 —— 這正是這筆記錄的全部內容", () => {
+    const { problems } = buildDetail("MV", { zone: "mating" });
+    assert.ok(problems.length);
+    assert.ok(problems[0].includes("欄位編號"));
+  });
+
+  it("摘要顯示移去的欄位名稱(伺服器存的快照)", () => {
+    const { extra } = recordSummary({
+      type: "MV", detail: { pen_id: 5, pen_name: "配-01", zone: "mating" },
+    });
+    assert.ok(extra.includes("移至 配-01"));
   });
 });
 
@@ -251,7 +332,23 @@ describe("已記錄清單", () => {
     // 實際踩過的 bug:記成死亡或淘汰後,已經開著的母豬卡耳號沒有更新,
     // 因為送出記錄後只重讀了列表跟提醒,沒有重讀開著的那張卡。收回
     // 同樣需要知道是哪一頭,才能對應著重新整理。
-    assert.match(recordedRow(ev({ canUndo: true, sowId: 42 })), /data-sow="42"/);
+    const html = recordedRow(ev({ canUndo: true, sowId: 42 }));
+    assert.match(html, /data-animal="42"/);
+    assert.match(html, /data-kind="sow"/);
+  });
+
+  it("沒有 kind 時當成母豬事件 —— 舊呼叫端不用跟著改", () => {
+    const { kind, ...rest } = ev({ canUndo: true, sowId: 7 });
+    assert.match(recordedRow(rest), /data-kind="sow"/);
+  });
+
+  it("公豬事件帶 kind=boar 跟公豬 id", () => {
+    const html = recordedRow({
+      id: 9, kind: "boar", boarId: 5, type: "SC", date: "2026-08-17",
+      earTag: "D6", detail: { volume: 15 }, canUndo: true,
+    });
+    assert.match(html, /data-kind="boar"/);
+    assert.match(html, /data-animal="5"/);
   });
 
   it("耳號有跳脫", () => {
@@ -262,5 +359,62 @@ describe("已記錄清單", () => {
   it("原因文字有跳脫", () => {
     const html = recordedRow(ev({ type: "SAL", detail: { reason: "<script>x</script>" } }));
     assert.doesNotMatch(html, /<script>/);
+  });
+});
+
+describe("採精", () => {
+  // 使用者決定:不需要獨立的「精液品質」事件,精蟲活力跟精液濃度併進
+  // 採精表單裡即可。
+  it("記在公豬身上,不是母豬", () => {
+    assert.equal(formFor("SC").target, "boar");
+    assert.equal(targetsBoar("SC"), true);
+    assert.equal(targetsBoar("MT"), false);
+  });
+
+  it("不再是可記錄的事件類型", () => {
+    assert.equal(formFor("SP"), null);
+  });
+
+  it("採精量必填,其餘選填", () => {
+    const { detail, problems } = buildDetail("SC", { volume: "15" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.volume, 15);
+    assert.ok(!("doses" in detail));
+    assert.ok(!("motility" in detail));
+    assert.ok(!("concentration" in detail));
+  });
+
+  it("沒填採精量要報錯", () => {
+    assert.ok(buildDetail("SC", {}).problems.length);
+  });
+
+  it("精蟲活力是整數百分比", () => {
+    const { detail, problems } = buildDetail("SC", { volume: "15", motility: "80" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.motility, 80);
+  });
+
+  it("精蟲活力超出 0~100 被擋下來", () => {
+    assert.ok(buildDetail("SC", { volume: "15", motility: "101" }).problems.length);
+  });
+
+  it("精液濃度可以是小數,不像整數欄位那樣被擋", () => {
+    const { detail, problems } = buildDetail("SC", { volume: "15", concentration: "3.5" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.concentration, 3.5);
+  });
+
+  it("精液濃度不是數字時要報錯", () => {
+    assert.ok(buildDetail("SC", { volume: "15", concentration: "abc" }).problems.length);
+  });
+
+  it("摘要顯示採精量、活力、濃度、劑量", () => {
+    const { extra } = recordSummary({
+      type: "SC", detail: { volume: 15, motility: 80, concentration: 3.5, doses: 3 },
+    });
+    assert.ok(extra.includes("採精量 15 ml"));
+    assert.ok(extra.includes("活力 80%"));
+    assert.ok(extra.includes("濃度 3.5 億/mL"));
+    assert.ok(extra.includes("3 劑"));
   });
 });

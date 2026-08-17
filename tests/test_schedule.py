@@ -105,6 +105,51 @@ class TestTasksAfterMating:
         assert FARROW_DUE in kinds(tasks), "驗孕完仍要等分娩"
 
 
+class TestMoveToGestationZone:
+    """配種區 → 待產區。使用者明確決定:只認陽性驗孕記錄,不是配種滿
+    60 天就觸發 —— 這個場很多母豬從沒驗孕過。
+    """
+
+    MATED = date(2026, 2, 3)
+    CHECKED = MATED + timedelta(days=26)
+
+    def test_fires_after_a_positive_check(self):
+        tasks = tasks_for_sow(sow(), [
+            ev(1, "MT", self.MATED),
+            ev(1, "PD", self.CHECKED, {"positive": True}),
+        ], D)
+        assert schedule.MOVE_TO_GESTATION in kinds(tasks)
+        assert due_of(tasks, schedule.MOVE_TO_GESTATION) == self.CHECKED + timedelta(days=60)
+
+    def test_does_not_fire_without_any_check(self):
+        """配種後從沒驗孕,不能因為滿 60 天就當成懷孕搬去待產區。"""
+        tasks = tasks_for_sow(sow(), [ev(1, "MT", self.MATED)], D)
+        assert schedule.MOVE_TO_GESTATION not in kinds(tasks)
+
+    def test_does_not_fire_after_a_negative_check(self):
+        tasks = tasks_for_sow(sow(), [
+            ev(1, "MT", self.MATED),
+            ev(1, "PD", self.CHECKED, {"positive": False}),
+        ], D)
+        assert schedule.MOVE_TO_GESTATION not in kinds(tasks)
+
+    def test_does_not_fire_when_the_result_is_unrecorded(self):
+        """有驗但結果沒填,跟根本沒驗孕是不同的問題,但一樣不算確認懷孕。"""
+        tasks = tasks_for_sow(sow(), [
+            ev(1, "MT", self.MATED),
+            ev(1, "PD", self.CHECKED, {}),
+        ], D)
+        assert schedule.MOVE_TO_GESTATION not in kinds(tasks)
+
+    def test_interval_is_configurable(self):
+        cfg = schedule.settings_with_defaults({"to_gestation_zone_days": 45})
+        tasks = tasks_for_sow(sow(), [
+            ev(1, "MT", self.MATED),
+            ev(1, "PD", self.CHECKED, {"positive": True}),
+        ], cfg)
+        assert due_of(tasks, schedule.MOVE_TO_GESTATION) == self.CHECKED + timedelta(days=45)
+
+
 class TestTasksAfterFarrowing:
     def test_weaning_is_due(self):
         tasks = tasks_for_sow(sow(), [
@@ -115,13 +160,17 @@ class TestTasksAfterFarrowing:
         assert due_of(tasks, WEAN_DUE) == date(2026, 2, 4) + timedelta(days=22)
 
     def test_nothing_left_after_weaning_except_mating(self):
+        """離乳後只剩「該配種」跟「該移至配種區」兩件事 —— 移入產房、
+        催產、分娩那些都是上一胎的,不該留到這一胎。
+        """
         tasks = tasks_for_sow(sow(), [
             ev(1, "MT", date(2025, 10, 13)),
             ev(1, "FW", date(2026, 2, 4)),
             ev(1, "WN", date(2026, 2, 26)),
         ], D)
-        assert kinds(tasks) == {MATE_DUE}
+        assert kinds(tasks) == {MATE_DUE, schedule.MOVE_TO_MATING}
         assert due_of(tasks, MATE_DUE) == date(2026, 2, 26) + timedelta(days=5)
+        assert due_of(tasks, schedule.MOVE_TO_MATING) == date(2026, 2, 26)
 
 
 class TestNoTasksWhenGone:
@@ -201,20 +250,30 @@ class TestOverdue:
 
 
 class TestPenPressure:
-    """產房容量是設定裡的一個總數(farrowing_pens)。
+    """產房空間夠不夠。
 
-    原本設計成逐欄位追蹤,但從來沒有任何地方把母豬指派到特定欄位 ——
-    sows.pen_id 只在離乳與離群時被清空,沒有人寫入過,所以「還空著哪幾欄」
-    永遠是列出全部欄位,等於沒有資訊。
+    **總欄數是使用者在設定裡自己填的「總產房數」**(使用者決定),不是
+    算出來的 —— pens 資料表只會累積「曾經被移欄記錄提到的欄位名稱」,
+    牧場實際的總欄數在還沒被記錄過之前不會出現在那份清單裡,拿清單
+    長度當總數會系統性低估。
+
+    **佔用**仍然來自真實的欄位指派(sows.pen_id → pens.zone,由
+    MOVE_PEN 事件維護),不是猜的。
     """
 
-    TWO = {"farrowing_pens": 2}
+    @staticmethod
+    def pen(pen_id=1, name="1", zone="farrowing"):
+        return {"id": pen_id, "farm_id": 1, "name": name, "zone": zone}
+
+    TWO = [{"id": 1, "farm_id": 1, "name": "1", "zone": "farrowing"},
+           {"id": 2, "farm_id": 1, "name": "2", "zone": "farrowing"}]
 
     def test_counts_sows_due_to_move_in(self):
         mated = date(2026, 3, 1) - timedelta(days=114 - 14)
         r = pen_pressure([sow(1, "1183"), sow(2, "2580")],
                          [ev(1, "MT", mated), ev(2, "MT", mated)],
-                         date(2026, 3, 1), self.TWO)
+                         self.TWO, date(2026, 3, 1),
+                         settings={"farrowing_pens": 2})
         assert r["incoming"] == 2
         assert r["short_by"] == 0
 
@@ -222,39 +281,62 @@ class TestPenPressure:
         mated = date(2026, 3, 1) - timedelta(days=114 - 14)
         sows = [sow(i, str(i)) for i in range(1, 4)]
         events = [ev(i, "MT", mated) for i in range(1, 4)]
-        r = pen_pressure(sows, events, date(2026, 3, 1), self.TWO)
+        r = pen_pressure(sows, events, self.TWO, date(2026, 3, 1),
+                         settings={"farrowing_pens": 2})
         assert r["incoming"] == 3
         assert r["short_by"] == 1
 
-    def test_lactating_sows_occupy_a_pen(self):
-        """分娩了還沒離乳的母豬正佔著一個產房位,那才是真正的佔用。
-        原本是數 sows.pen_id,而那個欄位從來沒被寫入過,所以永遠是 0。
+    def test_total_comes_from_settings_not_from_the_pens_list(self):
+        """這正是這次改版要修的問題:拿 pens 清單長度當總數,牧場真正
+        的產房總數在還沒被移欄記錄提到之前不會出現在清單裡,會低估。
         """
-        r = pen_pressure([sow(1, "1183")], [ev(1, "FW", date(2026, 2, 25))],
-                         date(2026, 3, 1), self.TWO)
+        r = pen_pressure([], [], self.TWO, date(2026, 3, 1),
+                         settings={"farrowing_pens": 50})
+        assert r["total"] == 50
+
+    def test_occupied_counts_real_pen_assignments(self):
+        """佔用來自真實的欄位指派,不是從生產週期猜的。"""
+        assigned = sow(1, "1183", pen_id=1)
+        r = pen_pressure([assigned], [ev(1, "FW", date(2026, 2, 25))],
+                         self.TWO, date(2026, 3, 1),
+                         settings={"farrowing_pens": 2})
         assert r["occupied"] == 1
         assert r["free"] == 1
 
-    def test_weaned_sow_frees_the_pen(self):
-        events = [ev(1, "FW", date(2026, 2, 1)), ev(1, "WN", date(2026, 2, 23))]
-        r = pen_pressure([sow(1, "1183")], events, date(2026, 3, 1), self.TWO)
+    def test_lactating_without_a_real_assignment_is_not_counted(self):
+        """舊版靠「已分娩未離乳」猜佔用,沒有真的指派欄位也算佔用;
+        現在只認真的指派。
+        """
+        r = pen_pressure([sow(1, "1183")], [ev(1, "FW", date(2026, 2, 25))],
+                         [self.pen(1)], date(2026, 3, 1),
+                         settings={"farrowing_pens": 1})
         assert r["occupied"] == 0
-        assert r["free"] == 2
+        assert r["free"] == 1
 
-    def test_zero_means_unset_not_no_pens(self):
-        """0 = 還沒設定。不知道容量時不可以宣稱空間不足 —— 那是憑空
-        捏造的警示(憲法第三條)。
+    def test_assignment_to_a_non_farrowing_pen_does_not_occupy_farrowing_capacity(self):
+        """配種區、待產區的欄位指派不算進產房佔用。"""
+        pens = [self.pen(1, zone="mating"), self.pen(2, zone="farrowing")]
+        assigned = sow(1, "1183", pen_id=1)      # 指派到配種區,不是產房
+        r = pen_pressure([assigned], [], pens, date(2026, 3, 1),
+                         settings={"farrowing_pens": 1})
+        assert r["occupied"] == 0
+        assert r["free"] == 1
+
+    def test_no_farrowing_pens_means_unconfigured(self):
+        """總產房數沒填(預設 0)時不可以宣稱空間不足 —— 那是憑空捏造的
+        警示(憲法第三條)。
         """
         mated = date(2026, 3, 1) - timedelta(days=114 - 14)
         sows = [sow(i, str(i)) for i in range(1, 4)]
         events = [ev(i, "MT", mated) for i in range(1, 4)]
-        r = pen_pressure(sows, events, date(2026, 3, 1), {"farrowing_pens": 0})
+        r = pen_pressure(sows, events, [], date(2026, 3, 1))
         assert r["configured"] is False
         assert r["incoming"] == 3      # 進來幾頭照算,那不需要知道容量
         assert r["short_by"] == 0      # 但不宣稱缺幾欄
 
-    def test_configured_flag_is_true_once_set(self):
-        r = pen_pressure([], [], date(2026, 3, 1), self.TWO)
+    def test_configured_flag_is_true_once_farrowing_pens_is_set(self):
+        r = pen_pressure([], [], [], date(2026, 3, 1),
+                         settings={"farrowing_pens": 2})
         assert r["configured"] is True
         assert r["total"] == 2
 
@@ -339,7 +421,8 @@ class TestNegativePregnancyCheck:
         mated = date(2026, 3, 1) - timedelta(days=114 - 14)
         events = [ev(1, "MT", mated),
                   ev(1, "PD", mated + timedelta(days=26), {"positive": False})]
-        r = pen_pressure([sow()], events, date(2026, 3, 1), {"farrowing_pens": 1})
+        pens = [{"id": 1, "farm_id": 1, "name": "1", "zone": "farrowing"}]
+        r = pen_pressure([sow()], events, pens, date(2026, 3, 1))
         assert r["incoming"] == 0
 
 
@@ -638,6 +721,129 @@ class TestSowPerformance:
         """
         p = schedule.sow_performance(self.litters(1, [(12, 0, 11)]))
         assert not any("mortal" in k or "死亡" in k for k in p)
+
+
+class TestBoarPerformance:
+    """公豬卡的配種績效。從母豬那邊的配種記錄比對公豬耳號算,不是猜的
+    —— MT 事件本來就記了 boar_tag。
+    """
+
+    MATED = date(2026, 2, 3)
+    CHECKED = MATED + timedelta(days=26)
+    FARROWED = MATED + timedelta(days=114)
+
+    def test_no_matings_returns_none(self):
+        events = [ev(1, "MT", self.MATED, {"boar_tag": "D6"})]
+        assert schedule.boar_performance("D9", events) is None
+
+    def test_blank_boar_tag_returns_none(self):
+        """不能拿「沒填公豬耳號」的配種記錄去湊出一頭公豬的績效。"""
+        events = [ev(1, "MT", self.MATED, {"boar_tag": ""})]
+        assert schedule.boar_performance("", events) is None
+
+    def test_counts_a_bare_mating_with_no_result_yet(self):
+        """剛配種、還沒驗孕 —— 算進配種次數,但不能算進任何比率的分母。"""
+        events = [ev(1, "MT", self.MATED, {"boar_tag": "D6"})]
+        p = schedule.boar_performance("D6", events)
+        assert p["matings"] == 1
+        assert p["sowsMated"] == 1
+        assert p["checked"] == 0
+        assert p["positiveRate"] is None
+        assert p["litters"] == 0
+        assert p["avgBornAlive"] is None
+
+    def test_positive_check_counts_toward_the_rate(self):
+        events = [
+            ev(1, "MT", self.MATED, {"boar_tag": "D6"}),
+            ev(1, "PD", self.CHECKED, {"positive": True}),
+        ]
+        p = schedule.boar_performance("D6", events)
+        assert p["checked"] == 1
+        assert p["positiveRate"] == 100.0
+
+    def test_negative_check_counts_toward_the_rate_as_a_failure(self):
+        events = [
+            ev(1, "MT", self.MATED, {"boar_tag": "D6"}),
+            ev(1, "PD", self.CHECKED, {"positive": False}),
+        ]
+        p = schedule.boar_performance("D6", events)
+        assert p["checked"] == 1
+        assert p["positiveRate"] == 0.0
+
+    def test_farrow_counts_a_litter_even_without_a_born_alive_count(self):
+        """有分娩就算一窩,活仔數缺記錄時窩數仍然算,只是不進平均活仔數。"""
+        events = [
+            ev(1, "MT", self.MATED, {"boar_tag": "D6"}),
+            ev(1, "FW", self.FARROWED, {}),
+        ]
+        p = schedule.boar_performance("D6", events)
+        assert p["litters"] == 1
+        assert p["avgBornAlive"] is None
+
+    def test_average_born_alive_across_his_litters(self):
+        events = [
+            ev(1, "MT", self.MATED, {"boar_tag": "D6"}),
+            ev(1, "FW", self.FARROWED, {"born_alive": 12}),
+            ev(1, "WN", self.FARROWED + timedelta(days=22), {"weaned": 11}),
+            ev(1, "MT", self.FARROWED + timedelta(days=27), {"boar_tag": "D6"}),
+            ev(1, "FW", self.FARROWED + timedelta(days=27 + 114), {"born_alive": 10}),
+        ]
+        p = schedule.boar_performance("D6", events)
+        assert p["matings"] == 2
+        assert p["litters"] == 2
+        assert p["avgBornAlive"] == 11
+
+    def test_only_matings_by_this_boar_are_counted(self):
+        events = [
+            ev(1, "MT", self.MATED, {"boar_tag": "D6"}),
+            ev(1, "FW", self.FARROWED, {"born_alive": 12}),
+            ev(1, "WN", self.FARROWED + timedelta(days=22), {"weaned": 11}),
+            ev(1, "MT", self.FARROWED + timedelta(days=27), {"boar_tag": "D9"}),
+        ]
+        p = schedule.boar_performance("D6", events)
+        assert p["matings"] == 1
+        assert p["litters"] == 1
+
+    def test_sows_mated_counts_distinct_sows_not_matings(self):
+        """同一頭母豬重配(例如驗孕陰性後再配一次)不能讓配過的母豬數
+        灌水。
+        """
+        events = [
+            ev(1, "MT", self.MATED, {"boar_tag": "D6"}),
+            ev(1, "PD", self.CHECKED, {"positive": False}),
+            ev(1, "MT", self.CHECKED + timedelta(days=5), {"boar_tag": "D6"}),
+        ]
+        p = schedule.boar_performance("D6", events)
+        assert p["matings"] == 2
+        assert p["sowsMated"] == 1
+
+    def test_matings_across_different_sows_all_count(self):
+        events = [
+            ev(1, "MT", self.MATED, {"boar_tag": "D6"}),
+            ev(2, "MT", self.MATED, {"boar_tag": "D6"}),
+        ]
+        p = schedule.boar_performance("D6", events)
+        assert p["matings"] == 2
+        assert p["sowsMated"] == 2
+
+    def test_excluded_events_are_ignored(self):
+        """匯入時判定為離群值的記錄不該算進公豬的績效。"""
+        events = [ev(1, "MT", self.MATED, {"boar_tag": "D6"}, excluded=True)]
+        assert schedule.boar_performance("D6", events) is None
+
+    def test_a_later_mating_ends_the_previous_attempts_result_window(self):
+        """下一次配種之後才發生的驗孕不該算進上一次配種的結果 ——
+        那筆驗孕是針對新的這次配種。
+        """
+        events = [
+            ev(1, "MT", self.MATED, {"boar_tag": "D6"}),
+            ev(1, "MT", self.MATED + timedelta(days=1), {"boar_tag": "D9"}),
+            ev(1, "PD", self.CHECKED, {"positive": True}),
+        ]
+        p6 = schedule.boar_performance("D6", events)
+        p9 = schedule.boar_performance("D9", events)
+        assert p6["checked"] == 0
+        assert p9["checked"] == 1
 
 
 class TestTierWithinFarm:

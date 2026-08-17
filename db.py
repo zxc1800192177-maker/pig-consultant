@@ -90,13 +90,20 @@ CREATE INDEX IF NOT EXISTS health_checks_farm_idx ON health_checks (farm_id, cre
 
 -- ── v2:母豬場管理 ──
 
+-- 三個區域各自有編號的欄位:配種區(mating)、待產區(gestation)、
+-- 產房(farrowing)。母豬依生產週期在三區之間搬動,搬到哪個編號由
+-- 牧場主自己選(見 server.py _add_event 對 MV 事件的處理)。
 CREATE TABLE IF NOT EXISTS pens (
   id SERIAL PRIMARY KEY,
   farm_id INTEGER NOT NULL REFERENCES farms(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  zone TEXT NOT NULL DEFAULT 'farrowing',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS pens_farm_idx ON pens (farm_id, name);
+CREATE INDEX IF NOT EXISTS pens_farm_idx ON pens (farm_id, zone, name);
+
+-- 既有資料庫沒有這一欄,建表語句對它們不生效。
+ALTER TABLE pens ADD COLUMN IF NOT EXISTS zone TEXT NOT NULL DEFAULT 'farrowing';
 
 -- 耳號不是唯一鍵:離群時會加上民國年後綴(2580 → 2580-D115),裸號釋放
 -- 給新豬(見 specs/v2-facts.md 第 6 條)。因此唯一鍵要帶進場日期,
@@ -296,11 +303,11 @@ class Store:
     def set_farm_settings(self, farm_id: int, settings: dict) -> None:
         raise NotImplementedError
 
-    # --- 產房欄位 ---
-    def add_pen(self, farm_id: int, name: str) -> int:
+    # --- 產房欄位(配種區/待產區/產房三個區域) ---
+    def add_pen(self, farm_id: int, name: str, zone: str = "farrowing") -> int:
         raise NotImplementedError
 
-    def list_pens(self, farm_id: int) -> List[dict]:
+    def list_pens(self, farm_id: int, zone: Optional[str] = None) -> List[dict]:
         raise NotImplementedError
 
     def delete_pen(self, farm_id: int, pen_id: int) -> bool:
@@ -332,10 +339,27 @@ class Store:
                  sire_tag="", dam_tag="") -> int:
         raise NotImplementedError
 
-    def list_boars(self, farm_id: int) -> List[dict]:
+    def list_boars(self, farm_id: int, status: Optional[str] = None) -> List[dict]:
+        raise NotImplementedError
+
+    def get_boar(self, farm_id: int, boar_id: int) -> Optional[dict]:
         raise NotImplementedError
 
     def find_boar_by_tag(self, farm_id: int, ear_tag: str) -> Optional[dict]:
+        raise NotImplementedError
+
+    def update_boar(self, farm_id: int, boar_id: int, **fields) -> bool:
+        raise NotImplementedError
+
+    # --- 公豬事件 ---
+    def add_boar_event(self, farm_id, boar_id, event_type, event_date,
+                       detail=None, recorded_by=None) -> int:
+        raise NotImplementedError
+
+    def list_boar_events(self, farm_id: int, boar_id: Optional[int] = None) -> List[dict]:
+        raise NotImplementedError
+
+    def delete_boar_event(self, farm_id: int, event_id: int) -> bool:
         raise NotImplementedError
 
     # --- 母豬事件 ---
@@ -557,13 +581,16 @@ class InMemoryStore(Store):
     def set_farm_settings(self, farm_id, settings) -> None:
         self.farm_settings[farm_id] = dict(settings)
 
-    def add_pen(self, farm_id, name) -> int:
+    def add_pen(self, farm_id, name, zone="farrowing") -> int:
         pen_id = self._new_id("pen")
-        self.pens.append({"id": pen_id, "farm_id": farm_id, "name": name})
+        self.pens.append({"id": pen_id, "farm_id": farm_id, "name": name, "zone": zone})
         return pen_id
 
-    def list_pens(self, farm_id):
-        return [dict(p) for p in self._owned(self.pens, farm_id)]
+    def list_pens(self, farm_id, zone=None):
+        rows = self._owned(self.pens, farm_id)
+        if zone is not None:
+            rows = [p for p in rows if p["zone"] == zone]
+        return [dict(p) for p in rows]
 
     def delete_pen(self, farm_id, pen_id) -> bool:
         before = len(self.pens)
@@ -633,12 +660,49 @@ class InMemoryStore(Store):
         })
         return boar_id
 
-    def list_boars(self, farm_id):
-        return [dict(b) for b in self._owned(self.boars, farm_id)]
+    def list_boars(self, farm_id, status=None):
+        rows = self._owned(self.boars, farm_id)
+        if status is not None:
+            rows = [r for r in rows if r["status"] == status]
+        return [dict(r) for r in rows]
+
+    def get_boar(self, farm_id, boar_id):
+        rows = self._owned(self.boars, farm_id, id=boar_id)
+        return dict(rows[0]) if rows else None
 
     def find_boar_by_tag(self, farm_id, ear_tag):
         rows = self._owned(self.boars, farm_id, ear_tag=ear_tag)
         return dict(rows[0]) if rows else None
+
+    def update_boar(self, farm_id, boar_id, **fields) -> bool:
+        rows = self._owned(self.boars, farm_id, id=boar_id)
+        if not rows:
+            return False
+        rows[0].update(fields)
+        return True
+
+    def add_boar_event(self, farm_id, boar_id, event_type, event_date,
+                       detail=None, recorded_by=None) -> int:
+        event_id = self._new_id("boar_event")
+        self.boar_events.append({
+            "id": event_id, "farm_id": farm_id, "boar_id": boar_id,
+            "event_type": event_type, "event_date": event_date,
+            "detail": dict(detail or {}), "recorded_by": recorded_by, "excluded": False,
+        })
+        return event_id
+
+    def list_boar_events(self, farm_id, boar_id=None):
+        rows = self._owned(self.boar_events, farm_id)
+        if boar_id is not None:
+            rows = [r for r in rows if r["boar_id"] == boar_id]
+        rows.sort(key=lambda r: (r["event_date"], r["id"]))
+        return [dict(r) for r in rows]
+
+    def delete_boar_event(self, farm_id, event_id) -> bool:
+        before = len(self.boar_events)
+        self.boar_events = [e for e in self.boar_events
+                            if not (e["id"] == event_id and e["farm_id"] == farm_id)]
+        return len(self.boar_events) < before
 
     def add_sow_event(self, farm_id, sow_id, event_type, event_date,
                       detail=None, recorded_by=None, seq=0) -> int:
@@ -966,18 +1030,22 @@ class PostgresStore(Store):
             conn.execute("UPDATE users SET farm_id = %s, role = %s WHERE id = %s",
                          (farm_id, role, user_id))
 
-    def add_pen(self, farm_id, name) -> int:
+    def add_pen(self, farm_id, name, zone="farrowing") -> int:
         with self._connect() as conn:
             return conn.execute(
-                "INSERT INTO pens (farm_id, name) VALUES (%s, %s) RETURNING id",
-                (farm_id, name)).fetchone()[0]
+                "INSERT INTO pens (farm_id, name, zone) VALUES (%s, %s, %s) RETURNING id",
+                (farm_id, name, zone)).fetchone()[0]
 
-    def list_pens(self, farm_id):
+    PEN_COLS = "id, farm_id, name, zone"
+
+    def list_pens(self, farm_id, zone=None):
+        sql = f"SELECT {self.PEN_COLS} FROM pens WHERE farm_id = %s"
+        args = [farm_id]
+        if zone is not None:
+            sql += " AND zone = %s"
+            args.append(zone)
         with self._connect() as conn:
-            cur = conn.execute(
-                "SELECT id, farm_id, name FROM pens WHERE farm_id = %s ORDER BY name",
-                (farm_id,))
-            return self._rows(cur, "id, farm_id, name")
+            return self._rows(conn.execute(sql + " ORDER BY zone, name", args), self.PEN_COLS)
 
     def delete_pen(self, farm_id, pen_id) -> bool:
         with self._connect() as conn:
@@ -1053,11 +1121,21 @@ class PostgresStore(Store):
 
     BOAR_COLS = "id, farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag, status"
 
-    def list_boars(self, farm_id):
+    def list_boars(self, farm_id, status=None):
+        sql = f"SELECT {self.BOAR_COLS} FROM boars WHERE farm_id = %s"
+        args = [farm_id]
+        if status is not None:
+            sql += " AND status = %s"
+            args.append(status)
         with self._connect() as conn:
-            return self._rows(conn.execute(
-                f"SELECT {self.BOAR_COLS} FROM boars WHERE farm_id = %s ORDER BY ear_tag",
-                (farm_id,)), self.BOAR_COLS)
+            return self._rows(conn.execute(sql + " ORDER BY ear_tag", args), self.BOAR_COLS)
+
+    def get_boar(self, farm_id, boar_id):
+        with self._connect() as conn:
+            rows = self._rows(conn.execute(
+                f"SELECT {self.BOAR_COLS} FROM boars WHERE farm_id = %s AND id = %s",
+                (farm_id, boar_id)), self.BOAR_COLS)
+        return rows[0] if rows else None
 
     def find_boar_by_tag(self, farm_id, ear_tag):
         with self._connect() as conn:
@@ -1065,6 +1143,52 @@ class PostgresStore(Store):
                 f"SELECT {self.BOAR_COLS} FROM boars WHERE farm_id = %s AND ear_tag = %s",
                 (farm_id, ear_tag)), self.BOAR_COLS)
         return rows[0] if rows else None
+
+    def update_boar(self, farm_id, boar_id, **fields) -> bool:
+        allowed = {"ear_tag", "entry_date", "breed", "sire_tag", "dam_tag", "status"}
+        bad = set(fields) - allowed
+        if bad:                       # 欄位名直接進 SQL,必須先過白名單
+            raise ValueError(f"不允許更新的欄位:{sorted(bad)}")
+        if not fields:
+            return False
+        sets = ", ".join(f"{k} = %s" for k in fields)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"UPDATE boars SET {sets} WHERE id = %s AND farm_id = %s RETURNING id",
+                list(fields.values()) + [boar_id, farm_id]).fetchone()
+            return row is not None
+
+    BOAR_EVENT_COLS = ("id, farm_id, boar_id, event_type, event_date, detail,"
+                       " recorded_by, excluded")
+
+    def add_boar_event(self, farm_id, boar_id, event_type, event_date,
+                       detail=None, recorded_by=None) -> int:
+        with self._connect() as conn:
+            return conn.execute(
+                "INSERT INTO boar_events (farm_id, boar_id, event_type, event_date,"
+                " detail, recorded_by) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+                (farm_id, boar_id, event_type, event_date,
+                 Jsonb(detail or {}), recorded_by)).fetchone()[0]
+
+    def list_boar_events(self, farm_id, boar_id=None):
+        sql = f"SELECT {self.BOAR_EVENT_COLS} FROM boar_events WHERE farm_id = %s"
+        args = [farm_id]
+        if boar_id is not None:
+            sql += " AND boar_id = %s"; args.append(boar_id)
+        with self._connect() as conn:
+            rows = self._rows(conn.execute(sql + " ORDER BY event_date, id", args),
+                              self.BOAR_EVENT_COLS)
+        for r in rows:
+            if not isinstance(r["detail"], dict):
+                r["detail"] = json.loads(r["detail"])
+        return rows
+
+    def delete_boar_event(self, farm_id, event_id) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "DELETE FROM boar_events WHERE id = %s AND farm_id = %s RETURNING id",
+                (event_id, farm_id)).fetchone()
+            return row is not None
 
     def add_sow_event(self, farm_id, sow_id, event_type, event_date,
                       detail=None, recorded_by=None, seq=0) -> int:

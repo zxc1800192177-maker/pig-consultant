@@ -32,8 +32,16 @@ DEFAULTS = {
     "preg_check_days": 26,        # 配種 → 驗孕
     "open_sow_alert_days": 30,    # 離乳/驗孕陰性後多久沒動作要提醒
 
-    # 總產房數量。**0 代表還沒設定**,不是「一欄都沒有」—— 不知道容量時
-    # 不可以宣稱空間不足(見 pen_pressure)。
+    # 確認懷孕(驗孕陽性)後幾天,從配種區移至待產區。**只認陽性驗孕記錄**
+    # (使用者決定)—— 這個場很多母豬從沒驗孕過,若配種滿 60 天不管有沒有
+    # 驗過都觸發,會提醒大量根本不確定有沒有懷孕的母豬搬去待產區。
+    "to_gestation_zone_days": 60,
+
+    # 總產房欄位數。**使用者自己填,不是算出來的**(使用者決定)——
+    # 移欄記錄(pens 表)只會累積「曾經被記錄過的欄位名稱」,牧場實際的
+    # 產房總數在還沒被移欄記錄提到之前不會出現在那份清單裡,拿清單長度
+    # 當總數會系統性低估,「產房空間不足」的提醒會失真(憲法第三條)。
+    # 0 表示未設定,不宣稱空間夠或不夠。
     "farrowing_pens": 0,
 
     # 「值得檢視」的判準。門檻量自這個牧場的實際分布(451 頭在場母豬):
@@ -50,21 +58,39 @@ DEFAULTS = {
     "review_min_herd": 10,         # 全場不足這個頭數就不比活仔數(見下)
 }
 
-# 事件代碼(沿用 PigCHAMP,匯入才對得起來)
+# 事件代碼(沿用 PigCHAMP,匯入才對得起來)。MOVE_PEN 是本系統自己的
+# 代碼,不是 PigCHAMP 原生代碼(匯入的檔案不會產生它,不會撞號)。
 MATE, PREG_CHECK, FARROW, WEAN = "MT", "PD", "FW", "WN"
 PIGLET_LOSS, DEATH, CULL, ABORT = "PL", "DTH", "SAL", "AB"
+MOVE_PEN = "MV"
 EXIT_EVENTS = (DEATH, CULL)
 
+# 三個區域。母豬依生產週期在三者之間搬動,移欄記錄時要指定 zone
+# (見 server.py 對 MOVE_PEN 事件的處理)。
+ZONE_MATING, ZONE_GESTATION, ZONE_FARROWING = "mating", "gestation", "farrowing"
+ZONES = (ZONE_MATING, ZONE_GESTATION, ZONE_FARROWING)
+
 # 工作類型
-MOVE_IN, INDUCE, FARROW_DUE, WEAN_DUE, MATE_DUE, CHECK_DUE = (
-    "move_in", "induce", "farrow", "wean", "mate", "preg_check")
+(MOVE_IN, INDUCE, FARROW_DUE, WEAN_DUE, MATE_DUE, CHECK_DUE,
+ MOVE_TO_MATING, MOVE_TO_GESTATION) = (
+    "move_in", "induce", "farrow", "wean", "mate", "preg_check",
+    "move_to_mating", "move_to_gestation")
 
 # 可以記錄的事件代碼。server.py 用它擋掉不認得的類型 ——
 # 前端送什麼過來都不可信(憲法第四條)。
 KNOWN_EVENTS = frozenset({
     MATE, PREG_CHECK, FARROW, WEAN, PIGLET_LOSS,
-    DEATH, CULL, ABORT, "GA", "FON", "FOF",
+    DEATH, CULL, ABORT, "GA", "FON", "FOF", MOVE_PEN,
 })
+
+# 公豬專屬的事件代碼:SC 採精。跟母豬事件分開檢查 ——
+# 兩邊代碼不通用,一頭母豬不能記「採精」。
+#
+# DEATH(DTH)例外:種豬死亡不分公母是同一種事件(使用者決定「種豬死亡」
+# 跟母豬死亡合併),只是公豬跟母豬本來就存在不同資料表,所以兩邊都要
+# 認得這個代碼。
+SEMEN_COLLECT = "SC"
+KNOWN_BOAR_EVENTS = frozenset({SEMEN_COLLECT, DEATH})
 
 
 class Task(NamedTuple):
@@ -89,7 +115,8 @@ SETTING_RANGES = {
     "service_after_wean_days": (0, 60),
     "preg_check_days": (14, 60),
     "open_sow_alert_days": (7, 180),
-    "farrowing_pens": (0, 2000),   # 0 = 還沒設定
+    "to_gestation_zone_days": (7, 150),
+    "farrowing_pens": (0, 5000),
     "review_decline_litters": (1, 10),
     "review_npd_days": (10, 200),
     "review_low_alive_pct": (1, 50),
@@ -284,6 +311,15 @@ def tasks_for_sow(sow: dict, events: List[dict], cfg: dict) -> List[Task]:
                         f"懷孕第 {cfg['induction_day']} 天"))
         out.append(Task(FARROW_DUE, sid, tag, due_farrow, "預產日"))
 
+        # 移至待產區:**只認陽性驗孕**(使用者決定)。配種待驗孕的母豬
+        # 留在配種區,不會因為滿 60 天就被當成懷孕搬走 —— 這個場很多
+        # 母豬從沒驗孕過,不這樣限制的話會提醒大量根本不確定懷孕與否
+        # 的母豬搬去待產區。
+        if c["preg_positive"] and c["preg_check"]:
+            out.append(Task(MOVE_TO_GESTATION, sid, tag,
+                            c["preg_check"] + timedelta(days=cfg["to_gestation_zone_days"]),
+                            f"確認懷孕滿 {cfg['to_gestation_zone_days']} 天"))
+
     elif c["farrow"] and not c["wean"]:
         out.append(Task(WEAN_DUE, sid, tag,
                         c["farrow"] + timedelta(days=cfg["lactation_days"]),
@@ -295,6 +331,10 @@ def tasks_for_sow(sow: dict, events: List[dict], cfg: dict) -> List[Task]:
             out.append(Task(MATE_DUE, sid, tag,
                             base + timedelta(days=cfg["service_after_wean_days"]),
                             f"離乳後 {cfg['service_after_wean_days']} 天"))
+            # 移至配種區:跟該再配種同一個起算點(離乳,或驗孕陰性後
+            # 重新開放配種),但不延遲 —— 得先人在配種區才配得到種,
+            # 所以移動排在「該配種」之前那一刻,不是同一天以後才動作。
+            out.append(Task(MOVE_TO_MATING, sid, tag, base, "轉為待配種"))
     return out
 
 
@@ -316,7 +356,8 @@ def build_week_tasks(sows: Iterable[dict], events: Iterable[dict],
             if week_start <= task.due <= week_end:
                 buckets.setdefault(task.kind, []).append(task)
 
-    order = [INDUCE, FARROW_DUE, WEAN_DUE, MATE_DUE, CHECK_DUE, MOVE_IN]
+    order = [INDUCE, FARROW_DUE, WEAN_DUE, MATE_DUE, MOVE_TO_MATING,
+             CHECK_DUE, MOVE_TO_GESTATION, MOVE_IN]
     return [
         {"kind": kind, "tasks": sorted(buckets[kind], key=lambda t: (t.due, t.ear_tag))}
         for kind in order if kind in buckets
@@ -608,6 +649,71 @@ def sow_performance(events: List[dict]) -> Optional[dict]:
     return out
 
 
+def _mating_attempts(sow_id: int, events: List[dict]) -> List[dict]:
+    """把一頭母豬的完整配種史切成一次次嘗試:從一次配種到下一次配種
+    (不含)之間發生的事都算這一次的結果。
+
+    跟 current_cycle 不一樣 —— 那裡只看她**目前**這一輪,這裡要看她
+    **一輩子**配過的每一次,不論配的公豬換過幾頭,才算得出公豬的
+    終身配種績效。
+    """
+    attempts: List[dict] = []
+    cur: Optional[dict] = None
+    for e in events:
+        code = e["event_type"]
+        if code == MATE:
+            if cur is not None:
+                attempts.append(cur)
+            cur = {"sow_id": sow_id,
+                  "boar_tag": (e.get("detail") or {}).get("boar_tag") or "",
+                  "date": e["event_date"], "positive": None,
+                  "farrowed": False, "born_alive": None}
+        elif cur is not None:
+            if code == PREG_CHECK:
+                pos = (e.get("detail") or {}).get("positive")
+                if pos is not None:
+                    cur["positive"] = pos
+            elif code == FARROW:
+                cur["farrowed"] = True
+                v = (e.get("detail") or {}).get("born_alive")
+                if isinstance(v, int):
+                    cur["born_alive"] = v
+    if cur is not None:
+        attempts.append(cur)
+    return attempts
+
+
+def boar_performance(boar_tag: str, events: Iterable[dict]) -> Optional[dict]:
+    """一頭公豬的配種績效。從母豬那邊的配種記錄比對公豬耳號算出來的
+    ——MT 事件本來就記了 boar_tag,不必另外猜。
+
+    **只用有結果的嘗試算比率**:還沒驗孕、還沒到預產期的最新一次配種
+    結果未知,不能當失敗算(憲法第三條)。`checked`/`litters` 各自的
+    分母只算真的有那項結果的嘗試,不是全部配種次數。
+    """
+    if not boar_tag:
+        return None
+
+    attempts = [a for sow_id, evs in _by_sow(events).items()
+               for a in _mating_attempts(sow_id, evs) if a["boar_tag"] == boar_tag]
+    if not attempts:
+        return None
+
+    checked = [a for a in attempts if a["positive"] is not None]
+    farrowed = [a for a in attempts if a["farrowed"]]
+    litters = [a["born_alive"] for a in farrowed if a["born_alive"] is not None]
+
+    return {
+        "matings": len(attempts),
+        "sowsMated": len({a["sow_id"] for a in attempts}),
+        "checked": len(checked),
+        "positiveRate": (sum(1 for a in checked if a["positive"]) / len(checked) * 100
+                         if checked else None),
+        "litters": len(farrowed),
+        "avgBornAlive": sum(litters) / len(litters) if litters else None,
+    }
+
+
 def tier_within_farm(value: Optional[float], peers: List[float],
                      higher_better: bool) -> Optional[str]:
     """把一個數字放進場內的三級:good / mid / poor。
@@ -764,17 +870,21 @@ def sows_worth_review(sows: Iterable[dict], events: Iterable[dict], today: date,
     return out
 
 
-def pen_pressure(sows: Iterable[dict], events: Iterable[dict],
+def pen_pressure(sows: Iterable[dict], events: Iterable[dict], pens: Iterable[dict],
                  today: date, settings: Optional[dict] = None) -> dict:
     """產房空間是否夠用。
 
-    容量是設定裡的**一個總數**(`farrowing_pens`)。原本設計成逐欄位追蹤,
-    但實際上從來沒有任何地方把母豬指派到特定欄位 —— `sows.pen_id` 只在
-    離乳與離群時被清空,沒有人寫入過,所以「還空著哪幾欄」永遠是列出全部
-    欄位,等於沒有資訊。改成總數之後,牧場主只要填一個數字就能用。
+    **總欄數是使用者在設定裡自己填的「總產房數」**(使用者決定)——
+    不是算出來的。這裡曾經拿 pens 資料表裡「已經被移欄記錄提到的欄位
+    名稱」數量當總數,但那份清單只會累積曾經打過的編號,牧場實際的
+    總欄數在還沒被記錄過之前不會出現在清單裡,用清單長度當總數會
+    系統性低估。
 
-    **`farrowing_pens` 為 0 代表還沒設定,不是「一欄都沒有」。** 不知道
-    容量時不可以宣稱空間不足 —— 那會是憑空捏造的警示(憲法第三條)。
+    **佔用**仍然來自真實的欄位指派(`sows.pen_id` → 產房區的
+    `pens`,由 MOVE_PEN 事件維護,見 server.py),不是猜的。
+
+    **沒有設定總產房數時不宣稱空間不足**。不知道容量時憑空給一個
+    警示是捏造的(憲法第三條)。
     """
     cfg = settings_with_defaults(settings)
     grouped = _by_sow(events)
@@ -782,24 +892,24 @@ def pen_pressure(sows: Iterable[dict], events: Iterable[dict],
     total = cfg["farrowing_pens"]
     configured = total > 0
 
+    farrowing_pen_ids = {p["id"] for p in pens
+                         if p.get("zone", ZONE_FARROWING) == ZONE_FARROWING}
+    occupied = sum(1 for s in sows if s.get("status") in (None, "active")
+                  and s.get("pen_id") in farrowing_pen_ids)
+    free = max(0, total - occupied)
+
     horizon = today + timedelta(days=cfg["pre_farrow_move_days"])
     incoming = 0
-    occupied = 0
     for sow in sows:
         if sow.get("status") not in (None, "active"):
             continue
         c = current_cycle(grouped.get(sow["id"], []))
-        # 已經在產房裡的:分娩了還沒離乳,那頭豬正佔著一個欄位。
-        if c["farrow"] and not c["wean"]:
-            occupied += 1
-            continue
         if c["mate"] and not c["farrow"]:
             due = c["mate"] + timedelta(days=cfg["gestation_days"]
                                         - cfg["pre_farrow_move_days"])
             if today <= due <= horizon:
                 incoming += 1
 
-    free = max(0, total - occupied)
     return {
         "configured": configured,
         "total": total,

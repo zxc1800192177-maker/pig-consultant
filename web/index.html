@@ -138,9 +138,17 @@
       <div class="label" style="margin-top:20px">例外事件</div>
       <div class="rec-grid">
         <div class="rec rec-warn" data-rec="PL"><span class="ic">💔</span><span class="nm">仔豬死亡</span></div>
-        <div class="rec rec-warn" data-rec="DTH"><span class="ic">☠</span><span class="nm">母豬死亡</span></div>
+        <div class="rec rec-warn" data-rec="DTH"><span class="ic">☠</span><span class="nm">種豬死亡</span></div>
         <div class="rec rec-warn" data-rec="AB"><span class="ic">⚠</span><span class="nm">流產</span></div>
         <div class="rec" data-rec="SAL"><span class="ic">📤</span><span class="nm">淘汰</span></div>
+      </div>
+      <div class="label" style="margin-top:20px">場務</div>
+      <div class="rec-grid">
+        <div class="rec" data-rec="MV"><span class="ic">🔀</span><span class="nm">移欄</span></div>
+      </div>
+      <div class="label" style="margin-top:20px">公豬</div>
+      <div class="rec-grid">
+        <div class="rec" data-rec="SC"><span class="ic">🧪</span><span class="nm">採精</span></div>
       </div>
       <p class="hint" style="margin-top:16px">記錄下去就算完成,不必另外勾選。</p>
     </div>
@@ -155,10 +163,14 @@
     </div>
   </section>
 
-  <!-- ══ 母豬 ══ -->
+  <!-- ══ 母豬 / 公豬 ══ -->
   <section id="panel-sows" class="panel is-hidden" role="tabpanel">
     <div class="card">
-      <h2>母豬資訊</h2>
+      <div class="seg" id="animalToggle">
+        <button type="button" class="seg-b is-active" data-animal-view="sow">母豬</button>
+        <button type="button" class="seg-b" data-animal-view="boar">公豬</button>
+      </div>
+      <h2 id="animalHeading" style="margin-top:14px">母豬資訊</h2>
       <p class="hint" id="sowCount">載入中…</p>
       <input class="search" id="sowSearch" placeholder="搜尋耳號…"
              autocapitalize="off" autocorrect="off" spellcheck="false">

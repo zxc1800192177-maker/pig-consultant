@@ -9,6 +9,8 @@ import { describe, it } from "node:test";
 import {
   TIMELINE_LIMIT,
   alertRow,
+  boarPerformanceGrid,
+  boarRow,
   buildAlerts,
   customTaskRow,
   customTaskSetting,
@@ -33,6 +35,8 @@ describe("事件代碼轉中文", () => {
   it("認得的代碼換成中文", () => {
     assert.equal(eventName("FW"), "分娩");
     assert.equal(eventName("WN"), "離乳");
+    assert.equal(eventName("MV"), "移欄");
+    assert.equal(eventName("SC"), "採精");
   });
 
   it("不認得的代碼原樣顯示,不顯示 undefined", () => {
@@ -159,6 +163,92 @@ describe("事件細節整理", () => {
 
   it("沒有細節就回空字串", () => {
     assert.equal(describeEvent(ev()), "");
+  });
+
+  it("移欄顯示移去的欄位名稱(伺服器存的快照)", () => {
+    const text = describeEvent(ev({
+      type: "MV", detail: { pen_id: 5, pen_name: "配-01", zone: "mating" },
+    }));
+    assert.ok(text.includes("移至 配-01"));
+  });
+
+  it("採精顯示採精量、活力、濃度、劑量", () => {
+    const text = describeEvent(ev({
+      type: "SC", detail: { volume: 15, motility: 80, concentration: 3.5, doses: 3 },
+    }));
+    assert.ok(text.includes("採精量 15 ml"));
+    assert.ok(text.includes("活力 80%"));
+    assert.ok(text.includes("濃度 3.5 億/mL"));
+    assert.ok(text.includes("3 劑"));
+  });
+});
+
+describe("公豬清單的一列", () => {
+  it("畫出耳號與品種", () => {
+    const html = boarRow({ id: 1, earTag: "D6", breed: "Duroc" });
+    assert.ok(html.includes("D6"));
+    assert.ok(html.includes("Duroc"));
+  });
+
+  it("沒有品種顯示破折號", () => {
+    assert.ok(boarRow({ id: 1, earTag: "D6" }).includes("—"));
+  });
+
+  it("耳號有跳脫", () => {
+    const html = boarRow({ id: 1, earTag: "<img src=x>", breed: "Duroc" });
+    assert.doesNotMatch(html, /<img/);
+  });
+
+  it("在場公豬不帶標記", () => {
+    assert.doesNotMatch(boarRow({ id: 1, earTag: "D6", status: "active" }),
+      /sow-exited-badge/);
+    assert.doesNotMatch(boarRow({ id: 1, earTag: "D6" }), /sow-exited-badge/);
+  });
+
+  it("死亡的公豬帶「已死亡」標記 —— 沒有「淘汰」這個獨立狀態", () => {
+    const html = boarRow({ id: 1, earTag: "D6-D115", status: "dead" });
+    assert.match(html, /已死亡/);
+    assert.match(html, /class="sow-row is-exited"/);
+  });
+});
+
+describe("公豬卡的配種績效", () => {
+  const perf = (over = {}) => ({
+    matings: 12, sowsMated: 9, checked: 3, positiveRate: 66.7,
+    litters: 5, avgBornAlive: 11.2, basis: "由母豬那邊的配種記錄比對耳號算出來,非 AI 生成",
+    ...over,
+  });
+
+  it("沒有配種記錄就整區不畫", () => {
+    assert.equal(boarPerformanceGrid(null), "");
+  });
+
+  it("驗孕陽性率的標籤直接寫出樣本數,不是只列一個百分比", () => {
+    // 樣本數小時單看百分比容易誤讀成「這頭公豬配種成功率低」,
+    // 其實只是很少被驗過
+    const html = boarPerformanceGrid(perf());
+    assert.ok(html.includes("驗孕陽性率(3 次)"));
+    assert.ok(html.includes("67"));
+  });
+
+  it("沒有驗孕記錄時陽性率顯示破折號,不是 0%", () => {
+    const html = boarPerformanceGrid(perf({ checked: 0, positiveRate: null }));
+    assert.ok(html.includes("驗孕陽性率(0 次)"));
+    assert.match(html, /v-none/);
+  });
+
+  it("沒有分娩記錄時平均活仔數顯示破折號", () => {
+    const html = boarPerformanceGrid(perf({ litters: 0, avgBornAlive: null }));
+    assert.match(html, /v-none/);
+  });
+
+  it("不分級 —— 沒有 tier 標籤", () => {
+    assert.doesNotMatch(boarPerformanceGrid(perf()), /class="tier/);
+  });
+
+  it("說明文字來自後端,不是前端自己維護一份", () => {
+    const html = boarPerformanceGrid(perf({ basis: "測試依據文字" }));
+    assert.ok(html.includes("測試依據文字"));
   });
 });
 
@@ -355,6 +445,18 @@ describe("母豬目前狀態", () => {
 
   it("文字有跳脫", () => {
     assert.doesNotMatch(statusPills(status({ label: "<img src=x>" })), /<img/);
+  });
+
+  it("有指派欄位時顯示區域跟欄位名稱", () => {
+    const html = statusPills(status({
+      pen: { name: "配-01", zone: "mating", zoneLabel: "配種區" },
+    }));
+    assert.ok(html.includes("配種區"));
+    assert.ok(html.includes("配-01"));
+  });
+
+  it("沒有指派欄位就不畫那顆膠囊", () => {
+    assert.doesNotMatch(statusPills(status({ pen: null })), /配種區|待產區|產房/);
   });
 });
 

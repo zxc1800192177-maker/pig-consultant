@@ -321,6 +321,243 @@ class TestEventSideEffects:
         assert _post(app, "/api/sows", {"earTag": "2580"}, token)[0] == 200
 
 
+class TestPenZones:
+    """三個區域各自有編號的欄位。新增欄位要指定 zone,母豬卡跟提醒都要
+    看得出目前是哪個區域。
+    """
+
+    def test_add_pen_with_a_zone(self, farm):
+        app, token, _ = farm
+        assert _post(app, "/api/pens",
+                     {"name": "配-01", "zone": "mating"}, token)[0] == 200
+        pens = app.handle_get("/api/pens", token)[1]["pens"]
+        assert pens[0]["zone"] == "mating"
+        assert pens[0]["zoneLabel"] == "配種區"
+
+    def test_default_zone_is_farrowing(self, farm):
+        """沒指定 zone 時退回產房 —— 這是原本唯一存在過的區域,舊資料
+        (若有)不該因為新增了 zone 概念而變成不知道自己是哪一區。
+        """
+        app, token, _ = farm
+        _post(app, "/api/pens", {"name": "01"}, token)
+        assert app.handle_get("/api/pens", token)[1]["pens"][0]["zone"] == "farrowing"
+
+    def test_unknown_zone_is_rejected(self, farm):
+        app, token, _ = farm
+        assert _post(app, "/api/pens",
+                     {"name": "01", "zone": "隨便寫"}, token)[0] == 400
+
+    def test_filter_by_zone(self, farm):
+        app, token, _ = farm
+        _post(app, "/api/pens", {"name": "配-01", "zone": "mating"}, token)
+        _post(app, "/api/pens", {"name": "產-01", "zone": "farrowing"}, token)
+        mating = app.handle_get("/api/pens?zone=mating", token)[1]["pens"]
+        assert [p["name"] for p in mating] == ["配-01"]
+
+    def test_occupant_is_reported(self, farm):
+        app, token, farm_id = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "2580"}, token)[1]["id"]
+        pen_id = _post(app, "/api/pens", {"name": "產-01"}, token)[1]["id"]
+        app.store.update_sow(farm_id, sow_id, pen_id=pen_id)
+
+        pens = app.handle_get("/api/pens", token)[1]["pens"]
+        assert pens[0]["occupant"] == {"sowId": sow_id, "earTag": "2580"}
+
+    def test_empty_pen_has_no_occupant(self, farm):
+        app, token, _ = farm
+        _post(app, "/api/pens", {"name": "產-01"}, token)
+        assert app.handle_get("/api/pens", token)[1]["pens"][0]["occupant"] is None
+
+    def test_delete(self, farm):
+        app, token, _ = farm
+        pen_id = _post(app, "/api/pens", {"name": "產-01"}, token)[1]["id"]
+        assert app.handle_delete(f"/api/pens/{pen_id}", token)[0] == 200
+        assert app.handle_get("/api/pens", token)[1]["pens"] == []
+
+    def test_delete_missing_is_404(self, farm):
+        app, token, _ = farm
+        assert app.handle_delete("/api/pens/999", token)[0] == 404
+
+    def test_deleting_an_occupied_pen_frees_the_sow(self, farm):
+        """欄位設定錯誤不該擋住刪除 —— 母豬還在,只是欄位不存在了。"""
+        app, token, farm_id = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "2580"}, token)[1]["id"]
+        pen_id = _post(app, "/api/pens", {"name": "產-01"}, token)[1]["id"]
+        app.store.update_sow(farm_id, sow_id, pen_id=pen_id)
+
+        assert app.handle_delete(f"/api/pens/{pen_id}", token)[0] == 200
+        status = app.handle_get(f"/api/sows/{sow_id}", token)[1]["status"]
+        assert status["pen"] is None
+
+    def test_worker_cannot_delete(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        pen_id = _post(app, "/api/pens", {"name": "產-01"}, owner)[1]["id"]
+        assert app.handle_delete(f"/api/pens/{pen_id}", worker)[0] == 403
+
+
+class TestMovePenEvent:
+    """移欄:直接打欄位編號,不必先到設定頁一個一個新增 —— 一區動輒
+    幾百個欄位,要求先手動建一輪根本不會有人做(使用者要求)。第一次
+    打到的編號自動建立,之後同一區打同樣編號會找到同一個欄位。
+    """
+
+    @pytest.fixture
+    def setup(self, farm):
+        app, token, farm_id = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "2580"}, token)[1]["id"]
+        return app, token, farm_id, sow_id
+
+    @staticmethod
+    def move(app, token, sow_id, date, zone="mating", pen_name="配-05"):
+        return _post(app, "/api/sow-events",
+                     {"sowId": sow_id, "type": "MV", "date": date,
+                      "detail": {"zone": zone, "pen_name": pen_name}}, token)
+
+    def test_typing_a_new_name_creates_the_pen(self, setup):
+        app, token, farm_id, sow_id = setup
+        body = self.move(app, token, sow_id, "2026-08-19")[1]
+        assert body["sow"]["penId"] is not None
+
+        pens = app.handle_get("/api/pens", token)[1]["pens"]
+        assert [p["name"] for p in pens] == ["配-05"]
+        assert pens[0]["zone"] == "mating"
+        assert pens[0]["occupant"]["sowId"] == sow_id
+
+    def test_typing_the_same_name_again_reuses_the_pen(self, setup):
+        """打過的編號不會越用越多筆 —— 同一區同樣的名字要找到同一個欄位。"""
+        app, token, farm_id, sow_id = setup
+        first = self.move(app, token, sow_id, "2026-08-18")[1]["sow"]["penId"]
+
+        other_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        app.store.update_sow(farm_id, sow_id, pen_id=None)  # 讓 2580 先騰出來
+        second = self.move(app, token, other_id, "2026-08-19")[1]["sow"]["penId"]
+
+        assert first == second
+        assert len(app.handle_get("/api/pens", token)[1]["pens"]) == 1
+
+    def test_same_name_in_different_zones_are_different_pens(self, setup):
+        """名字只在同一區內找得到同一個欄位 —— 配種區的「1」跟產房的
+        「1」是兩個不同的地方。
+        """
+        app, token, _, sow_id = setup
+        self.move(app, token, sow_id, "2026-08-19", zone="mating", pen_name="1")
+        pens = app.handle_get("/api/pens", token)[1]["pens"]
+        assert len(pens) == 1
+
+        other_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        self.move(app, token, other_id, "2026-08-19", zone="farrowing", pen_name="1")
+        pens = app.handle_get("/api/pens", token)[1]["pens"]
+        assert len(pens) == 2
+        assert {p["zone"] for p in pens} == {"mating", "farrowing"}
+
+    def test_detail_snapshots_the_pen_name_and_zone(self, setup):
+        """存人類看得懂的快照,不是只存 id —— 欄位之後被刪除或改名,
+        時間軸上的這筆記錄還是看得懂當時搬去了哪裡。
+        """
+        app, token, farm_id, sow_id = setup
+        self.move(app, token, sow_id, "2026-08-19")
+        pen_id = app.handle_get("/api/pens", token)[1]["pens"][0]["id"]
+
+        events = app.handle_get(f"/api/sows/{sow_id}", token)[1]["events"]
+        assert events[0]["detail"] == {"pen_id": pen_id, "pen_name": "配-05",
+                                       "zone": "mating"}
+
+    def test_missing_zone_is_rejected(self, setup):
+        app, token, _, sow_id = setup
+        status, _ = _post(app, "/api/sow-events",
+                          {"sowId": sow_id, "type": "MV", "date": "2026-08-19",
+                           "detail": {"pen_name": "配-05"}}, token)
+        assert status == 400
+
+    def test_unknown_zone_is_rejected(self, setup):
+        app, token, _, sow_id = setup
+        status, _ = self.move(app, token, sow_id, "2026-08-19", zone="隨便寫")
+        assert status == 400
+
+    def test_missing_pen_name_is_rejected(self, setup):
+        app, token, _, sow_id = setup
+        status, _ = _post(app, "/api/sow-events",
+                          {"sowId": sow_id, "type": "MV", "date": "2026-08-19",
+                           "detail": {"zone": "mating"}}, token)
+        assert status == 400
+
+    def test_occupied_pen_is_rejected(self, setup):
+        """一個欄位不能同時有兩頭豬 —— 否則佔用數會算錯。"""
+        app, token, farm_id, sow_id = setup
+        self.move(app, token, sow_id, "2026-08-19")
+
+        other_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        status, body = self.move(app, token, other_id, "2026-08-19")
+        assert status == 409
+        assert "2580" in body["error"]
+
+    def test_moving_to_her_own_current_pen_is_allowed(self, setup):
+        """重複記錄同一次搬遷(例如網路重送)不該被自己的佔用擋下來。"""
+        app, token, farm_id, sow_id = setup
+        self.move(app, token, sow_id, "2026-08-18")
+        status, _ = self.move(app, token, sow_id, "2026-08-19")
+        assert status == 200
+
+    def test_a_previous_pen_is_freed_by_the_move(self, setup):
+        app, token, farm_id, sow_id = setup
+        self.move(app, token, sow_id, "2026-08-18", pen_name="配-01")
+        self.move(app, token, sow_id, "2026-08-19", pen_name="配-05")
+
+        pens = {p["name"]: p for p in app.handle_get("/api/pens", token)[1]["pens"]}
+        assert pens["配-01"]["occupant"] is None
+        assert pens["配-05"]["occupant"]["sowId"] == sow_id
+
+    def test_appears_in_the_sow_cards_status(self, setup):
+        app, token, _, sow_id = setup
+        self.move(app, token, sow_id, "2026-08-19")
+
+        status = app.handle_get(f"/api/sows/{sow_id}", token)[1]["status"]
+        assert status["pen"] == {"name": "配-05", "zone": "mating",
+                                 "zoneLabel": "配種區"}
+
+    def test_no_pen_before_any_move(self, farm):
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "2580"}, token)[1]["id"]
+        status = app.handle_get(f"/api/sows/{sow_id}", token)[1]["status"]
+        assert status["pen"] is None
+
+    def test_undo_frees_the_pen(self, setup):
+        """收回代表「這筆記錄不算數」,不是「這頭豬還留在原地」——
+        不退回的話那個欄位會一直顯示被佔用,擋住其他母豬移進去。
+        """
+        app, token, _, sow_id = setup
+        event_id = self.move(app, token, sow_id, "2026-08-19")[1]["id"]
+
+        assert app.handle_delete(f"/api/sow-events/{event_id}", token)[0] == 200
+
+        pens = app.handle_get("/api/pens", token)[1]["pens"]
+        assert pens[0]["occupant"] is None
+        status = app.handle_get(f"/api/sows/{sow_id}", token)[1]["status"]
+        assert status["pen"] is None
+
+    def test_undoing_the_latest_move_reverts_to_the_previous_pen(self, setup):
+        app, token, farm_id, sow_id = setup
+        self.move(app, token, sow_id, "2026-08-18", pen_name="配-01")
+        latest = self.move(app, token, sow_id, "2026-08-19", pen_name="配-05")[1]["id"]
+
+        assert app.handle_delete(f"/api/sow-events/{latest}", token)[0] == 200
+
+        status = app.handle_get(f"/api/sows/{sow_id}", token)[1]["status"]
+        assert status["pen"]["name"] == "配-01"
+
+    def test_undoing_an_older_move_does_not_disturb_the_current_pen(self, setup):
+        """刪掉的不是最新那筆,母豬目前實際在哪裡不該被動到。"""
+        app, token, farm_id, sow_id = setup
+        older = self.move(app, token, sow_id, "2026-08-18", pen_name="配-01")[1]["id"]
+        self.move(app, token, sow_id, "2026-08-19", pen_name="配-05")
+
+        assert app.handle_delete(f"/api/sow-events/{older}", token)[0] == 200
+
+        status = app.handle_get(f"/api/sows/{sow_id}", token)[1]["status"]
+        assert status["pen"]["name"] == "配-05"
+
+
 class TestEventValidation:
     def test_unknown_type_rejected(self, farm):
         app, token, _ = farm
@@ -370,7 +607,9 @@ class TestTasksAndAlerts:
         assert body["weekEnd"] == "2026-08-16"
 
     def test_alerts_report_pen_pressure(self, farm):
-        """產房容量來自設定裡的總數,不再是 pens 資料表的列數。"""
+        """總欄數是設定裡使用者自己填的「總產房數」,佔用來自真實的
+        欄位指派。
+        """
         app, token, _ = farm
         _post(app, "/api/settings", {"settings": {"farrowing_pens": 12}}, token)
         body = app.handle_get("/api/alerts", token)[1]
@@ -781,6 +1020,270 @@ class TestRecordPage:
         assert "wean_score" not in detail
 
 
+class TestBoarCard:
+    """公豬卡:身分、配種績效(比對母豬那邊的配種記錄)、他自己的事件
+    (採精)。
+    """
+
+    @pytest.fixture
+    def setup(self, farm):
+        app, token, farm_id = farm
+        boar_id = _post(app, "/api/boars",
+                        {"earTag": "D6", "breed": "Duroc",
+                         "sireTag": "D1", "damTag": "2416"}, token)[1]["id"]
+        return app, token, farm_id, boar_id
+
+    def test_identity_fields(self, setup):
+        app, token, _, boar_id = setup
+        body = app.handle_get(f"/api/boars/{boar_id}", token)[1]["boar"]
+        assert body["earTag"] == "D6"
+        assert body["breed"] == "Duroc"
+        assert body["sireTag"] == "D1"
+        assert body["damTag"] == "2416"
+        assert body["status"] == "active"
+
+    def test_missing_boar_is_404(self, farm):
+        app, token, _ = farm
+        assert app.handle_get("/api/boars/999", token)[0] == 404
+
+    def test_boars_do_not_leak_across_farms(self, setup):
+        app, _, _, boar_id = setup
+        other = _owner(app, "otherfarm")
+        assert app.handle_get(f"/api/boars/{boar_id}", other)[0] == 404
+
+    def test_no_performance_without_any_matings(self, setup):
+        app, token, _, boar_id = setup
+        assert app.handle_get(f"/api/boars/{boar_id}", token)[1]["performance"] is None
+
+    def test_performance_counts_matings_citing_his_tag(self, setup):
+        app, token, farm_id, boar_id = setup
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": "2026-02-03",
+               "detail": {"boar_tag": "D6"}}, token)
+
+        perf = app.handle_get(f"/api/boars/{boar_id}", token)[1]["performance"]
+        assert perf["matings"] == 1
+        assert perf["sowsMated"] == 1
+        assert perf["basis"]
+
+    def test_performance_ignores_matings_with_other_boars(self, setup):
+        app, token, farm_id, boar_id = setup
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": "2026-02-03",
+               "detail": {"boar_tag": "D9"}}, token)
+
+        assert app.handle_get(f"/api/boars/{boar_id}", token)[1]["performance"] is None
+
+    def test_events_start_empty(self, setup):
+        app, token, _, boar_id = setup
+        assert app.handle_get(f"/api/boars/{boar_id}", token)[1]["events"] == []
+
+    def test_record_a_semen_collection(self, setup):
+        app, token, _, boar_id = setup
+        status, body = _post(app, "/api/boar-events",
+                             {"boarId": boar_id, "type": "SC", "date": "2026-08-17",
+                              "detail": {"volume": 15, "motility": 80,
+                                        "concentration": 3.5, "doses": 3}}, token)
+        assert status == 200
+        events = app.handle_get(f"/api/boars/{boar_id}", token)[1]["events"]
+        assert events[0]["type"] == "SC"
+        assert events[0]["detail"] == {"volume": 15, "motility": 80,
+                                       "concentration": 3.5, "doses": 3}
+
+    def test_semen_quality_is_not_a_recordable_type(self, setup):
+        """使用者決定不需要這個獨立事件 —— 精蟲活力跟精液濃度併進採精
+        表單裡即可,不必另立一種事件類型。
+        """
+        app, token, _, boar_id = setup
+        status, _ = _post(app, "/api/boar-events",
+                          {"boarId": boar_id, "type": "SP", "date": "2026-08-17"}, token)
+        assert status == 400
+
+    def test_worker_can_record(self, setup):
+        """配種記錄是員工在做的事,採精同樣是(憲法第十一條)。"""
+        app, _, farm_id, boar_id = setup
+        worker = _worker(app, farm_id)
+        status, _ = _post(app, "/api/boar-events",
+                          {"boarId": boar_id, "type": "SC", "date": "2026-08-17",
+                           "detail": {"volume": 15}}, worker)
+        assert status == 200
+
+    def test_unknown_type_is_rejected(self, setup):
+        app, token, _, boar_id = setup
+        status, _ = _post(app, "/api/boar-events",
+                          {"boarId": boar_id, "type": "MT", "date": "2026-08-17"}, token)
+        assert status == 400
+
+    def test_missing_boar_id_is_rejected(self, setup):
+        app, token, _, _boar_id = setup
+        status, _ = _post(app, "/api/boar-events",
+                          {"type": "SC", "date": "2026-08-17"}, token)
+        assert status == 400
+
+    def test_nonexistent_boar_is_rejected(self, farm):
+        app, token, _ = farm
+        status, _ = _post(app, "/api/boar-events",
+                          {"boarId": 999, "type": "SC", "date": "2026-08-17"}, token)
+        assert status == 404
+
+    def test_cannot_record_against_another_farms_boar(self, setup):
+        app, _, _, boar_id = setup
+        other = _owner(app, "otherfarm")
+        status, _ = _post(app, "/api/boar-events",
+                          {"boarId": boar_id, "type": "SC", "date": "2026-08-17"}, other)
+        assert status == 404
+
+    def test_bad_date_is_rejected(self, setup):
+        app, token, _, boar_id = setup
+        status, _ = _post(app, "/api/boar-events",
+                          {"boarId": boar_id, "type": "SC", "date": "昨天"}, token)
+        assert status == 400
+
+    def test_undo_a_boar_event(self, setup):
+        app, token, _, boar_id = setup
+        event_id = _post(app, "/api/boar-events",
+                         {"boarId": boar_id, "type": "SC", "date": "2026-08-17"},
+                         token)[1]["id"]
+        assert app.handle_delete(f"/api/boar-events/{event_id}", token)[0] == 200
+        assert app.handle_get(f"/api/boars/{boar_id}", token)[1]["events"] == []
+
+    def test_undo_missing_is_404(self, farm):
+        app, token, _ = farm
+        assert app.handle_delete("/api/boar-events/999", token)[0] == 404
+
+    def test_worker_can_only_undo_own_latest(self, setup):
+        app, owner, farm_id, boar_id = setup
+        worker = _worker(app, farm_id)
+        older = _post(app, "/api/boar-events",
+                      {"boarId": boar_id, "type": "SC", "date": "2026-08-16"},
+                      owner)[1]["id"]
+        newer = _post(app, "/api/boar-events",
+                      {"boarId": boar_id, "type": "SC", "date": "2026-08-17"},
+                      worker)[1]["id"]
+
+        assert app.handle_delete(f"/api/boar-events/{older}", worker)[0] == 403
+        assert app.handle_delete(f"/api/boar-events/{newer}", worker)[0] == 200
+
+    def test_appears_in_recent_events_alongside_sow_events(self, setup):
+        """巡欄連續記好幾筆,母豬事件跟公豬事件要合併成同一份「已記錄」
+        清單,不必分兩處確認。
+        """
+        app, token, _, boar_id = setup
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": "2026-08-17"}, token)
+        _post(app, "/api/boar-events",
+              {"boarId": boar_id, "type": "SC", "date": "2026-08-17"}, token)
+
+        events = app.handle_get("/api/recent-events?days=1", token)[1]["events"]
+        kinds = {e["kind"] for e in events}
+        assert kinds == {"sow", "boar"}
+        boar_row = next(e for e in events if e["kind"] == "boar")
+        assert boar_row["earTag"] == "D6"
+        assert boar_row["canUndo"] is True
+
+    def test_recent_events_worker_undo_is_independent_per_kind(self, setup):
+        """員工能不能收回一筆母豬事件,跟他今天記過的公豬事件無關 ——
+        兩種事件的「最新一筆」要分開算。
+        """
+        app, owner, farm_id, boar_id = setup
+        worker = _worker(app, farm_id)
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
+
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": "2026-08-17"}, worker)
+        _post(app, "/api/boar-events",
+              {"boarId": boar_id, "type": "SC", "date": "2026-08-16"}, owner)
+        workers_boar_event = _post(app, "/api/boar-events",
+                                   {"boarId": boar_id, "type": "SC", "date": "2026-08-17"},
+                                   worker)[1]["id"]
+
+        events = app.handle_get("/api/recent-events?days=7", worker)[1]["events"]
+        sow_row = next(e for e in events if e["kind"] == "sow")
+        workers_boar_row = next(e for e in events if e["id"] == workers_boar_event)
+        owners_boar_row = next(e for e in events
+                               if e["kind"] == "boar" and e["id"] != workers_boar_event)
+
+        assert sow_row["canUndo"] is True          # 自己記的、母豬那邊的最新一筆
+        assert workers_boar_row["canUndo"] is True  # 自己記的、公豬那邊的最新一筆
+        assert owners_boar_row["canUndo"] is False  # 不是自己記的
+
+
+class TestBoarDeath:
+    """種豬死亡:跟母豬死亡是同一種事件(使用者決定合併),只是公豬跟
+    母豬本來就是不同資料表,分開存在 sow_events/boar_events。
+    """
+
+    @pytest.fixture
+    def setup(self, farm):
+        app, token, farm_id = farm
+        boar_id = _post(app, "/api/boars", {"earTag": "D6"}, token)[1]["id"]
+        return app, token, farm_id, boar_id
+
+    def test_marks_the_boar_dead(self, setup):
+        app, token, _, boar_id = setup
+        status, _ = _post(app, "/api/boar-events",
+                          {"boarId": boar_id, "type": "DTH", "date": "2026-08-17"}, token)
+        assert status == 200
+        boar = app.handle_get(f"/api/boars/{boar_id}", token)[1]["boar"]
+        assert boar["status"] == "dead"
+
+    def test_ear_tag_gets_the_roc_year_suffix(self, setup):
+        """跟母豬死亡同樣的慣例:裸號釋放給新豬,用事件日期的年份
+        而非今天,補登才不會標錯。
+        """
+        app, token, _, boar_id = setup
+        _post(app, "/api/boar-events",
+              {"boarId": boar_id, "type": "DTH", "date": "2024-03-01"}, token)
+        boar = app.handle_get(f"/api/boars/{boar_id}", token)[1]["boar"]
+        assert boar["earTag"] == "D6-D113"
+
+    def test_suffix_not_doubled_if_already_present(self, setup):
+        app, token, farm_id, boar_id = setup
+        _post(app, "/api/boar-events",
+              {"boarId": boar_id, "type": "DTH", "date": "2024-03-01"}, token)
+        _post(app, "/api/boar-events",
+              {"boarId": boar_id, "type": "DTH", "date": "2024-03-02"}, token)
+        boar = app.handle_get(f"/api/boars/{boar_id}", token)[1]["boar"]
+        assert boar["earTag"] == "D6-D113"
+
+    def test_dead_boars_are_excluded_from_the_active_list(self, setup):
+        """記錄用的選單(配種/採精/種豬死亡)不該再選到已經死亡的公豬。"""
+        app, token, farm_id, boar_id = setup
+        _post(app, "/api/boars", {"earTag": "D9"}, token)
+        _post(app, "/api/boar-events",
+              {"boarId": boar_id, "type": "DTH", "date": "2026-08-17"}, token)
+
+        active = app.handle_get("/api/boars", token)[1]["boars"]
+        assert [b["earTag"] for b in active] == ["D9"]
+
+    def test_dead_boars_still_appear_when_asking_for_everyone(self, setup):
+        """死亡的公豬還是要看得到、找得到,不能整個從畫面上消失
+        (跟母豬清單的既有慣例一致)。
+        """
+        app, token, farm_id, boar_id = setup
+        _post(app, "/api/boar-events",
+              {"boarId": boar_id, "type": "DTH", "date": "2026-08-17"}, token)
+
+        everyone = app.handle_get("/api/boars?all=1", token)[1]["boars"]
+        assert [b["earTag"] for b in everyone] == ["D6-D115"]
+
+    def test_can_also_be_recorded_against_a_sow(self, farm):
+        """同一個代碼,母豬那邊完全是既有行為 —— 只是現在畫面上的名字
+        跟公豬共用同一顆按鈕。
+        """
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        status, _ = _post(app, "/api/sow-events",
+                          {"sowId": sow_id, "type": "DTH", "date": "2026-08-17"}, token)
+        assert status == 200
+        sow = app.handle_get(f"/api/sows/{sow_id}", token)[1]["sow"]
+        assert sow["status"] == "dead"
+        assert sow["earTag"] == "1183-D115"
+
+
 class TestBoarsAreImported:
     """匯入要把公豬建起來。
 
@@ -792,8 +1295,8 @@ class TestBoarsAreImported:
     ROWS = "\n".join([
         "1183|GA|20230519|LY",
         "1183|MT|20260203|D6",
-        "D6|BA|20200301",           # 公豬自己的事件:採精
-        "D6|SC|20200302",
+        "D6|BA|20200301",
+        "D6|SC|20200302",           # 公豬自己的事件:採精
         "D7|BA|20210715",
     ])
 
@@ -831,12 +1334,26 @@ class TestBoarsAreImported:
         app, token, _ = farm
         assert _post(app, "/api/import", {"content": self.ROWS}, token)[1]["boars"] == 2
 
-    def test_preview_admits_boar_events_are_not_written(self, farm):
-        """報一個「275 筆」然後什麼都不寫,使用者會以為資料已經進去了。"""
+    def test_preview_reports_semen_collections_separately_from_the_rest(self, farm):
+        """boarEvents 是 BA+SC+SP 全部,semenCollections 只算真的會寫進
+        boar_events 的 SC —— 報一個大數字掩蓋掉 SP 整批不匯入的事實,
+        使用者一樣會以為資料都進去了。
+        """
         app, token, _ = farm
         body = _post(app, "/api/import/preview", {"content": self.ROWS}, token)[1]
         assert body["boarEvents"] == 3
-        assert body["boarEventsImported"] is False
+        assert body["semenCollections"] == 1
+        assert body["semenCollectionsSkipped"] == 0
+        assert body["semenQualityRows"] == 0
+
+    def test_commit_writes_the_semen_collection(self, farm):
+        app, token, farm_id = farm
+        stats = _post(app, "/api/import", {"content": self.ROWS}, token)[1]
+        assert stats["semenCollections"] == 1
+
+        d6 = app.store.find_boar_by_tag(farm_id, "D6")
+        events = app.store.list_boar_events(farm_id, d6["id"])
+        assert [e["event_type"] for e in events] == ["SC"]
 
 
 class TestExitedSowsStayVisibleAndCountInAnalysis:

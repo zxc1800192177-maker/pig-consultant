@@ -207,6 +207,19 @@ class TestSummary:
         assert s["events"] == 0
         assert s["dateRange"] is None
 
+    def test_semen_collections_are_counted_separately_from_quality_checks(self):
+        rows = "\n".join([
+            "D6|BA|20200301",
+            "D6|SC|20200302|15|3",
+            "L153|SP|20200630|150|外購L精液",
+            "110/07/06|SC|20210706|10|2",
+        ])
+        s = importer.summarize(importer.parse(rows))
+        assert s["boarEvents"] == 4          # BA + SC(2 筆) + SP 全部
+        assert s["semenCollections"] == 2    # 只算 SC
+        assert s["semenCollectionsSkipped"] == 1
+        assert s["semenQualityRows"] == 1    # SP,整批不匯入
+
 
 class TestImportIntoStore:
     @pytest.fixture
@@ -219,7 +232,8 @@ class TestImportIntoStore:
         result = importer.parse("\n".join([MATE, FARROW, WEAN]))
         stats = importer.import_into(store, farm_id, result)
 
-        assert stats == {"sows": 1, "events": 3, "excluded": 0, "boars": 0}
+        assert stats == {"sows": 1, "events": 3, "excluded": 0, "boars": 0,
+                         "semenCollections": 0, "semenCollectionsSkipped": 0}
         assert len(store.list_sows(farm_id)) == 1
         assert len(store.list_sow_events(farm_id)) == 3
 
@@ -451,3 +465,60 @@ class TestOddBoarTagsAreReported:
     def test_clean_file_reports_nothing(self):
         clean = importer.summarize(importer.parse("D6|BA|20200301"))
         assert clean["oddBoarTags"] == []
+
+
+class TestSemenCollectionsAreImported:
+    """採精(SC)寫進 boar_events;精液品質(SP)整批不寫 —— 精蟲活力/濃度
+    已經併進 SC 表單,SP 不再是這個 app 認得的事件類型
+    (schedule.KNOWN_BOAR_EVENTS 沒有它,見 importer.import_into 的說明)。
+    """
+
+    @pytest.fixture
+    def farm(self):
+        store = InMemoryStore()
+        return store, store.create_farm("HYD")
+
+    ROWS = "\n".join([
+        "D6|BA|20200301",
+        "D6|SC|20200302|15|3",
+        "L153|SP|20200630|150|外購L精液",
+        "110/07/06|SC|20210706|10|2",   # 耳號像民國日期,對不到真公豬
+    ])
+
+    def test_semen_collection_is_written(self, farm):
+        store, farm_id = farm
+        stats = importer.import_into(store, farm_id, importer.parse(self.ROWS))
+
+        assert stats["semenCollections"] == 1
+        boar = store.find_boar_by_tag(farm_id, "D6")
+        events = store.list_boar_events(farm_id, boar["id"])
+        assert len(events) == 1
+        assert events[0]["event_type"] == "SC"
+        assert events[0]["detail"]["volume"] == 15
+
+    def test_semen_quality_is_never_written(self, farm):
+        """SP 不是這個 app 認得的事件類型,整批不寫 —— 不只是耳號有問題的那些。"""
+        store, farm_id = farm
+        importer.import_into(store, farm_id, importer.parse(self.ROWS))
+
+        types = {e["event_type"] for e in store.list_boar_events(farm_id)}
+        assert "SP" not in types
+
+    def test_date_like_ear_tag_is_skipped_and_counted(self, farm):
+        store, farm_id = farm
+        stats = importer.import_into(store, farm_id, importer.parse(self.ROWS))
+
+        assert stats["semenCollectionsSkipped"] == 1
+        # 身分仍然照建(不修正也不丟掉那頭豬),只是這筆採精事件沒有寫入
+        odd_boar = store.find_boar_by_tag(farm_id, "110/07/06")
+        assert odd_boar is not None
+        assert store.list_boar_events(farm_id, odd_boar["id"]) == []
+
+    def test_is_idempotent(self, farm):
+        store, farm_id = farm
+        result = importer.parse(self.ROWS)
+        importer.import_into(store, farm_id, result)
+        importer.import_into(store, farm_id, result)
+
+        boar = store.find_boar_by_tag(farm_id, "D6")
+        assert len(store.list_boar_events(farm_id, boar["id"])) == 1
