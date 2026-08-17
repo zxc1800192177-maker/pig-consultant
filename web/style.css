@@ -421,6 +421,19 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 }
 .gate-form #gateError { color: var(--critical); text-align: center; margin: 2px 0 0; }
 
+/* 救援碼本體。這串字要被人照著抄到紙上,所以用等寬字、放大、加大字距 ——
+   抄錯一個字元就等於整組碼作廢,而且要幾個月後才會發現。 */
+.recovery-code {
+  margin: 16px 0; padding: 18px 14px; text-align: center;
+  background: var(--surface-2); border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  font-size: 22px; font-weight: 700; letter-spacing: .12em;
+  word-break: break-all; user-select: all;
+}
+#recoveryGenError { color: var(--critical); margin: 2px 0 0; }
+#forgotError { color: var(--critical); margin: 2px 0 0; }
+
 /* 刪除帳號那一區。用邊框與紅色按鈕跟一般設定明顯分開 ——
    這是唯一不可復原的動作,不能長得像其他按鈕一樣安全。 */
 .danger-card { border: 1px solid var(--critical); }

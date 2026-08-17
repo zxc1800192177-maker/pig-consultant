@@ -65,8 +65,10 @@ async function refreshAccount() {
   account = ok && data.loggedIn ? data : LOGGED_OUT;
   renderAuthBar();
   applyLoginGate();
-  // 沒登入就沒有帳號可刪,整張卡收起來而不是留一個按了會失敗的按鈕。
+  // 沒登入就沒有帳號可刪/可產生救援碼,整張卡收起來而不是留一個
+  // 按了會失敗的按鈕。
   $("deleteAccountCard")?.classList.toggle("is-hidden", !account.loggedIn);
+  $("recoverySetCard")?.classList.toggle("is-hidden", !account.loggedIn);
   // 登入/登出後全部重讀。少列一項的話,換帳號後那一區會留著上一個
   // 使用者的資料 —— 跨牧場的資料外洩就是這樣發生的。
   await Promise.all([
@@ -213,7 +215,8 @@ function showAuthError(message) {
 // 都呼叫這個,不必各自實作一份請求與錯誤處理。
 async function performAuth(endpoint, username, password) {
   const { ok, data } = await api(endpoint, postJson({ username, password }));
-  return { ok, error: data.error };
+  // 註冊會帶回救援碼,而且**只有這一次**拿得到 —— 呼叫端要負責顯示。
+  return { ok, error: data.error, recoveryCode: data.recoveryCode };
 }
 
 async function submitAuthForm() {
@@ -223,12 +226,13 @@ async function submitAuthForm() {
 
   $("authSubmit").disabled = true;
   try {
-    const { ok, error } = await performAuth(
+    const { ok, error, recoveryCode } = await performAuth(
       spec.endpoint, $("authUsername").value, $("authPassword").value
     );
     if (!ok) return showAuthError(error || "操作失敗,請稍後再試");
     closeAuthPanel();
     await refreshAccount();
+    showRecoveryCode(recoveryCode);
   } finally {
     $("authSubmit").disabled = false;
   }
@@ -258,7 +262,7 @@ async function submitGateForm() {
   $("gateSubmit").disabled = true;
   $("gateError").hidden = true;
   try {
-    const { ok, error } = await performAuth(
+    const { ok, error, recoveryCode } = await performAuth(
       spec.endpoint, $("gateUsername").value, $("gatePassword").value
     );
     if (!ok) {
@@ -269,6 +273,7 @@ async function submitGateForm() {
     $("gateUsername").value = "";
     $("gatePassword").value = "";
     await refreshAccount();
+    showRecoveryCode(recoveryCode);
   } finally {
     $("gateSubmit").disabled = false;
   }
@@ -311,6 +316,12 @@ document.addEventListener("click", (e) => {
   }
   if (e.target.closest('[data-auth-action="logout"]')) logout();
   if (e.target.closest("#deleteAccountBtn")) deleteAccount();
+  if (e.target.closest("#recoveryCopy")) copyRecoveryCode();
+  if (e.target.closest("#recoveryDone")) $("recoveryPanel").classList.add("is-hidden");
+  if (e.target.closest("#recoveryGenBtn")) generateRecoveryCode();
+  if (e.target.closest("#gateForgot")) openForgotPanel();
+  if (e.target.closest("#forgotClose")) $("forgotPanel").classList.add("is-hidden");
+  if (e.target.closest("#forgotSubmit")) submitForgotForm();
 
   // 密碼的「顯示/隱藏」。看不到自己打了什麼,是「註冊完就再也登不進去」
   // 最常見的成因 —— 尤其密碼含中文時,選錯字在圓點底下完全看不出來。
@@ -343,6 +354,87 @@ if ($("gateSubmit")) {
   $("gatePassword").addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitGateForm();
   });
+}
+
+// ── 救援碼 ──
+//
+// 明碼只有產生的那一刻存在(資料庫只存雜湊),所以拿到之後一定要當場
+// 顯示,而且要讓使用者主動確認抄好了才關掉。
+function showRecoveryCode(code) {
+  if (!code || !$("recoveryPanel")) return;
+  $("recoveryCodeText").textContent = code;
+  $("recoveryPanel").classList.remove("is-hidden");
+  window.scrollTo(0, 0);
+}
+
+async function copyRecoveryCode() {
+  const code = $("recoveryCodeText")?.textContent || "";
+  try {
+    await navigator.clipboard.writeText(code);
+    showBanner("救援碼已複製", "ok");
+  } catch {
+    // 剪貼簿在非 HTTPS 或使用者拒絕授權時會失敗。這不該讓人卡住 ——
+    // 碼本來就看得到,請他自己抄就好。
+    showBanner("複製不成功,請手動抄下畫面上的碼", "warn");
+  }
+}
+
+// 產生新的救援碼(給救援碼弄丟、或這個功能出現前就註冊的帳號)。
+async function generateRecoveryCode() {
+  const field = $("recoveryGenPassword");
+  const error = $("recoveryGenError");
+  if (!field) return;
+  error.hidden = true;
+
+  if (!account.isGuest && !field.value) {
+    error.textContent = "請輸入密碼以確認身分";
+    error.hidden = false;
+    return;
+  }
+
+  const { ok, data } = await api("/api/auth/recovery-code",
+                                 postJson({ password: field.value }));
+  if (!ok) {
+    error.textContent = data.error || "產生失敗,請稍後再試";
+    error.hidden = false;
+    return;
+  }
+  field.value = "";
+  hidePasswordField("recoveryGenPassword");
+  showRecoveryCode(data.recoveryCode);
+}
+
+// ── 忘記密碼 ──
+function openForgotPanel() {
+  $("forgotUsername").value = $("gateUsername")?.value || "";
+  $("forgotCode").value = "";
+  $("forgotPassword").value = "";
+  hidePasswordField("forgotPassword");
+  $("forgotError").hidden = true;
+  $("forgotPanel").classList.remove("is-hidden");
+  $("forgotCode").focus();
+}
+
+async function submitForgotForm() {
+  const error = $("forgotError");
+  error.hidden = true;
+
+  const { ok, data } = await api("/api/auth/recover", postJson({
+    username: $("forgotUsername").value,
+    code: $("forgotCode").value,
+    password: $("forgotPassword").value,
+  }));
+  if (!ok) {
+    error.textContent = data.error || "重設失敗,請稍後再試";
+    error.hidden = false;
+    return;
+  }
+
+  // 重設後刻意不自動登入(OWASP),所以這裡把新密碼填回登入表單、
+  // 請他實際登入一次 —— 確認新密碼真的記住了,而不是下次要用才發現。
+  $("forgotPanel").classList.add("is-hidden");
+  showBanner("密碼已重設,請用新密碼登入", "ok");
+  showRecoveryCode(data.recoveryCode);
 }
 
 // ── 刪除帳號 ──

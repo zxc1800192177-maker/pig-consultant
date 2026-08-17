@@ -58,6 +58,56 @@
     <p class="hint" id="authError" hidden></p>
   </div>
 
+  <!-- 救援碼只在產生的當下顯示這一次:資料庫裡只存雜湊,關掉之後
+       連我們自己都拿不回來。所以這張卡刻意要求使用者按「我已經抄下來了」
+       才關得掉,不能隨手點旁邊就消失。 -->
+  <div class="card is-hidden" id="recoveryPanel">
+    <div class="card-head">
+      <div>
+        <h2>請抄下這組救援碼</h2>
+        <p class="hint">
+          忘記密碼時,<b>只有這組碼能救回你的帳號</b>。
+          抄在筆記本上或拍張照存起來,放在手機裡找得到的地方。
+        </p>
+      </div>
+    </div>
+    <div class="recovery-code" id="recoveryCodeText"></div>
+    <p class="hint">
+      這組碼<b>只會顯示這一次</b>,關掉之後就再也看不到了(系統只存加密後的
+      版本,連我們也查不出來)。用過一次就會自動換一組新的。
+    </p>
+    <div class="scan-row">
+      <button type="button" class="btn-soft" id="recoveryCopy">複製</button>
+      <button type="button" class="btn-primary" id="recoveryDone">我已經抄下來了</button>
+    </div>
+  </div>
+
+  <!-- 忘記密碼:用救援碼直接設定新密碼 -->
+  <div class="card is-hidden" id="forgotPanel">
+    <div class="card-head">
+      <div>
+        <h2>用救援碼重設密碼</h2>
+        <p class="hint">輸入註冊時抄下來的那組救援碼,就可以設定新密碼。</p>
+      </div>
+      <button class="btn-ghost" id="forgotClose">關閉</button>
+    </div>
+    <div class="gate-form">
+      <input type="text" id="forgotUsername" autocomplete="username"
+             autocapitalize="off" autocorrect="off" spellcheck="false"
+             placeholder="使用者名稱">
+      <input type="text" id="forgotCode"
+             autocapitalize="characters" autocorrect="off" spellcheck="false"
+             placeholder="救援碼,例如 K7QM-3XPR-9WFT-2HDN">
+      <div class="pw-wrap">
+        <input type="password" id="forgotPassword" autocomplete="new-password"
+               placeholder="設定新密碼">
+        <button type="button" class="pw-toggle" data-pw-toggle="forgotPassword">顯示</button>
+      </div>
+      <button class="btn-primary" id="forgotSubmit">重設密碼</button>
+      <p class="hint" id="forgotError" hidden></p>
+    </div>
+  </div>
+
   <div id="banner" role="status"></div>
 
   <!-- 未登入時取代功能畫面顯示。可用性由 JS 依 /api/health 的
@@ -84,6 +134,9 @@
         <p class="hint gate-toggle">
           <span id="gateToggleLabel">還沒有帳號?</span>
           <button type="button" class="btn-ghost" id="gateModeToggle">註冊一個</button>
+        </p>
+        <p class="hint gate-toggle" id="gateForgotRow">
+          <button type="button" class="btn-ghost" id="gateForgot">忘記密碼?</button>
         </p>
       </div>
 
@@ -325,6 +378,29 @@
       </div>
       <div id="setFields"></div>
       <button class="btn-primary" id="setSave">儲存設定</button>
+    </div>
+
+    <div class="card is-hidden" id="recoverySetCard">
+      <div class="card-head">
+        <div>
+          <h2>救援碼</h2>
+          <p class="hint">
+            忘記密碼時唯一能救回帳號的東西。這個功能是後來才加的,
+            所以在那之前註冊的帳號還沒有 —— 按下面的按鈕產生一組抄起來。
+            產生新的會讓舊的立刻失效。
+          </p>
+        </div>
+      </div>
+      <div class="gate-form">
+        <div class="pw-wrap">
+          <input type="password" id="recoveryGenPassword"
+                 autocomplete="current-password" placeholder="輸入密碼以確認身分">
+          <button type="button" class="pw-toggle"
+                  data-pw-toggle="recoveryGenPassword">顯示</button>
+        </div>
+        <button type="button" class="btn-soft" id="recoveryGenBtn">產生新的救援碼</button>
+        <p class="hint" id="recoveryGenError" hidden></p>
+      </div>
     </div>
 
     <!-- 刪除帳號。刻意放在最後、獨立一張卡、用警示色 —— 這是唯一
