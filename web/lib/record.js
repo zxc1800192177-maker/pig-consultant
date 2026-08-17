@@ -31,7 +31,11 @@ export const ZONE_OPTIONS = [
 /** 每種事件要填什麼。`type` 決定畫成什麼元件與怎麼收值。 */
 export const RECORD_FORMS = {
   MT: {
-    label: "配種", target: "sow",
+    // 同一天、同一隻公豬,常常是一整批母豬一起配 —— 逐頭開表單重打一次
+    // 公豬耳號跟發情穩定度太沒效率(使用者要求)。multiSow: true 讓耳號
+    // 欄位改成可以連續加很多筆,其餘欄位(公豬、發情穩定度)整批共用同
+    // 一組值,一次送出多筆事件。
+    label: "配種", target: "sow", multiSow: true,
     fields: [
       { key: "boar_tag", label: "公豬", type: "boar" },
       // 配種當下觀察到的發情徵狀。跟離乳評分同樣的道理:主觀判斷,
@@ -159,6 +163,13 @@ export function targetsBoar(code) {
  */
 export function targetsEither(code) {
   return formFor(code)?.target === "either";
+}
+
+/** 這種事件可以一次對多頭母豬記錄同一組內容 —— 目前只有配種:同一天、
+ * 同一隻公豬,常常是一整批母豬一起配(使用者要求)。
+ */
+export function supportsMultiSow(code) {
+  return Boolean(formFor(code)?.multiSow);
 }
 
 /**

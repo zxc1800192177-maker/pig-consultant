@@ -18,7 +18,7 @@ import {
 } from "./lib/v2.js";
 import {
   SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, recordedRow,
-  targetsBoar, targetsEither,
+  supportsMultiSow, targetsBoar, targetsEither,
 } from "./lib/record.js";
 
 const $ = (id) => document.getElementById(id);
@@ -967,6 +967,20 @@ $("healthResult")?.addEventListener("keydown", (e) => {
   }
 });
 
+// recForm 每次開表單都整個重畫,用事件委派接住耳號輸入框的 Enter 鍵 ——
+// 配種一次記多頭時,連續打耳號、按 Enter 加入是最快的操作方式,
+// 不必每一筆都伸手去點「+」。
+//
+// #recSow 這個 id 單頭母豬的表單也在用(sowPickerField),那邊沒有
+// 「加入清單」這回事,一定要先檢查目前這張表單是不是多頭模式,
+// 否則會去操作根本不存在的 #recSowChips / #recSowAddErr。
+$("recForm")?.addEventListener("keydown", (e) => {
+  if (e.target.id === "recSow" && e.key === "Enter" && supportsMultiSow(recordCode)) {
+    e.preventDefault();
+    addSowTag();
+  }
+});
+
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("sw.js").catch(() => {});
@@ -1354,6 +1368,7 @@ let boars = [];
 let allBoars = [];
 let pens = [];               // 移欄表單用,含即時佔用狀態
 let recordCode = null;      // 目前開著的表單是哪一種事件
+let recSowTags = [];        // 配種一次記多頭時,目前已加入清單的耳號
 
 async function reloadBoars() {
   // 未登入就別發這個請求。少了這道守衛,登入畫面上會固定丟一個 401 到
@@ -1374,6 +1389,7 @@ async function reloadPens() {
 
 function closeRecordForm() {
   recordCode = null;
+  recSowTags = [];
   $("recForm").classList.add("is-hidden");
   $("recForm").innerHTML = "";
 }
@@ -1382,6 +1398,7 @@ async function openRecordForm(code) {
   const spec = formFor(code);
   if (!spec) return;
   recordCode = code;
+  recSowTags = [];
 
   // 欄位佔用狀態隨時在變,打開表單當下重抓一次才不會讓使用者選到
   // 其實已經有豬的欄位(其他事件的表單不需要這個,沒有額外請求)。
@@ -1398,7 +1415,8 @@ async function openRecordForm(code) {
       ? `<p class="rec-warn-note">送出後:${escapeHtml(SIDE_EFFECTS[code])}</p>` : ""}
     ${createsNewAnimal(code) ? newAnimalFields()
       : targetsEither(code) ? eitherAnimalFields()
-      : targetsBoar(code) ? boarPickerField() : sowPickerField()}
+      : targetsBoar(code) ? boarPickerField()
+      : supportsMultiSow(code) ? multiSowPickerField() : sowPickerField()}
     <label class="fld"><span>日期</span>
       <input type="date" id="recDate" value="${todayIso()}"></label>
     ${spec.fields.map(fieldMarkup).join("")}
@@ -1418,6 +1436,66 @@ function sowPickerField() {
     <datalist id="sowTags">
       ${sows.map((s) => `<option value="${escapeHtml(s.earTag)}"></option>`).join("")}
     </datalist>`;
+}
+
+// 配種一次記多頭:耳號一個一個加進清單,公豬跟發情穩定度整批共用
+// (spec.fields 那些欄位不變)。加入時就驗證耳號存在,而不是等送出才
+// 一次噴一堆錯誤 —— 巡欄時打錯一個字元,馬上就知道,不必等打完一整批。
+function multiSowPickerField() {
+  return `
+    <label class="fld"><span>母豬耳號(可連續加入多筆)</span>
+      <div class="rec-tag-row">
+        <input list="sowTags" id="recSow" inputmode="numeric"
+               placeholder="輸入耳號後按 Enter 或 +" autocomplete="off">
+        <button type="button" class="btn-soft" id="recSowAdd">+</button>
+      </div></label>
+    <datalist id="sowTags">
+      ${sows.map((s) => `<option value="${escapeHtml(s.earTag)}"></option>`).join("")}
+    </datalist>
+    <p class="rec-err is-hidden" id="recSowAddErr"></p>
+    <div class="chips" id="recSowChips"></div>`;
+}
+
+function renderSowChips() {
+  const box = $("recSowChips");
+  if (!box) return;
+  box.innerHTML = recSowTags.map((tag) => `
+    <button type="button" class="chip" data-remove-tag="${escapeHtml(tag)}"
+    >${escapeHtml(tag)} ×</button>`).join("");
+}
+
+/** 把輸入框裡目前的耳號加進清單。驗證耳號真的存在、不重複加入 ——
+ * 兩者都不算致命錯誤(只是這一個字元沒加成功),用同一個小提示欄位
+ * 顯示,不必動用整張表單共用的 #recErr。
+ */
+function addSowTag() {
+  const field = $("recSow");
+  const err = $("recSowAddErr");
+  if (!field) return;
+  const tag = field.value.trim();
+  err.classList.add("is-hidden");
+
+  if (!tag) return;
+  if (!sows.some((s) => s.earTag === tag)) {
+    err.textContent = `找不到耳號 ${tag}`;
+    err.classList.remove("is-hidden");
+    return;
+  }
+  if (recSowTags.includes(tag)) {
+    err.textContent = `${tag} 已經加過了`;
+    err.classList.remove("is-hidden");
+    return;
+  }
+
+  recSowTags.push(tag);
+  field.value = "";
+  renderSowChips();
+  field.focus();
+}
+
+function removeSowTag(tag) {
+  recSowTags = recSowTags.filter((t) => t !== tag);
+  renderSowChips();
 }
 
 function boarPickerField() {
@@ -1607,6 +1685,8 @@ async function submitRecord() {
     return;
   }
 
+  if (supportsMultiSow(recordCode)) return submitMultiSowRecord(spec, when, detail);
+
   const tag = ($("recSow")?.value || "").trim();
   const sow = sows.find((s) => s.earTag === tag);
   if (!sow) return showRecordError(tag ? `找不到耳號 ${tag}` : "請選擇母豬");
@@ -1625,6 +1705,48 @@ async function submitRecord() {
   // 剛記的這頭若正好是開著的那張卡,一併重新整理 —— 否則死亡/淘汰後
   // 耳號的民國年後綴、狀態、生產表現都會停在記錄之前的樣子。
   if (openSowId === sow.id) await openSow(sow.id);
+}
+
+/** 配種一次記多頭的送出邏輯。每一頭各自送一筆 /api/sow-events(互相
+ * 獨立,一筆失敗不影響其他筆)。**不是全部成功才關表單** —— 成功的
+ * 先從清單移除、真的寫進去了,只把失敗的留著讓使用者修正重送,不然
+ * 一筆打錯字就要整批重打一次,而且會讓人誤以為「這批一筆都沒記到」。
+ */
+async function submitMultiSowRecord(spec, when, detail) {
+  // 打了字但忘記按 Enter/+ 的話,視為要加入,不要悄悄漏掉這一筆。
+  addSowTag();
+  if (recSowTags.length === 0) return showRecordError("請至少加入一頭母豬耳號");
+
+  const results = await Promise.all(recSowTags.map(async (tag) => {
+    const sow = sows.find((s) => s.earTag === tag);
+    if (!sow) return { tag, ok: false, error: "耳號已經不存在" };
+    const { ok, data } = await api("/api/sow-events", postJson({
+      sowId: sow.id, type: recordCode, date: when, detail,
+    }));
+    return { tag, ok, error: data?.error };
+  }));
+
+  const failed = results.filter((r) => !r.ok);
+  const succeededTags = results.filter((r) => r.ok).map((r) => r.tag);
+
+  recSowTags = recSowTags.filter((tag) => !succeededTags.includes(tag));
+  renderSowChips();
+
+  if (succeededTags.length) {
+    // 記錄會改變狀態(懷孕待驗等),所以整批重讀而不是只補一列。
+    await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
+  }
+
+  if (failed.length) {
+    const prefix = succeededTags.length ? `已記錄 ${succeededTags.length} 頭,` : "";
+    return showRecordError(
+      `${prefix}${failed.length} 頭失敗:` +
+      failed.map((f) => `${f.tag}(${f.error || "記錄失敗"})`).join("、")
+    );
+  }
+
+  closeRecordForm();
+  showBanner(`已記錄 ${succeededTags.length} 頭${spec.label}`, "ok");
 }
 
 async function reloadRecent() {
@@ -1820,7 +1942,10 @@ document.addEventListener("click", (e) => {
     }
     return;
   }
-  const chip = e.target.closest(".chip");
+  // 配種一次記多頭的耳號 chip 借了同一套外觀(.chip),但語意不是
+  // 「選一個」而是「刪掉這一個」,不能被這裡的單選切換攔截 ——
+  // 用 data-remove-tag 排除,讓它落到下面 removeSowTag 那一段。
+  const chip = e.target.closest(".chip:not([data-remove-tag])");
   if (chip) {
     chip.parentElement.querySelectorAll(".chip")
       .forEach((c) => c.classList.toggle("is-active", c === chip));
@@ -1838,6 +1963,10 @@ document.addEventListener("click", (e) => {
 
   if (e.target.id === "recCancel") return closeRecordForm();
   if (e.target.id === "recSubmit") return submitRecord();
+  if (e.target.id === "recSowAdd") return addSowTag();
+
+  const removeTag = e.target.closest("[data-remove-tag]");
+  if (removeTag) return removeSowTag(removeTag.dataset.removeTag);
   if (e.target.id === "setSave") return saveSettings();
   if (e.target.id === "ctaskAdd") return addCustomTask();
 });

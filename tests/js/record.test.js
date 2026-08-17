@@ -17,6 +17,7 @@ import {
   formFor,
   recordSummary,
   recordedRow,
+  supportsMultiSow,
   targetsBoar,
   targetsEither,
 } from "../../web/lib/record.js";
@@ -43,6 +44,25 @@ describe("表單定義", () => {
     for (const code of ["FW", "WN", "SAL", "DTH", "MV"]) {
       assert.ok(SIDE_EFFECTS[code], `${code} 沒有說明副作用`);
     }
+  });
+});
+
+describe("配種一次記多頭", () => {
+  // 同一天、同一隻公豬,常常是一整批母豬一起配 —— 逐頭開表單重打一次
+  // 公豬耳號跟發情穩定度太沒效率(使用者要求)。
+  it("配種支援一次多頭,其他事件不支援", () => {
+    assert.equal(supportsMultiSow("MT"), true);
+    assert.equal(supportsMultiSow("FW"), false);
+    assert.equal(supportsMultiSow("WN"), false);
+    assert.equal(supportsMultiSow("PD"), false);
+  });
+
+  it("不認得的代碼不支援,不是拋例外", () => {
+    assert.equal(supportsMultiSow("ZZ"), false);
+  });
+
+  it("目標還是母豬,只是耳號輸入方式不同", () => {
+    assert.equal(formFor("MT").target, "sow");
   });
 });
 

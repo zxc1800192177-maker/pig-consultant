@@ -156,6 +156,15 @@ body { padding-bottom: 96px; }
 .fld-h { display: block; margin-top: 5px; font-size: 11.5px;
          color: var(--ink-faint); font-style: normal; }
 
+/* 配種一次記多頭:耳號輸入框旁邊的「+」。輸入框吃掉剩下的寬度,
+   按鈕維持固定大小,巡欄時單手也點得到。 */
+.rec-tag-row { display: flex; gap: 8px; }
+.rec-tag-row input { flex: 1; min-width: 0; }
+.rec-tag-row .btn-soft { flex-shrink: 0; padding: 10px 16px; }
+/* 已加入的耳號清單,跟表單其他區塊之間留一點空隙 */
+#recSowChips { margin-top: 10px; }
+#recSowChips:empty { margin-top: 0; }
+
 /* 分段按鈕。巡欄時單手操作,所以做成大目標而不是下拉選單。 */
 .seg { display: flex; gap: 8px; flex-wrap: wrap; }
 .seg-b {
