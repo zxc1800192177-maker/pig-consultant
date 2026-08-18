@@ -21,8 +21,9 @@ import contextlib
 import json
 import secrets
 import threading
+import time
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import config
 
@@ -1007,6 +1008,19 @@ class PostgresStore(Store):
     SQL injection 的入口,而使用者名稱正是使用者可控的輸入。
     """
 
+    # list_sow_events(farm_id) 不帶 sow_id/since/until 時,是「整個牧場
+    # 全部事件」——目前有 8 個呼叫端各自這樣呼叫(工作清單、提醒、值得
+    # 檢視、生產月報、已記錄……),而前端登入或整頁重整時會一次平行打出
+    # 這些請求。32,000+ 筆的牧場等於同一瞬間疊出好幾份幾乎一樣的資料庫
+    # 查詢結果,各自佔一份記憶體——這是免費方案 512MB 被瞬間衝爆、
+    # 觸發 status 137 被砍掉的可疑原因(使用者回報後查出來的)。
+    #
+    # 快取幾秒鐘,讓同一批平行請求共用同一份資料,不必各自查一次資料庫、
+    # 各自建一份 Python 物件。TTL 選短(3 秒):要夠讓同一次頁面載入的
+    # 平行請求命中,但不能久到讓「記錄完馬上重新整理」看到舊資料——
+    # 所以寫入一律主動清快取,不是單純等它過期,3 秒只是防呆用的上限。
+    _EVENT_CACHE_TTL = 3.0
+
     def __init__(self, dsn: str):
         if psycopg is None:
             raise RuntimeError("需要 psycopg 才能使用 PostgresStore,請安裝 requirements.txt")
@@ -1017,6 +1031,27 @@ class PostgresStore(Store):
         # 屬性的話,兩個請求同時匯入就會互相搶對方的連線,造成資料寫錯
         # 請求或連線被兩個執行緒同時使用(psycopg 的連線不是執行緒安全的)。
         self._local = threading.local()
+        # 事件快取刻意是一般屬性不是 thread-local —— 要在所有執行緒之間
+        # 共用同一份,平行請求才收得到彼此的快取,不然每個執行緒各自快取
+        # 就跟沒快取一樣。用鎖保護,因為 psycopg 連線不是執行緒安全的
+        # 這件事不適用在一個 dict + float 上,但仍要避免兩條執行緒同時
+        # 讀寫同一個 farm_id 的快取項目而互相踩到。
+        self._event_cache: Dict[int, Tuple[float, List[dict]]] = {}
+        self._event_cache_lock = threading.Lock()
+
+    def _cached_farm_events(self, farm_id: int) -> Optional[List[dict]]:
+        with self._event_cache_lock:
+            entry = self._event_cache.get(farm_id)
+        if entry is None:
+            return None
+        cached_at, events = entry
+        if time.monotonic() - cached_at >= self._EVENT_CACHE_TTL:
+            return None
+        return events
+
+    def _invalidate_farm_events_cache(self, farm_id: int) -> None:
+        with self._event_cache_lock:
+            self._event_cache.pop(farm_id, None)
 
     def _connect(self):
         conn = getattr(self._local, "batch_conn", None)
@@ -1170,7 +1205,13 @@ class PostgresStore(Store):
                 conn.execute("DELETE FROM farms WHERE id = %s", (farm_id,))
 
             conn.execute("DELETE FROM users WHERE id = %s", (user_id,))
-            return True
+
+        # 上面動過 sow_events.recorded_by(留人不留名),牧場整個被刪掉時
+        # 事件也跟著沒了 —— 兩種情形快取都過期了。放在 with 外面,確定
+        # 交易真的提交了才清,免得回滾後反而把有效的快取清掉。
+        if farm_id is not None:
+            self._invalidate_farm_events_cache(farm_id)
+        return True
 
     def create_session(self, token_hash, user_id, expires_at):
         with self._connect() as conn:
@@ -1387,7 +1428,14 @@ class PostgresStore(Store):
             row = conn.execute(
                 "DELETE FROM sows WHERE id = %s AND farm_id = %s RETURNING id",
                 (sow_id, farm_id)).fetchone()
-            return row is not None
+        ok = row is not None
+        if ok:
+            # sow_events 對 sow_id 是 ON DELETE CASCADE,刪一頭豬等於連她的
+            # 事件一起消失 —— 快取不知道這件事,要主動清掉。目前唯一的呼叫
+            # 端(收回種豬進場)只在她完全沒有事件時才准刪,所以實際上清的
+            # 是一份沒變的資料;但這條規則哪天放寬,這裡就是會出事的地方。
+            self._invalidate_farm_events_cache(farm_id)
+        return ok
 
     def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
                  sire_tag="", dam_tag="", created_by=None) -> int:
@@ -1505,15 +1553,25 @@ class PostgresStore(Store):
         # ON CONFLICT DO UPDATE(而非 DO NOTHING)才拿得回既有的 id,
         # 匯入重跑時呼叫端不必自己查一次。
         with self._connect() as conn:
-            return conn.execute(
+            event_id = conn.execute(
                 "INSERT INTO sow_events (farm_id, sow_id, event_type, event_date,"
                 " detail, seq, recorded_by) VALUES (%s,%s,%s,%s,%s,%s,%s)"
                 " ON CONFLICT (sow_id, event_type, event_date, detail, seq)"
                 " DO UPDATE SET recorded_by = EXCLUDED.recorded_by RETURNING id",
                 (farm_id, sow_id, event_type, event_date,
                  Jsonb(detail or {}), seq, recorded_by)).fetchone()[0]
+        self._invalidate_farm_events_cache(farm_id)
+        return event_id
 
     def list_sow_events(self, farm_id, sow_id=None, since=None, until=None):
+        # 只快取「查全場」這個最貴、也最常被平行打的情形 —— 查單一頭豬
+        # 的事件本來就便宜,快取反而多一層維護成本換不到什麼。
+        whole_farm = sow_id is None and since is None and until is None
+        if whole_farm:
+            cached = self._cached_farm_events(farm_id)
+            if cached is not None:
+                return [dict(e) for e in cached]
+
         sql = f"SELECT {self.EVENT_COLS} FROM sow_events WHERE farm_id = %s"
         args = [farm_id]
         if sow_id is not None:
@@ -1528,6 +1586,11 @@ class PostgresStore(Store):
         for r in rows:
             if not isinstance(r["detail"], dict):
                 r["detail"] = json.loads(r["detail"])
+
+        if whole_farm:
+            with self._event_cache_lock:
+                self._event_cache[farm_id] = (time.monotonic(), rows)
+            return [dict(e) for e in rows]
         return rows
 
     def delete_sow_event(self, farm_id, event_id) -> bool:
@@ -1535,7 +1598,10 @@ class PostgresStore(Store):
             row = conn.execute(
                 "DELETE FROM sow_events WHERE id = %s AND farm_id = %s RETURNING id",
                 (event_id, farm_id)).fetchone()
-            return row is not None
+        ok = row is not None
+        if ok:
+            self._invalidate_farm_events_cache(farm_id)
+        return ok
 
     def set_event_excluded(self, farm_id, event_id, excluded) -> bool:
         with self._connect() as conn:
@@ -1543,7 +1609,10 @@ class PostgresStore(Store):
                 "UPDATE sow_events SET excluded = %s"
                 " WHERE id = %s AND farm_id = %s RETURNING id",
                 (bool(excluded), event_id, farm_id)).fetchone()
-            return row is not None
+        ok = row is not None
+        if ok:
+            self._invalidate_farm_events_cache(farm_id)
+        return ok
 
     TASK_COLS = "id, farm_id, name, start_date, repeat_rule"
 

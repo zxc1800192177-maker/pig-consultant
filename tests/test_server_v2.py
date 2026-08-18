@@ -364,6 +364,38 @@ class TestUndoAnimalEntry:
         entry = next(e for e in events if e["kind"] == "sow-entry")
         assert entry["canUndo"] is True
 
+    def test_query_count_does_not_grow_with_the_herd(self, farm):
+        """「這頭豬有沒有其他記錄」要從已經撈好的全場事件裡算,不是每頭
+        各查一次資料庫。
+
+        原本是後者:一週內進場 40 頭,就等於每次呼叫這支 API 多打 40 次
+        資料庫 —— 而它每次開頁、每記一筆都會被呼叫到,正是「多人同時用
+        會不會壓垮伺服器」這個問題的核心。這裡直接數查詢次數而不是看
+        程式碼長相:寫法可以改,但「查詢次數不隨頭數增加」不能破。
+        """
+        app, owner, _ = farm
+        today = date.today().isoformat()
+
+        real = app.store.list_sow_events
+        calls = []
+
+        def counting(*args, **kwargs):
+            calls.append((args, kwargs))
+            return real(*args, **kwargs)
+
+        for tag in ("1183", "2580", "9001", "9002", "9003"):
+            _post(app, "/api/sows", {"earTag": tag, "entryDate": today}, owner)
+
+        app.store.list_sow_events = counting
+        try:
+            app.handle_get("/api/recent-events?days=1", owner)
+        finally:
+            app.store.list_sow_events = real
+
+        assert len(calls) == 1, (
+            f"五頭母豬就查了 {len(calls)} 次 —— 應該只撈一次全場事件,"
+            f"再從那份資料算出每頭有沒有記錄")
+
 
 class TestMarketDeath:
     """肉豬死亡:不用耳號,只記日期、原因、公斤數(使用者決定)。

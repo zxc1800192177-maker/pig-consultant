@@ -1692,6 +1692,10 @@ class Application:
 
         sow_events = self.store.list_sow_events(farm_id)
         sow_newest = max(sow_events, key=lambda e: (e["event_date"], e["id"]), default=None)
+        # 哪幾頭已經有事件掛著 —— 從已經撈好的全場事件裡算,不是每頭各查
+        # 一次。以前是後者:一週內進場 40 頭就等於每次載入頁面多打 40 次
+        # 資料庫,而這支 API 每次開頁、每記一筆都會被呼叫到。
+        sows_with_events = {e["sow_id"] for e in sow_events}
         recent = [
             {**self._event_payload(e), "kind": "sow",
              "earTag": sow_tags.get(e["sow_id"], ""),
@@ -1706,7 +1710,7 @@ class Application:
              "detail": {"breed": s.get("breed") or ""},
              "earTag": s["ear_tag"],
              "canUndo": can_undo_entry(
-                 s, newest_sow_id, bool(self.store.list_sow_events(farm_id, s["id"])))}
+                 s, newest_sow_id, s["id"] in sows_with_events)}
             for s in all_sows if s.get("entry_date") and s["entry_date"] >= since
         ]
 
@@ -1715,6 +1719,7 @@ class Application:
 
         boar_events = self.store.list_boar_events(farm_id)
         boar_newest = max(boar_events, key=lambda e: (e["event_date"], e["id"]), default=None)
+        boars_with_events = {e["boar_id"] for e in boar_events}
         recent += [
             {**self._boar_event_payload(e), "kind": "boar",
              "earTag": boar_tags.get(e["boar_id"], ""),
@@ -1729,7 +1734,7 @@ class Application:
              "detail": {"breed": b.get("breed") or ""},
              "earTag": b["ear_tag"],
              "canUndo": can_undo_entry(
-                 b, newest_boar_id, bool(self.store.list_boar_events(farm_id, b["id"])))}
+                 b, newest_boar_id, b["id"] in boars_with_events)}
             for b in all_boars if b.get("entry_date") and b["entry_date"] >= since
         ]
 
