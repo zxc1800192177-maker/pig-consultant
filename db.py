@@ -1038,6 +1038,10 @@ class PostgresStore(Store):
         # 讀寫同一個 farm_id 的快取項目而互相踩到。
         self._event_cache: Dict[int, Tuple[float, List[dict]]] = {}
         self._event_cache_lock = threading.Lock()
+        # 每個牧場一個版本號,只在 _invalidate 時遞增。查詢開始前先記下
+        # 當時的版本號,查完準備寫入快取時比對版本號有沒有變——見
+        # _maybe_cache_farm_events 的說明,這是修競態條件用的。
+        self._event_cache_version: Dict[int, int] = {}
 
     def _cached_farm_events(self, farm_id: int) -> Optional[List[dict]]:
         with self._event_cache_lock:
@@ -1049,9 +1053,30 @@ class PostgresStore(Store):
             return None
         return events
 
+    def _farm_events_cache_version(self, farm_id: int) -> int:
+        with self._event_cache_lock:
+            return self._event_cache_version.get(farm_id, 0)
+
+    def _maybe_cache_farm_events(self, farm_id: int, version_before: int,
+                                 rows: List[dict]) -> None:
+        # 查詢開始前記下的版本號,如果跟現在不一樣,代表查詢執行期間
+        # 有別的請求寫入並清過快取——這份查詢結果其實是舊的(沒包含那筆
+        # 新寫入),寫進快取會讓「記錄完馬上重新整理」的人看到舊資料,
+        # 而且會維持到 TTL 過期為止。版本不符就乾脆不快取,下一次查詢
+        # 自然會拿到新資料再快取一次。
+        #
+        # 這個洞是真的:使用者回報過「記錄配種後,沒出現在已記錄欄位」,
+        # 追出來就是這裡——單純 pop 快取(舊寫法)在「查詢開始時快取剛好
+        # 是空的」這個情況下等於沒清,慢查詢事後把舊資料寫回去照樣蓋過。
+        with self._event_cache_lock:
+            if self._event_cache_version.get(farm_id, 0) == version_before:
+                self._event_cache[farm_id] = (time.monotonic(), rows)
+
     def _invalidate_farm_events_cache(self, farm_id: int) -> None:
         with self._event_cache_lock:
             self._event_cache.pop(farm_id, None)
+            self._event_cache_version[farm_id] = (
+                self._event_cache_version.get(farm_id, 0) + 1)
 
     def _connect(self):
         conn = getattr(self._local, "batch_conn", None)
@@ -1571,6 +1596,7 @@ class PostgresStore(Store):
             cached = self._cached_farm_events(farm_id)
             if cached is not None:
                 return [dict(e) for e in cached]
+            version_before = self._farm_events_cache_version(farm_id)
 
         sql = f"SELECT {self.EVENT_COLS} FROM sow_events WHERE farm_id = %s"
         args = [farm_id]
@@ -1588,8 +1614,7 @@ class PostgresStore(Store):
                 r["detail"] = json.loads(r["detail"])
 
         if whole_farm:
-            with self._event_cache_lock:
-                self._event_cache[farm_id] = (time.monotonic(), rows)
+            self._maybe_cache_farm_events(farm_id, version_before, rows)
             return [dict(e) for e in rows]
         return rows
 

@@ -68,6 +68,51 @@ class TestEventCacheHelpers:
         store._invalidate_farm_events_cache(999)
 
 
+class TestCacheVersioningPreventsStaleWrites:
+    """實際發生過的 bug:使用者記錄配種後,那筆沒出現在「已記錄」欄位裡。
+
+    根因是競態條件——舊寫法的 _invalidate_farm_events_cache 只是單純
+    dict.pop。如果一次「查全場事件」的查詢開始時快取剛好是空的(還沒有
+    人查過),pop 等於沒清;查詢還在跑的期間如果有另一個請求寫入新事件
+    並想清快取,清的也是「空」,清了等於沒清。等這次慢查詢終於跑完,
+    它手上的(不包含新事件的)舊結果會被原封不動寫進快取,把新事件
+    「蓋」到看不見,直到 TTL 過期為止。
+
+    修法是版本號:查詢開始前記下版本號,寫入快取前比對版本號有沒有變。
+    這裡不需要真的開執行緒模擬平行——「查詢開始時記下版本號」跟
+    「查詢結束時準備寫入」之間插入一次 _invalidate,就是在模擬「查詢在
+    跑的這段期間,另一個請求寫入並清了快取」,效果跟真的平行請求一樣。
+    """
+
+    def test_maybe_cache_writes_when_nothing_changed_during_the_query(self, store):
+        version_before = store._farm_events_cache_version(5)
+        store._maybe_cache_farm_events(5, version_before, [{"id": 1}])
+        assert store._cached_farm_events(5) == [{"id": 1}]
+
+    def test_maybe_cache_skips_a_stale_write_after_a_concurrent_invalidate(self, store):
+        version_before = store._farm_events_cache_version(5)
+        # 模擬:查詢還在跑的時候,另一個請求寫入新事件並清了快取。
+        store._invalidate_farm_events_cache(5)
+        # 慢查詢終於跑完,想把(不包含那筆新事件的)舊結果寫回快取——
+        # 這次寫入必須被拒絕,否則使用者剛記的那筆就會被蓋成看不見。
+        store._maybe_cache_farm_events(5, version_before, [{"id": 1, "stale": True}])
+        assert store._cached_farm_events(5) is None
+
+    def test_stale_write_does_not_resurrect_after_repeated_invalidates(self, store):
+        version_before = store._farm_events_cache_version(5)
+        store._invalidate_farm_events_cache(5)
+        store._invalidate_farm_events_cache(5)
+        store._maybe_cache_farm_events(5, version_before, [{"id": 1, "stale": True}])
+        assert store._cached_farm_events(5) is None
+
+    def test_invalidate_only_bumps_the_named_farm(self, store):
+        v1 = store._farm_events_cache_version(1)
+        v2 = store._farm_events_cache_version(2)
+        store._invalidate_farm_events_cache(1)
+        assert store._farm_events_cache_version(1) == v1 + 1
+        assert store._farm_events_cache_version(2) == v2
+
+
 class TestListSowEventsUsesTheCache:
     """直接測 list_sow_events() 本身,不繞過公開介面 —— 但只測快取命中
     的路徑(不必連資料庫),快取沒命中時才會走到 _connect()。
