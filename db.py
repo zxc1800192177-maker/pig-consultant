@@ -1003,6 +1003,46 @@ class InMemoryStore(Store):
         return [dict(d) for d in rows]
 
 
+class _FarmEventsQuery:
+    """一次正在進行中的「查全場事件」,讓同時抵達的請求共用同一份結果。
+
+    為什麼光有快取不夠(實測出來的):前端開頁面時會平行打出 5 支都要查
+    全場事件的 API。它們**幾乎同時**抵達,於是同時發現快取是空的,然後
+    五條各查各的 —— 快取一次都沒命中。實測 5 條執行緒同時呼叫,資料庫
+    真的被查了 5 次。也就是說,單靠 TTL 快取完全沒有解到「同一瞬間疊出
+    好幾份 32,000 筆查詢結果」這個原始問題(那正是懷疑把免費方案 512MB
+    衝爆、觸發 status 137 的原因)。
+
+    有了這個之後,同時抵達的那批人只有第一個真的去查,其餘的等結果。
+    快取仍然有用,負責的是「幾秒內的下一批請求」;這裡負責的是
+    「同一瞬間的這一批」,兩者互補。
+    """
+
+    __slots__ = ("done", "rows", "error", "version")
+
+    def __init__(self, version: int):
+        self.done = threading.Event()
+        self.rows: Optional[List[dict]] = None
+        self.error: Optional[BaseException] = None
+        # 發起查詢當下的快取版本號。後到的人要版本相同才准搭順風車 ——
+        # 版本變了代表中間有寫入,這份查詢看不到那筆新資料。
+        self.version = version
+
+    def finish(self, rows: Optional[List[dict]], error: Optional[BaseException]) -> None:
+        self.rows = rows
+        self.error = error
+        self.done.set()
+
+    def wait(self) -> List[dict]:
+        # 不設 timeout:發起人一定會在 finally 裡 finish(),包括查詢拋
+        # 例外的情形。設了逾時反而會讓等待的人在資料庫慢的時候自己再去
+        # 查一次 —— 那正是這個機制要避免的事。
+        self.done.wait()
+        if self.error is not None:
+            raise self.error
+        return self.rows or []
+
+
 class PostgresStore(Store):
     """正式環境。SQL 一律用參數化查詢(%s),不做字串拼接 —— 拼接就是
     SQL injection 的入口,而使用者名稱正是使用者可控的輸入。
@@ -1042,6 +1082,9 @@ class PostgresStore(Store):
         # 當時的版本號,查完準備寫入快取時比對版本號有沒有變——見
         # _maybe_cache_farm_events 的說明,這是修競態條件用的。
         self._event_cache_version: Dict[int, int] = {}
+        # 正在跑的整場查詢,一個牧場最多一份 —— 見 _FarmEventsQuery 與
+        # list_sow_events 的說明。快取本身擋不住「同時抵達」的那一批請求。
+        self._event_inflight: Dict[int, "_FarmEventsQuery"] = {}
 
     def _cached_farm_events(self, farm_id: int) -> Optional[List[dict]]:
         with self._event_cache_lock:
@@ -1077,6 +1120,33 @@ class PostgresStore(Store):
             self._event_cache.pop(farm_id, None)
             self._event_cache_version[farm_id] = (
                 self._event_cache_version.get(farm_id, 0) + 1)
+
+    def _join_or_lead_farm_query(self, farm_id: int):
+        """要嘛加入已經在跑的整場查詢,要嘛自己當發起人去查。
+
+        回傳 (query, is_leader)。is_leader 為真的人負責真的去查資料庫,
+        並在結束時呼叫 query.finish();其他人只要等 query.wait()。
+
+        **只有版本號相同才准搭順風車**:如果在別人開始查之後才發生寫入
+        (版本號已經前進),那份還在跑的查詢看不到那筆新資料,後到的
+        請求搭上去就會拿到舊的 —— 跟 _maybe_cache_farm_events 擋的是
+        同一件事,只是換個入口。這種時候寧可自己再查一次。
+        """
+        with self._event_cache_lock:
+            version = self._event_cache_version.get(farm_id, 0)
+            running = self._event_inflight.get(farm_id)
+            if running is not None and running.version == version:
+                return running, False
+            # 沒人在查,或在查的那份已經過時 —— 自己來。後者會覆蓋掉
+            # 登記,原本那位仍然跑完、仍然會 finish(),只是不再有人加入。
+            query = _FarmEventsQuery(version)
+            self._event_inflight[farm_id] = query
+            return query, True
+
+    def _clear_inflight(self, farm_id: int, query) -> None:
+        with self._event_cache_lock:
+            if self._event_inflight.get(farm_id) is query:
+                del self._event_inflight[farm_id]
 
     def _connect(self):
         conn = getattr(self._local, "batch_conn", None)
@@ -1596,8 +1666,32 @@ class PostgresStore(Store):
             cached = self._cached_farm_events(farm_id)
             if cached is not None:
                 return [dict(e) for e in cached]
-            version_before = self._farm_events_cache_version(farm_id)
 
+            # 快取沒命中。同時抵達的那一批請求會全部走到這裡(這正是
+            # 開頁面時的情形),所以不能各查各的 —— 讓第一個去查,
+            # 其餘的等他。見 _FarmEventsQuery 的說明。
+            query, is_leader = self._join_or_lead_farm_query(farm_id)
+            if not is_leader:
+                return [dict(e) for e in query.wait()]
+            version_before = query.version
+            try:
+                rows = self._query_whole_farm_events(farm_id)
+            except BaseException as exc:
+                query.finish(None, exc)
+                self._clear_inflight(farm_id, query)
+                raise
+            # 先讓等待的人拿到結果,再處理快取 —— 他們已經等夠久了。
+            query.finish(rows, None)
+            self._clear_inflight(farm_id, query)
+            self._maybe_cache_farm_events(farm_id, version_before, rows)
+            return [dict(e) for e in rows]
+
+        return self._query_sow_events(farm_id, sow_id, since, until)
+
+    def _query_whole_farm_events(self, farm_id):
+        return self._query_sow_events(farm_id, None, None, None)
+
+    def _query_sow_events(self, farm_id, sow_id, since, until):
         sql = f"SELECT {self.EVENT_COLS} FROM sow_events WHERE farm_id = %s"
         args = [farm_id]
         if sow_id is not None:
@@ -1612,10 +1706,6 @@ class PostgresStore(Store):
         for r in rows:
             if not isinstance(r["detail"], dict):
                 r["detail"] = json.loads(r["detail"])
-
-        if whole_farm:
-            self._maybe_cache_farm_events(farm_id, version_before, rows)
-            return [dict(e) for e in rows]
         return rows
 
     def delete_sow_event(self, farm_id, event_id) -> bool:
