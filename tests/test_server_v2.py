@@ -1994,3 +1994,160 @@ class TestCustomTasksInTheWeek:
                      {"due": "2026-08-19", "done": True}, token)[0] == 400
         assert _post(app, "/api/custom-tasks/done",
                      {"taskId": task_id, "due": "壞掉", "done": True}, token)[0] == 400
+
+
+class TestUnknownEarTagSowsAreRealSows:
+    """耳號磨損看不清楚時,**用日期當耳號**先記下來(使用者決定):
+    8/17 配的那頭就是「不明-0817」。
+
+    關鍵是她是一頭**真的母豬**,不是一個把好幾頭混在一起的暫存桶 ——
+    週期推算、預產期、工作清單全部照常。共用一筆的做法會讓推算出來的
+    日期全是假的,那比不記還糟。
+    """
+
+    def test_a_two_day_service_lands_on_one_sow(self, farm):
+        """連配二三天算同一頭,耳號取第一天 —— 跟預產期的算法一致。
+        每天各建一頭的話,一次發情會憑空變出三頭母豬。
+        """
+        app, owner, _ = farm
+        today = date.today()
+        for back, boar in ((1, "B1"), (0, "B2")):
+            st, body = _post(app, "/api/sow-events", {
+                "unknownTag": "0817", "type": "MT",
+                "date": (today - timedelta(days=back)).isoformat(),
+                "detail": {"boar_tag": boar}}, owner)
+            assert st == 200, body
+
+        sows = app.handle_get("/api/sows", owner)[1]["sows"]
+        assert len(sows) == 1, "同一個不明耳號被建成好幾頭母豬"
+        assert sows[0]["earTag"] == "不明-0817"
+
+    def test_she_gets_a_real_due_date(self, farm):
+        """她是一頭真的豬,只是還不知道叫什麼 —— 該推算的照推算。"""
+        app, owner, _ = farm
+        mated = date.today() - timedelta(days=1)
+        _post(app, "/api/sow-events", {
+            "unknownTag": "0817", "type": "MT",
+            "date": mated.isoformat()}, owner)
+
+        sow_id = app.handle_get("/api/sows", owner)[1]["sows"][0]["id"]
+        status = app.handle_get(f"/api/sows/{sow_id}", owner)[1]["status"]
+        assert status["state"] == "pregnant"
+        assert status["due"] == (mated + timedelta(days=114)).isoformat()
+
+    def test_the_prefix_comes_from_the_server(self, farm):
+        """前綴不信前端送來的整串 —— 否則這個入口可以拿來建任意耳號的
+        母豬,繞過新增母豬該有的檢查。
+        """
+        app, owner, _ = farm
+        _post(app, "/api/sow-events", {
+            "unknownTag": "../../1183", "type": "MT",
+            "date": date.today().isoformat()}, owner)
+        tags = [s["earTag"] for s in app.handle_get("/api/sows", owner)[1]["sows"]]
+        assert all(t.startswith("不明-") for t in tags), tags
+
+    def test_different_dates_are_different_sows(self, farm):
+        """8/17 配的那頭跟 8/20 配的那頭是兩頭不同的豬。"""
+        app, owner, _ = farm
+        today = date.today()
+        for tag, back in (("0817", 3), ("0820", 0)):
+            _post(app, "/api/sow-events", {
+                "unknownTag": tag, "type": "MT",
+                "date": (today - timedelta(days=back)).isoformat()}, owner)
+        sows = app.handle_get("/api/sows", owner)[1]["sows"]
+        assert len(sows) == 2
+
+    def test_a_normal_record_still_needs_a_real_sow(self, farm):
+        """沒帶 unknownTag 時行為不變 —— 不能因為多了這條路就讓打錯的
+        耳號悄悄變成一頭新的豬。
+        """
+        app, owner, _ = farm
+        st, body = _post(app, "/api/sow-events", {
+            "sowId": 99999, "type": "MT",
+            "date": date.today().isoformat()}, owner)
+        assert st == 404
+
+
+class TestIdentifyingAnUnknownSow:
+    """之後讀得到耳號時,把「不明-MMDD」認回真正那一頭。
+
+    是**併回**不是改耳號:真正那頭母豬通常早就存在而且有自己的歷史,
+    單純改耳號會變成同一頭豬有兩筆記錄、胎次斷成兩半。
+    """
+
+    def _setup(self, app, owner):
+        today = date.today()
+        _post(app, "/api/sows",
+              {"earTag": "1183",
+               "entryDate": (today - timedelta(days=300)).isoformat()}, owner)
+        real = app.handle_get("/api/sows", owner)[1]["sows"][0]["id"]
+        _post(app, "/api/sow-events", {
+            "sowId": real, "type": "FW",
+            "date": (today - timedelta(days=200)).isoformat(),
+            "detail": {"born_alive": 10}}, owner)
+        for back, boar in ((1, "B1"), (0, "B2")):
+            _post(app, "/api/sow-events", {
+                "unknownTag": "0817", "type": "MT",
+                "date": (today - timedelta(days=back)).isoformat(),
+                "detail": {"boar_tag": boar}}, owner)
+        unknown = next(s for s in app.handle_get("/api/sows", owner)[1]["sows"]
+                       if s["isUnknown"])
+        return real, unknown["id"]
+
+    def test_events_move_and_the_placeholder_goes_away(self, farm):
+        app, owner, _ = farm
+        real, unknown = self._setup(app, owner)
+
+        st, body = _post(app, "/api/sows/identify",
+                         {"sowId": unknown, "earTag": "1183"}, owner)
+        assert st == 200, body
+        assert body["moved"] == 2
+
+        tags = [s["earTag"] for s in app.handle_get("/api/sows", owner)[1]["sows"]]
+        assert tags == ["1183"], "暫時那頭沒有被清掉"
+
+    def test_the_real_sow_keeps_her_own_history(self, farm):
+        """併回來的事件要加在她原本的歷史上,不是取代掉。"""
+        app, owner, _ = farm
+        real, unknown = self._setup(app, owner)
+        _post(app, "/api/sows/identify", {"sowId": unknown, "earTag": "1183"}, owner)
+
+        events = app.handle_get(f"/api/sows/{real}", owner)[1]["events"]
+        kinds = sorted(e["type"] for e in events)
+        assert kinds == ["FW", "MT", "MT"], kinds
+
+    def test_the_due_date_still_comes_from_the_first_service(self, farm):
+        app, owner, _ = farm
+        real, unknown = self._setup(app, owner)
+        _post(app, "/api/sows/identify", {"sowId": unknown, "earTag": "1183"}, owner)
+
+        status = app.handle_get(f"/api/sows/{real}", owner)[1]["status"]
+        first = date.today() - timedelta(days=1)
+        assert status["due"] == (first + timedelta(days=114)).isoformat()
+
+    def test_an_unreadable_target_tag_is_refused(self, farm):
+        app, owner, _ = farm
+        _, unknown = self._setup(app, owner)
+        st, body = _post(app, "/api/sows/identify",
+                         {"sowId": unknown, "earTag": "9999"}, owner)
+        assert st == 404
+        # 失敗時什麼都不能動 —— 事件還在暫時那頭身上
+        assert any(s["isUnknown"] for s in
+                   app.handle_get("/api/sows", owner)[1]["sows"])
+
+    def test_an_already_identified_sow_cannot_be_merged_again(self, farm):
+        """把一頭正常母豬併進另一頭不是這個功能該做的事,擋掉。"""
+        app, owner, _ = farm
+        real, _unknown = self._setup(app, owner)
+        st, _ = _post(app, "/api/sows/identify",
+                      {"sowId": real, "earTag": "1183"}, owner)
+        assert st == 400
+
+    def test_a_worker_cannot_merge_sows(self, farm):
+        """合併兩頭豬的資料弄錯了要一筆一筆拆回來,不是員工該有的權限。"""
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        _, unknown = self._setup(app, owner)
+        st, _ = _post(app, "/api/sows/identify",
+                      {"sowId": unknown, "earTag": "1183"}, worker)
+        assert st == 403

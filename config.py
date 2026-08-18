@@ -187,6 +187,16 @@ MAX_PENS_PER_FARM = int(os.environ.get("MAX_PENS_PER_FARM", "3000"))  # 三區�
 MAX_EAR_TAG_CHARS = 30
 MAX_BREED_CHARS = 30
 MAX_PEN_NAME_CHARS = 30
+
+# 耳號看不清楚時的耳號前綴。**用日期當耳號**(使用者決定):8/17 配的那頭
+# 就是「不明-0817」,連配二三天取第一天(跟預產期的算法一致)。
+#
+# 這樣每頭不明母豬各自是一筆記錄,週期、預產期、工作提醒全部照常推算 ——
+# 她是一頭真的豬,只是還不知道叫什麼。若改成所有不明母豬共用一筆,好幾頭
+# 的事件會混在一起,推算出來的日期全是假的。
+#
+# 之後讀得到耳號時,把她的事件併回真正那頭母豬(見 reassign_sow_event)。
+UNKNOWN_SOW_PREFIX = "不明-"
 MAX_TASK_NAME_CHARS = 40       # 自訂工作的名稱
 MAX_CUSTOM_TASKS_PER_FARM = 100
 MAX_EVENT_FIELDS = 12          # 單筆事件的 detail 最多幾個欄位

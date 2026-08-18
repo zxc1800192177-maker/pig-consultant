@@ -1370,6 +1370,10 @@ let allBoars = [];
 let pens = [];               // 移欄表單用,含即時佔用狀態
 let recordCode = null;      // 目前開著的表單是哪一種事件
 let recSowTags = [];        // 配種一次記多頭時,目前已加入清單的耳號
+// 這次記錄是不是記在「耳號看不清楚」的母豬身上。用一個布林值而不是往
+// recSowTags 塞一個特殊字串 —— 那個陣列裡放的都是真實耳號,混一個哨兵
+// 值進去,哪天有人真的把豬取名叫那個字串就會壞掉。
+let recUnknownSow = false;
 
 async function reloadBoars() {
   // 未登入就別發這個請求。少了這道守衛,登入畫面上會固定丟一個 401 到
@@ -1400,6 +1404,7 @@ async function openRecordForm(code) {
   if (!spec) return;
   recordCode = code;
   recSowTags = [];
+  recUnknownSow = false;
 
   // 欄位佔用狀態隨時在變,打開表單當下重抓一次才不會讓使用者選到
   // 其實已經有豬的欄位(其他事件的表單不需要這個,沒有額外請求)。
@@ -1427,6 +1432,7 @@ async function openRecordForm(code) {
     <button type="button" class="btn-primary" id="recSubmit">記錄</button>`;
 
   if (supportsMultiService(code)) renumberServiceRows();
+  renderUnknownButton();
   box.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
@@ -1543,7 +1549,8 @@ function sowPickerField() {
              placeholder="輸入或選擇耳號" autocomplete="off"></label>
     <datalist id="sowTags">
       ${sows.map((s) => `<option value="${escapeHtml(s.earTag)}"></option>`).join("")}
-    </datalist>`;
+    </datalist>
+    ${unknownSowButton()}`;
 }
 
 // 配種一次記多頭:耳號一個一個加進清單,公豬跟發情穩定度整批共用
@@ -1561,7 +1568,36 @@ function multiSowPickerField() {
       ${sows.map((s) => `<option value="${escapeHtml(s.earTag)}"></option>`).join("")}
     </datalist>
     <p class="rec-err is-hidden" id="recSowAddErr"></p>
-    <div class="chips" id="recSowChips"></div>`;
+    <div class="chips" id="recSowChips"></div>
+    ${unknownSowButton()}`;
+}
+
+/** 耳號磨損看不清楚時用的按鈕。**耳號用日期**(使用者決定):8/17 配的
+ * 那頭就是「不明-0817」,連配二三天取第一天,跟預產期的算法一致。
+ *
+ * 日期在送出時才換算,不是按下去的當下 —— 使用者按完還可能回頭改日期,
+ * 當下算好的話耳號會跟實際記錄的日期對不上。
+ */
+function unknownSowButton() {
+  return `
+    <button type="button" class="btn-ghost rec-unknown" id="recUnknownBtn"></button>
+    <p class="fld-h">耳號看不清楚時用。系統會用配種日期當她的暫時耳號,
+       之後看得到耳號再併回真正那一頭。</p>`;
+}
+
+/** 送出時才算的暫時耳號:MMDD。配種取第一次的日期(跟預產期同一天),
+ * 其他事件取事件當天。
+ */
+function unknownTagFor(when) {
+  const [, m, d] = when.split("-");
+  return `${m}${d}`;
+}
+
+function renderUnknownButton() {
+  const btn = $("recUnknownBtn");
+  if (!btn) return;
+  btn.textContent = recUnknownSow ? "✓ 不明母豬(已選)" : "耳號看不清楚?記為不明母豬";
+  btn.classList.toggle("is-active", recUnknownSow);
 }
 
 function renderSowChips() {
@@ -1870,12 +1906,16 @@ async function submitRecord() {
     return submitMultiSowRecord(spec, when, detail, serviceEvents);
   }
 
-  const tag = ($("recSow")?.value || "").trim();
-  const sow = sows.find((s) => s.earTag === tag);
-  if (!sow) return showRecordError(tag ? `找不到耳號 ${tag}` : "請選擇母豬");
+  // 不明母豬:配種以外的事件沒有配種日期可用,耳號取事件當天(使用者決定)。
+  const tag = recUnknownSow ? "不明母豬" : ($("recSow")?.value || "").trim();
+  const sow = recUnknownSow ? null : sows.find((s) => s.earTag === tag);
+  if (!recUnknownSow && !sow) {
+    return showRecordError(tag ? `找不到耳號 ${tag}` : "請選擇母豬");
+  }
 
   const { ok, data } = await api("/api/sow-events", postJson({
-    sowId: sow.id, type: recordCode, date: when, detail,
+    ...(recUnknownSow ? { unknownTag: unknownTagFor(when) } : { sowId: sow.id }),
+    type: recordCode, date: when, detail,
   }));
   if (!ok) return showRecordError(data.error || "記錄失敗");
 
@@ -1887,7 +1927,8 @@ async function submitRecord() {
   ]);
   // 剛記的這頭若正好是開著的那張卡,一併重新整理 —— 否則死亡/淘汰後
   // 耳號的民國年後綴、狀態、生產表現都會停在記錄之前的樣子。
-  if (openSowId === sow.id) await openSow(sow.id);
+  // 不明母豬時 sow 是 null(那頭豬是伺服器現建的,前端沒有她的 id)。
+  if (sow && openSowId === sow.id) await openSow(sow.id);
 }
 
 /** 配種一次記多頭的送出邏輯。每一頭各自送一筆 /api/sow-events(互相
@@ -1898,22 +1939,31 @@ async function submitRecord() {
 async function submitMultiSowRecord(spec, when, detail, services) {
   // 打了字但忘記按 Enter/+ 的話,視為要加入,不要悄悄漏掉這一筆。
   addSowTag();
-  if (recSowTags.length === 0) return showRecordError("請至少加入一頭母豬耳號");
+  if (recSowTags.length === 0 && !recUnknownSow) {
+    return showRecordError("請至少加入一頭母豬耳號");
+  }
 
   // 配種:每頭母豬 × 每一次配種各一筆(兩頭配兩天 = 4 筆),每一次各有
   // 自己的日期與公豬。其餘事件沒有 services,維持一頭一筆。
   const times = services && services.length ? services : [{ date: when, detail }];
 
-  const results = await Promise.all(recSowTags.map(async (tag) => {
-    const sow = sows.find((s) => s.earTag === tag);
-    if (!sow) return { tag, ok: false, error: "耳號已經不存在" };
+  // 不明母豬:耳號用第一次配種的日期(跟預產期同一天),所以連配二三天
+  // 會落在同一頭身上,而不是每天各建一頭。
+  const first = times.map((t) => t.date).sort()[0];
+  const targets = recSowTags.map((tag) => ({ tag, unknown: false }));
+  if (recUnknownSow) targets.push({ tag: "不明母豬", unknown: true });
+
+  const results = await Promise.all(targets.map(async ({ tag, unknown }) => {
+    const sow = unknown ? null : sows.find((s) => s.earTag === tag);
+    if (!unknown && !sow) return { tag, ok: false, error: "耳號已經不存在" };
 
     // 同一頭母豬的幾次配種**依序**送,不併行 —— 併行的話伺服器端幾筆
     // 同時寫入會各自去清同一個牧場的事件快取,徒增競爭;而且哪一筆先
     // 寫進去也影響不了結果,沒必要搶。
     for (const t of times) {
       const { ok, data } = await api("/api/sow-events", postJson({
-        sowId: sow.id, type: recordCode, date: t.date, detail: t.detail,
+        ...(unknown ? { unknownTag: unknownTagFor(first) } : { sowId: sow.id }),
+        type: recordCode, date: t.date, detail: t.detail,
       }));
       if (!ok) return { tag, ok: false, error: data?.error };
     }
@@ -1953,6 +2003,57 @@ async function reloadRecent() {
     ? `最近 7 天 ${data.events.length} 筆` : "";
   box.innerHTML = data.events.map(recordedRow).join("")
     || '<p class="hint">最近 7 天還沒有記錄。</p>';
+
+  renderPendingIdentity();
+}
+
+/** 待確認身分:耳號看不清楚時用日期先記著的母豬。
+ *
+ * 資料來自已經載入的 sows,不另外打 API —— 這份清單跟母豬清單是同一份
+ * 資料的不同切法,多打一次只是讓開頁面時的平行請求再多一支。
+ *
+ * 只有牧場主看得到:認回耳號是在合併兩頭豬的資料,弄錯了要一筆一筆拆
+ * 回來(伺服器端另外把關,這裡只是不給按)。
+ */
+function renderPendingIdentity() {
+  const card = $("recPendingCard");
+  const box = $("recPending");
+  if (!card || !box) return;
+
+  const pending = account.isOwner ? sows.filter((s) => s.isUnknown) : [];
+  card.classList.toggle("is-hidden", pending.length === 0);
+  if (!pending.length) return;
+
+  $("recPendingCount").textContent = `${pending.length} 頭`;
+  // 不沿用 .done-row —— 那是 flex 的一列,這裡要的是「名稱在上、輸入在下」
+  // 的兩行版面,覆寫它的 display 會讓內層的 flex 設定失效而把文字擠成
+  // 一行一個字(實際發生過)。給它自己的 class 乾淨得多。
+  box.innerHTML = pending.map((s) => `
+    <div class="pend-row">
+      <div class="pend-t">${escapeHtml(s.earTag)}</div>
+      <div class="pend-s">記錄時耳號看不清楚</div>
+      <div class="rec-tag-row">
+        <input list="sowTags" class="pend-tag" inputmode="numeric"
+               placeholder="真正的耳號" autocomplete="off">
+        <button type="button" class="btn-soft pend-go"
+                data-identify="${s.id}">確認</button>
+      </div>
+    </div>`).join("");
+}
+
+/** 把一頭「不明-MMDD」認回真正的耳號 —— 她的記錄會併進那一頭。 */
+async function identifyUnknownSow(sowId, row) {
+  const tag = (row?.querySelector(".pend-tag")?.value || "").trim();
+  if (!tag) return showBanner("請填寫真正的耳號", "warn");
+
+  const { ok, data } = await api("/api/sows/identify", postJson({
+    sowId, earTag: tag,
+  }));
+  if (!ok) return showBanner(data.error || "無法確認身分", "warn");
+
+  showBanner(`已併回 ${tag}(${data.moved} 筆記錄)`, "ok");
+  // 併完之後這頭豬不見了、那頭豬多了記錄,週期跟著變 —— 整批重讀。
+  await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
 }
 
 async function undoRecord(eventId, kind, animalId) {
@@ -2188,6 +2289,15 @@ document.addEventListener("click", (e) => {
   if (e.target.id === "recSubmit") return submitRecord();
   if (e.target.id === "recSowAdd") return addSowTag();
   if (e.target.id === "recAddService") return addServiceRow();
+  const identify = e.target.closest("[data-identify]");
+  if (identify) {
+    return identifyUnknownSow(Number(identify.dataset.identify),
+                              identify.closest(".pend-row"));
+  }
+  if (e.target.id === "recUnknownBtn") {
+    recUnknownSow = !recUnknownSow;
+    return renderUnknownButton();
+  }
 
   const delService = e.target.closest(".svc-del");
   if (delService) return removeServiceRow(delService.closest(".svc-row"));

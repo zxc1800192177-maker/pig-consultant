@@ -166,6 +166,18 @@ ALTER TABLE boars ADD COLUMN IF NOT EXISTS dam_tag TEXT NOT NULL DEFAULT '';
 ALTER TABLE sows ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id);
 ALTER TABLE boars ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id);
 
+-- 耳號磨損看不清楚時,**用日期當耳號**先建一頭豬(使用者決定):8/17 配的
+-- 那頭就是「不明-0817」。連配二三天算同一頭,取第一天,跟預產期的算法一致。
+--
+-- 她是一頭**真的母豬**,只是還不知道叫什麼 —— 所以週期推算、預產期、工作
+-- 清單、月報一律照常,不做任何排除。這跟「所有不明母豬共用一個桶」是完全
+-- 不同的做法:那樣會把好幾頭的事件混在一起,推算出來的日期全是假的。
+--
+-- is_unknown 只用來標記「身分還沒確認」,好列出待確認清單;之後讀得到耳號
+-- 時把她的事件併回真正那頭母豬(見 reassign_sow_event)。
+ALTER TABLE sows ADD COLUMN IF NOT EXISTS is_unknown BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS sows_unknown_idx ON sows (farm_id) WHERE is_unknown;
+
 -- detail 用 JSONB:八種事件各自需要的欄位差很多(分娩要活產/死產/木乃伊,
 -- 仔豬損失要數量/原因,驗孕只要 +/-),但都只是「這次事件的附註」,
 -- 不會被單獨查詢 —— 與 health_checks.values 同一個判斷。
@@ -404,7 +416,25 @@ class Store:
 
     # --- 母豬 ---
     def add_sow(self, farm_id, ear_tag, entry_date=None, birth_date=None,
-                breed="", sire_tag="", dam_tag="", parity=0, created_by=None) -> int:
+                breed="", sire_tag="", dam_tag="", parity=0, created_by=None,
+                is_unknown=False) -> int:
+        """`is_unknown` 只給「不明母豬」用,一個牧場最多一頭,由
+        get_or_create_unknown_sow() 建立,不該由一般的新增流程傳入。
+        """
+        raise NotImplementedError
+
+    def get_or_create_sow_by_tag(self, farm_id: int, ear_tag: str,
+                                 is_unknown: bool = False) -> dict:
+        """依耳號取一頭母豬,沒有就建一頭。
+
+        給「不明母豬」用:耳號看不清楚時用日期當耳號(不明-0817),連配
+        二三天要落在**同一頭**身上,所以第二天再記時必須找回第一天建的
+        那頭,而不是又建一頭新的。
+        """
+        raise NotImplementedError
+
+    def reassign_sow_event(self, farm_id: int, event_id: int, sow_id: int) -> bool:
+        """把一筆事件改掛到另一頭母豬 —— 「不明母豬」補登身分用。"""
         raise NotImplementedError
 
     def list_sows(self, farm_id: int, status: Optional[str] = None) -> List[dict]:
@@ -768,7 +798,8 @@ class InMemoryStore(Store):
         return False
 
     def add_sow(self, farm_id, ear_tag, entry_date=None, birth_date=None,
-                breed="", sire_tag="", dam_tag="", parity=0, created_by=None) -> int:
+                breed="", sire_tag="", dam_tag="", parity=0, created_by=None,
+                is_unknown=False) -> int:
         dup = [s for s in self._owned(self.sows, farm_id, ear_tag=ear_tag)
                if s["entry_date"] == entry_date]
         if dup:
@@ -779,7 +810,7 @@ class InMemoryStore(Store):
             "entry_date": entry_date, "birth_date": birth_date, "breed": breed,
             "sire_tag": sire_tag, "dam_tag": dam_tag, "parity": parity,
             "status": "active", "pen_id": None, "photo_url": "",
-            "created_by": created_by,
+            "created_by": created_by, "is_unknown": is_unknown,
         })
         return sow_id
 
@@ -797,6 +828,24 @@ class InMemoryStore(Store):
         rows = [s for s in self._owned(self.sows, farm_id, ear_tag=ear_tag)
                 if s["status"] == "active"]
         return dict(rows[0]) if rows else None
+
+    def get_or_create_sow_by_tag(self, farm_id, ear_tag, is_unknown=False):
+        rows = [s for s in self._owned(self.sows, farm_id, ear_tag=ear_tag)]
+        if rows:
+            return dict(rows[0])
+        sow_id = self.add_sow(farm_id, ear_tag, is_unknown=is_unknown)
+        return self.get_sow(farm_id, sow_id)
+
+    def reassign_sow_event(self, farm_id, event_id, sow_id) -> bool:
+        target = self.get_sow(farm_id, sow_id)
+        if target is None:
+            return False
+        for e in self.sow_events:
+            if e["id"] == event_id and e["farm_id"] == farm_id:
+                e["sow_id"] = sow_id
+                self._forget_event_keys()   # 判重索引含 sow_id,改掛要重建
+                return True
+        return False
 
     def update_sow(self, farm_id, sow_id, **fields) -> bool:
         rows = self._owned(self.sows, farm_id, id=sow_id)
@@ -1408,7 +1457,7 @@ class PostgresStore(Store):
     # B 牧場資料的漏洞(憲法第十一條),沒有例外。
 
     SOW_COLS = ("id, farm_id, ear_tag, entry_date, birth_date, breed, sire_tag,"
-                " dam_tag, parity, status, pen_id, photo_url, created_by")
+                " dam_tag, parity, status, pen_id, photo_url, created_by, is_unknown")
     EVENT_COLS = ("id, farm_id, sow_id, event_type, event_date, detail,"
                   " seq, recorded_by, excluded")
 
@@ -1469,14 +1518,15 @@ class PostgresStore(Store):
             return row is not None
 
     def add_sow(self, farm_id, ear_tag, entry_date=None, birth_date=None,
-                breed="", sire_tag="", dam_tag="", parity=0, created_by=None) -> int:
+                breed="", sire_tag="", dam_tag="", parity=0, created_by=None,
+                is_unknown=False) -> int:
         with self._connect() as conn:
             return conn.execute(
                 "INSERT INTO sows (farm_id, ear_tag, entry_date, birth_date, breed,"
-                " sire_tag, dam_tag, parity, created_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-                " RETURNING id",
+                " sire_tag, dam_tag, parity, created_by, is_unknown)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (farm_id, ear_tag, entry_date, birth_date, breed,
-                 sire_tag, dam_tag, parity, created_by)).fetchone()[0]
+                 sire_tag, dam_tag, parity, created_by, is_unknown)).fetchone()[0]
 
     def list_sows(self, farm_id, status=None):
         sql = f"SELECT {self.SOW_COLS} FROM sows WHERE farm_id = %s"
@@ -1502,6 +1552,45 @@ class PostgresStore(Store):
                 " WHERE farm_id = %s AND ear_tag = %s AND status = 'active'",
                 (farm_id, ear_tag)), self.SOW_COLS)
         return rows[0] if rows else None
+
+    def get_or_create_sow_by_tag(self, farm_id, ear_tag, is_unknown=False):
+        with self._connect() as conn:
+            rows = self._rows(conn.execute(
+                f"SELECT {self.SOW_COLS} FROM sows"
+                " WHERE farm_id = %s AND ear_tag = %s", (farm_id, ear_tag)),
+                self.SOW_COLS)
+            if rows:
+                return rows[0]
+            # 連配二三天時,第二天那筆會跟第一天同時送出(前端逐列依序打,
+            # 但兩頭母豬是並行的),兩邊都可能查到「還沒有」。
+            # sows_tag_unique 擋住第二筆,ON CONFLICT 讓它不要炸掉,
+            # 下面再查一次就拿得到贏的那筆。
+            conn.execute(
+                "INSERT INTO sows (farm_id, ear_tag, is_unknown)"
+                " VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                (farm_id, ear_tag, is_unknown))
+            rows = self._rows(conn.execute(
+                f"SELECT {self.SOW_COLS} FROM sows"
+                " WHERE farm_id = %s AND ear_tag = %s", (farm_id, ear_tag)),
+                self.SOW_COLS)
+        return rows[0] if rows else None
+
+    def reassign_sow_event(self, farm_id, event_id, sow_id) -> bool:
+        with self._connect() as conn:
+            # sow_id 也帶 farm_id 一起查,不能只信呼叫端給的號碼 ——
+            # 否則可以把自己的事件掛到別的牧場的母豬身上。
+            target = conn.execute(
+                "SELECT 1 FROM sows WHERE id = %s AND farm_id = %s",
+                (sow_id, farm_id)).fetchone()
+            if target is None:
+                return False
+            row = conn.execute(
+                "UPDATE sow_events SET sow_id = %s WHERE id = %s AND farm_id = %s"
+                " RETURNING id", (sow_id, event_id, farm_id)).fetchone()
+        ok = row is not None
+        if ok:
+            self._invalidate_farm_events_cache(farm_id)
+        return ok
 
     def update_sow(self, farm_id, sow_id, **fields) -> bool:
         allowed = {"ear_tag", "entry_date", "birth_date", "breed", "sire_tag",

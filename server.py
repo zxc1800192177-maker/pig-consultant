@@ -547,6 +547,8 @@ class Application:
             return self._import_preview(payload, token)
         if path == "/api/import":
             return self._import_commit(payload, token)
+        if path == "/api/sows/identify":
+            return self._identify_unknown_sow(payload, token)
         return 404, {"error": "not found"}
 
     def handle_delete(self, path: str, token: Optional[str] = None) -> Tuple[int, dict]:
@@ -753,6 +755,9 @@ class Application:
             "damTag": row.get("dam_tag") or "",
             "entryDate": _iso(row.get("entry_date")),
             "birthDate": _iso(row.get("birth_date")),
+            # 耳號還沒確認的(耳號看不清楚時用日期先記著的那些)。畫面要
+            # 分得出來,才能列出待確認清單讓使用者補登真正的耳號。
+            "isUnknown": bool(row.get("is_unknown")),
         }
 
     @staticmethod
@@ -883,11 +888,26 @@ class Application:
             return err
 
         sow_id = payload.get("sowId")
-        if not isinstance(sow_id, int):
-            return 400, {"error": "請指定母豬"}
-        sow = self.store.get_sow(farm_id, sow_id)
-        if sow is None:
-            return 404, {"error": "找不到這頭母豬"}
+        unknown_tag = payload.get("unknownTag")
+        if isinstance(unknown_tag, str) and unknown_tag.strip():
+            # 耳號看不清楚時**用日期當耳號**(使用者決定):8/17 配的那頭就是
+            # 「不明-0817」。耳號由前端算好送來,因為連配二三天要算同一頭,
+            # 而「哪一天是第一天」只有填表單的人知道 —— 伺服器看到的是
+            # 各自獨立的一筆一筆。
+            #
+            # 前綴由伺服器補,不信前端送來的整串:否則可以拿這個入口建出
+            # 任意耳號的母豬,繞過新增母豬該有的檢查。
+            tag = config.UNKNOWN_SOW_PREFIX + unknown_tag.strip()[:config.MAX_EAR_TAG_CHARS]
+            sow = self.store.get_or_create_sow_by_tag(farm_id, tag, is_unknown=True)
+            if sow is None:
+                return 400, {"error": "無法建立不明母豬"}
+            sow_id = sow["id"]
+        else:
+            if not isinstance(sow_id, int):
+                return 400, {"error": "請指定母豬"}
+            sow = self.store.get_sow(farm_id, sow_id)
+            if sow is None:
+                return 404, {"error": "找不到這頭母豬"}
 
         code = payload.get("type")
         if code not in schedule.KNOWN_EVENTS:
@@ -1587,6 +1607,60 @@ class Application:
 
         self.store.delete_boar_event(farm_id, event_id)
         return 200, {"ok": True}
+
+    def _identify_unknown_sow(self, payload, token) -> Tuple[int, dict]:
+        """把一頭「不明-MMDD」的母豬認回真正的耳號。
+
+        耳號看不清楚時是用日期先建一頭豬記著;之後讀得到耳號了,這裡把她
+        身上的事件**併回**真正那一頭,再把暫時的那筆刪掉。
+
+        為什麼是併回而不是直接改耳號:真正那頭母豬通常早就存在,而且有
+        自己的歷史(前幾胎的分娩、離乳)。單純改耳號會變成同一頭豬有兩筆
+        記錄、歷史斷成兩半,母豬卡上看不到完整的胎次。
+
+        **只有牧場主能做** —— 這是在合併兩頭豬的資料,弄錯了要一筆一筆
+        手動拆回來,不是員工記錯一筆那種可以直接收回的規模。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        sow_id = payload.get("sowId")
+        if not isinstance(sow_id, int):
+            return 400, {"error": "請指定要確認身分的母豬"}
+        unknown = self.store.get_sow(farm_id, sow_id)
+        if unknown is None:
+            return 404, {"error": "找不到這頭母豬"}
+        if not unknown.get("is_unknown"):
+            return 400, {"error": "這頭母豬的耳號已經確認過了"}
+
+        tag = _text(payload.get("earTag"), config.MAX_EAR_TAG_CHARS)
+        if not tag:
+            return 400, {"error": "請填寫真正的耳號"}
+
+        target = self.store.find_sow_by_tag(farm_id, tag)
+        if target is None:
+            return 404, {"error": f"找不到耳號 {tag}"}
+        if target["id"] == sow_id:
+            return 400, {"error": "這就是同一頭母豬"}
+
+        moved = 0
+        for e in self.store.list_sow_events(farm_id, sow_id=sow_id):
+            if self.store.reassign_sow_event(farm_id, e["id"], target["id"]):
+                moved += 1
+
+        # 事件都搬走了才刪 —— 反過來的話 ON DELETE CASCADE 會把它們一起
+        # 帶走,那正是這個功能要避免的事。
+        remaining = self.store.list_sow_events(farm_id, sow_id=sow_id)
+        if remaining:
+            return 500, {"error": "有記錄沒搬成功,先不刪除,請重試"}
+        self.store.delete_sow(farm_id, sow_id)
+
+        return 200, {"ok": True, "earTag": tag, "moved": moved,
+                     "sowId": target["id"]}
 
     def _delete_sow_entry(self, token, sow_id) -> Tuple[int, dict]:
         """收回一筆種豬進場(母豬)。打錯耳號是很容易發生的事,而進場記錄

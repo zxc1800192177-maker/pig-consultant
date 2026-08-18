@@ -229,6 +229,17 @@
       </div>
       <div id="recDone"><p class="hint">最近 7 天還沒有記錄。</p></div>
     </div>
+
+    <!-- 耳號看不清楚時用日期先記著的母豬。讀得到耳號了就在這裡認回去,
+         她的記錄會併進真正那一頭。整區沒有待確認的就不顯示。 -->
+    <div class="card is-hidden" id="recPendingCard">
+      <div class="card-head">
+        <h3>待確認身分</h3><span class="cnt" id="recPendingCount"></span>
+      </div>
+      <p class="hint">耳號看不清楚時先用日期記著的。看得到耳號了,填進去就會
+        併回那頭母豬,她原本的記錄不會受影響。</p>
+      <div id="recPending"></div>
+    </div>
   </section>
 
   <!-- ══ 母豬 / 公豬 ══ -->
