@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  DEFAULT_SERVICE_ROWS,
   ESTRUS_STABILITY_LABEL,
   ESTRUS_STABILITY_OPTIONS,
   OTHER_REASON,
@@ -19,6 +20,7 @@ import {
   hasOtherOption,
   recordSummary,
   recordedRow,
+  supportsMultiService,
   supportsMultiSow,
   targetsBoar,
   targetsEither,
@@ -68,6 +70,37 @@ describe("配種一次記多頭", () => {
 
   it("不認得的代碼不支援,不是拋例外", () => {
     assert.equal(supportsMultiSow("ZZ"), false);
+  });
+
+  describe("一次發情連配好幾天", () => {
+    // 一頭母豬一次發情通常連配 2–3 天、一天一次,而且每天可能換不同
+    // 公豬(使用者說明)。所以日期與公豬是「每一次配種」各一組,不是
+    // 整張表單共用 —— 預產期則從第一次算(在 schedule.py)。
+    it("只有配種是多次的", () => {
+      assert.equal(supportsMultiService("MT"), true);
+      assert.equal(supportsMultiService("FW"), false);
+      assert.equal(supportsMultiService("WN"), false);
+      assert.equal(supportsMultiService("ZZ"), false);
+    });
+
+    it("公豬標記為逐次,發情穩定度沒有", () => {
+      const fields = formFor("MT").fields;
+      const boar = fields.find((f) => f.key === "boar_tag");
+      const estrus = fields.find((f) => f.key === "estrus_stability");
+      assert.equal(boar.perService, true, "公豬每天可能不同,屬於單次");
+      assert.ok(!estrus.perService, "發情穩定度描述這次發情,整批共用");
+    });
+
+    it("公豬仍然留在 fields 裡,驗證路徑不能因為改了畫法就斷掉", () => {
+      // 改成逐次欄位時一度把它從 fields 拿掉,結果 buildDetail 不再認得
+      // boar_tag,公豬耳號等於繞過驗證直接塞進 detail。測試抓到了。
+      const { detail } = buildDetail("MT", { boar_tag: "D6" });
+      assert.equal(detail.boar_tag, "D6");
+    });
+
+    it("預設開兩列 —— 使用者是整批配完才一次記進來的", () => {
+      assert.equal(DEFAULT_SERVICE_ROWS, 2);
+    });
   });
 
   it("目標還是母豬,只是耳號輸入方式不同", () => {

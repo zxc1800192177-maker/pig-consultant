@@ -146,6 +146,21 @@ body { padding-bottom: 96px; }
   color: var(--critical); background: var(--critical-bg, rgba(220, 80, 80, .1));
   border-radius: var(--radius-sm);
 }
+/* 配種列:一次發情連配的每一天各一列(日期 + 公豬 + 移除)。
+   375px 手機上三個並排會擠到日期選擇器點不到,所以日期與公豬各佔一整行,
+   移除鈕靠右對齊在下方 —— 巡欄時是單手操作,點擊區域寧可大不要小。 */
+.svc-row {
+  margin-top: 14px; padding: 12px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--surface-2);
+}
+.svc-row .fld:first-child { margin-top: 0; }
+.svc-n { font-weight: 600; color: var(--ink); }
+.svc-del {
+  display: block; margin-left: auto; margin-top: 8px;
+  min-height: 40px; padding: 8px 12px; font-size: 12.5px;
+}
+#recAddService { margin-top: 10px; min-height: 44px; padding: 10px 14px; }
+
 .fld { display: block; margin-top: 14px; }
 .fld > span { display: block; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 6px; }
 .fld input {

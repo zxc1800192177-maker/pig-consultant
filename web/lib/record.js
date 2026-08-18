@@ -49,11 +49,23 @@ export const RECORD_FORMS = {
     // 公豬耳號跟發情穩定度太沒效率(使用者要求)。multiSow: true 讓耳號
     // 欄位改成可以連續加很多筆,其餘欄位(公豬、發情穩定度)整批共用同
     // 一組值,一次送出多筆事件。
-    label: "配種", target: "sow", multiSow: true,
+    // 一頭母豬一次發情通常連配 2–3 天、一天一次,而且**每天可能換不同
+    // 公豬**(使用者說明),整批母豬又是同步進行的。所以日期與公豬不是
+    // 整張表單共用一組,而是「每一次配種」各有一組 —— multiService: true
+    // 讓表單長出可增減的配種列(見 app.js 的 serviceRowsField)。
+    //
+    // 使用者是**整批配完才一次記進來**的,所以預設就開兩列,不是開一列
+    // 再叫他自己加。
+    label: "配種", target: "sow", multiSow: true, multiService: true,
     fields: [
-      { key: "boar_tag", label: "公豬", type: "boar" },
+      // perService:這一項屬於「某一次配種」而不是整批,所以表單不把它
+      // 畫在共用區,而是每一列配種各一個(見 app.js 的 serviceRowsField)。
+      // 仍然留在 fields 裡 —— 它是 MT 事件 detail 的一部分,buildDetail
+      // 要認得它、驗證它,不能因為換了畫法就從驗證路徑上消失。
+      { key: "boar_tag", label: "公豬", type: "boar", perService: true },
       // 配種當下觀察到的發情徵狀。跟離乳評分同樣的道理:主觀判斷,
       // **可以不評**,沒填不補值(憲法第三條第 6 款)。
+      // 這一項整批共用:它描述的是這次發情的狀態,不是某一天的。
       { key: "estrus_stability", label: "發情穩定度", type: "tri",
         options: ESTRUS_STABILITY_OPTIONS,
         hint: "配種當下的發情徵狀,不確定可以留空" },
@@ -218,6 +230,18 @@ export function targetsNothing(code) {
 export function supportsMultiSow(code) {
   return Boolean(formFor(code)?.multiSow);
 }
+
+/** 這種事件是「同一次發情連配好幾天」,每一天各有日期與公豬 ——
+ * 表單因此不用整張共用的日期欄,改用可增減的配種列。目前只有配種。
+ */
+export function supportsMultiService(code) {
+  return Boolean(formFor(code)?.multiService);
+}
+
+/** 預設開幾列。使用者說一次通常配 2–3 次,而且整批配完才一起記,
+ * 所以開兩列剛好是最常見的情形,要第三次再按一下就好。
+ */
+export const DEFAULT_SERVICE_ROWS = 2;
 
 /**
  * 把表單收到的原始值整理成 detail,並回報缺漏。

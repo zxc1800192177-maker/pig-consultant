@@ -17,8 +17,9 @@ import {
   statusPills, taskGroup, timelineCaption, TIMELINE_LIMIT, visibleEvents, yearOfMonth,
 } from "./lib/v2.js";
 import {
-  SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor, hasOtherOption, OTHER_REASON,
-  recordedRow, supportsMultiSow, targetsBoar, targetsEither, targetsNothing,
+  DEFAULT_SERVICE_ROWS, SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor,
+  hasOtherOption, OTHER_REASON, recordedRow, supportsMultiService, supportsMultiSow,
+  targetsBoar, targetsEither, targetsNothing,
 } from "./lib/record.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1418,13 +1419,119 @@ async function openRecordForm(code) {
       : targetsBoar(code) ? boarPickerField()
       : targetsNothing(code) ? ""
       : supportsMultiSow(code) ? multiSowPickerField() : sowPickerField()}
-    <label class="fld"><span>日期</span>
-      <input type="date" id="recDate" value="${todayIso()}"></label>
-    ${spec.fields.map(fieldMarkup).join("")}
+    ${supportsMultiService(code) ? serviceRowsField()
+      : `<label class="fld"><span>日期</span>
+      <input type="date" id="recDate" value="${todayIso()}"></label>`}
+    ${spec.fields.filter((f) => !f.perService).map(fieldMarkup).join("")}
     <p class="rec-err is-hidden" id="recErr"></p>
     <button type="button" class="btn-primary" id="recSubmit">記錄</button>`;
 
+  if (supportsMultiService(code)) renumberServiceRows();
   box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/** 配種列:一次發情連配的每一天各一列(日期 + 公豬)。
+ *
+ * 為什麼不是整張表單共用一個日期與一隻公豬:一頭母豬一次發情通常連配
+ * 2–3 天、一天一次,而且**每天可能換不同公豬**(使用者說明)。共用一組
+ * 的話,同一批配種要分成好幾次送出、母豬耳號每次重打一遍。
+ *
+ * 母豬耳號與發情穩定度仍然整批共用 —— 整批母豬是同步配的,而發情穩定度
+ * 描述的是這次發情,不是某一天。
+ *
+ * 預設日期往回排到今天為止(最後一列是今天):使用者是整批配完才一次記
+ * 進來的,所以最後一次通常就是今天,這樣多數情況一個字都不用改。
+ */
+function serviceRowsField() {
+  const rows = Array.from({ length: DEFAULT_SERVICE_ROWS }, (_, i) =>
+    serviceRowMarkup(dayOffsetIso(i - (DEFAULT_SERVICE_ROWS - 1))));
+  return `
+    <div class="svc-rows" id="recServices">${rows.join("")}</div>
+    <button type="button" class="btn-ghost" id="recAddService">+ 再加一次配種</button>`;
+}
+
+function serviceRowMarkup(dateIso) {
+  return `
+    <div class="svc-row">
+      <label class="fld"><span class="svc-n"></span>
+        <input type="date" class="svc-date" value="${dateIso}"></label>
+      <label class="fld"><span>公豬</span>
+        <input list="boarTags" class="svc-boar" placeholder="輸入或選擇耳號"
+               autocomplete="off"></label>
+      <button type="button" class="btn-ghost svc-del" title="移除這一次">移除</button>
+    </div>
+    <datalist id="boarTags">
+      ${boars.map((b) => `<option value="${escapeHtml(b.earTag)}"></option>`).join("")}
+    </datalist>`;
+}
+
+/** 今天加減幾天的 ISO 日期。用本地時區,理由同 todayIso()。 */
+function dayOffsetIso(offset) {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** 讀出畫面上的每一次配種。空白日期的列直接略過 —— 使用者按了「再加
+ * 一次」又決定不用時,不該逼他先移除才能送出。
+ */
+function readServiceRows() {
+  return Array.from(document.querySelectorAll("#recServices .svc-row"))
+    .map((row) => ({
+      date: row.querySelector(".svc-date")?.value || "",
+      boarTag: (row.querySelector(".svc-boar")?.value || "").trim(),
+    }))
+    .filter((s) => s.date);
+}
+
+/** 加一列。一次發情是連著幾天配的,所以新的一列預設接在最後一列的隔天。
+ *
+ * **但隔天如果已經是未來,就往前補一天、插在最前面**:使用者是整批配完
+ * 才一次記進來的,最後一次通常就是今天,這時候要的是「原來還配了前一天」
+ * 而不是一個還沒發生的明天。給未來日期等於預設就是錯的,他每次都得改。
+ */
+function addServiceRow() {
+  const box = $("recServices");
+  if (!box) return;
+  const dates = readServiceRows().map((s) => s.date).sort();
+  if (!dates.length) {
+    box.insertAdjacentHTML("beforeend", serviceRowMarkup(todayIso()));
+    return renumberServiceRows();
+  }
+
+  const shift = (iso, days) => {
+    const d = new Date(`${iso}T00:00:00`);
+    d.setDate(d.getDate() + days);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+
+  const after = shift(dates[dates.length - 1], 1);
+  if (after <= todayIso()) {
+    box.insertAdjacentHTML("beforeend", serviceRowMarkup(after));
+  } else {
+    box.insertAdjacentHTML("afterbegin", serviceRowMarkup(shift(dates[0], -1)));
+  }
+  renumberServiceRows();
+}
+
+function removeServiceRow(row) {
+  const box = $("recServices");
+  if (!row || !box || box.querySelectorAll(".svc-row").length <= 1) return;
+  row.remove();
+  renumberServiceRows();
+}
+
+/** 重新編號並決定移除鈕要不要出現(只剩一列時不給移除)。 */
+function renumberServiceRows() {
+  const rows = Array.from(document.querySelectorAll("#recServices .svc-row"));
+  rows.forEach((row, i) => {
+    const label = row.querySelector(".svc-n");
+    if (label) label.textContent = `第 ${i + 1} 次`;
+    const del = row.querySelector(".svc-del");
+    if (del) del.classList.toggle("is-hidden", rows.length <= 1);
+  });
 }
 
 function sowPickerField() {
@@ -1644,6 +1751,9 @@ function todayIso() {
 function readRecordFields(spec) {
   const raw = {};
   for (const field of spec.fields) {
+    // perService 的欄位不在共用區,而是每一列配種各一個 ——
+    // 由 readServiceRows() 讀,這裡讀不到也不該讀。
+    if (field.perService) continue;
     if (field.type === "checkbox") {
       // 原生勾選框讀 .checked,不是 .is-active —— 沒勾就是預設的
       // false,不是「還沒填」。
@@ -1673,12 +1783,36 @@ async function submitRecord() {
   const spec = formFor(recordCode);
   if (!spec) return;
 
-  const when = $("recDate")?.value;
+  // 配種是「一次發情連配好幾天」,日期與公豬在各自的配種列上,沒有
+  // 整張表單共用的 recDate。其餘事件維持單一日期。
+  const services = supportsMultiService(recordCode) ? readServiceRows() : null;
+  if (services) {
+    if (!services.length) return showRecordError("請至少填一次配種的日期");
+    const dates = services.map((s) => s.date);
+    if (new Set(dates).size !== dates.length) {
+      // 同一頭母豬同一天同一隻公豬會被判成重複而合併成一筆,使用者
+      // 會以為記了兩次。與其讓它靜靜消失,不如當場講清楚。
+      return showRecordError("有兩次配種填了同一天,請確認日期");
+    }
+  }
+  const when = services ? services.map((s) => s.date).sort()[0] : $("recDate")?.value;
   if (!when) return showRecordError("請選擇日期");
 
   const raw = readRecordFields(spec);
   const { detail, problems } = buildDetail(recordCode, raw);
   if (problems.length) return showRecordError(problems[0]);
+
+  // 每一次配種各自組一份 detail —— 公豬是逐次的(每天可能換不同隻),
+  // 但仍然走 buildDetail 驗證,不是繞過它直接塞進去。
+  let serviceEvents = null;
+  if (services) {
+    serviceEvents = [];
+    for (const s of services) {
+      const built = buildDetail(recordCode, { ...raw, boar_tag: s.boarTag });
+      if (built.problems.length) return showRecordError(built.problems[0]);
+      serviceEvents.push({ date: s.date, detail: built.detail });
+    }
+  }
 
   if (createsNewAnimal(recordCode)) {
     const kind = document.querySelector("#recKind .is-active")?.dataset.kind || "sow";
@@ -1732,7 +1866,9 @@ async function submitRecord() {
     return;
   }
 
-  if (supportsMultiSow(recordCode)) return submitMultiSowRecord(spec, when, detail);
+  if (supportsMultiSow(recordCode)) {
+    return submitMultiSowRecord(spec, when, detail, serviceEvents);
+  }
 
   const tag = ($("recSow")?.value || "").trim();
   const sow = sows.find((s) => s.earTag === tag);
@@ -1759,18 +1895,29 @@ async function submitRecord() {
  * 先從清單移除、真的寫進去了,只把失敗的留著讓使用者修正重送,不然
  * 一筆打錯字就要整批重打一次,而且會讓人誤以為「這批一筆都沒記到」。
  */
-async function submitMultiSowRecord(spec, when, detail) {
+async function submitMultiSowRecord(spec, when, detail, services) {
   // 打了字但忘記按 Enter/+ 的話,視為要加入,不要悄悄漏掉這一筆。
   addSowTag();
   if (recSowTags.length === 0) return showRecordError("請至少加入一頭母豬耳號");
 
+  // 配種:每頭母豬 × 每一次配種各一筆(兩頭配兩天 = 4 筆),每一次各有
+  // 自己的日期與公豬。其餘事件沒有 services,維持一頭一筆。
+  const times = services && services.length ? services : [{ date: when, detail }];
+
   const results = await Promise.all(recSowTags.map(async (tag) => {
     const sow = sows.find((s) => s.earTag === tag);
     if (!sow) return { tag, ok: false, error: "耳號已經不存在" };
-    const { ok, data } = await api("/api/sow-events", postJson({
-      sowId: sow.id, type: recordCode, date: when, detail,
-    }));
-    return { tag, ok, error: data?.error };
+
+    // 同一頭母豬的幾次配種**依序**送,不併行 —— 併行的話伺服器端幾筆
+    // 同時寫入會各自去清同一個牧場的事件快取,徒增競爭;而且哪一筆先
+    // 寫進去也影響不了結果,沒必要搶。
+    for (const t of times) {
+      const { ok, data } = await api("/api/sow-events", postJson({
+        sowId: sow.id, type: recordCode, date: t.date, detail: t.detail,
+      }));
+      if (!ok) return { tag, ok: false, error: data?.error };
+    }
+    return { tag, ok: true };
   }));
 
   const failed = results.filter((r) => !r.ok);
@@ -2040,6 +2187,10 @@ document.addEventListener("click", (e) => {
   if (e.target.id === "recCancel") return closeRecordForm();
   if (e.target.id === "recSubmit") return submitRecord();
   if (e.target.id === "recSowAdd") return addSowTag();
+  if (e.target.id === "recAddService") return addServiceRow();
+
+  const delService = e.target.closest(".svc-del");
+  if (delService) return removeServiceRow(delService.closest(".svc-row"));
 
   const removeTag = e.target.closest("[data-remove-tag]");
   if (removeTag) return removeSowTag(removeTag.dataset.removeTag);

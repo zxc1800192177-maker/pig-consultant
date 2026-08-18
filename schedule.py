@@ -32,6 +32,19 @@ DEFAULTS = {
     "preg_check_days": 26,        # 配種 → 驗孕
     "open_sow_alert_days": 30,    # 離乳/驗孕陰性後多久沒動作要提醒
 
+    # 同一批配種的最長間隔。一頭母豬一次發情通常連配 2–3 天、一天一次
+    # (使用者說明),預產期要從**該批的第一天**算,所以這幾天必須被認成
+    # 同一批,不能各自重新起算。
+    #
+    # 反過來,她要是沒受孕、隔約三週再度發情又配一批,那是**另一次**配種,
+    # 預產期必須改從新的第一天算 —— 少了這個判斷,重發情的母豬預產期會
+    # 一直停在第一批,早算三週。實務上很多場不會逐頭補登驗孕陰性
+    # (這個場就很少驗孕),所以不能只靠 PD(−) 來斷開兩批。
+    #
+    # 取 5 天:配種批次最長 2–3 天,發情週期約 21 天,中間空得很開,
+    # 門檻落在哪裡都不敏感。
+    "mating_series_days": 5,
+
     # 配種後幾天,從配種區移至待產區。**配種了、沒登記驗孕陰性就當懷孕**
     # (使用者決定)—— 不必等驗孕陽性才觸發,這個場很少逐頭驗孕,等驗孕
     # 的話大多數其實已經懷孕的母豬會一直卡在配種區。
@@ -115,6 +128,7 @@ SETTING_RANGES = {
     "service_after_wean_days": (0, 60),
     "preg_check_days": (14, 60),
     "open_sow_alert_days": (7, 180),
+    "mating_series_days": (1, 14),
     "to_gestation_zone_days": (7, 150),
     "farrowing_pens": (0, 5000),
     "review_decline_litters": (1, 10),
@@ -178,17 +192,28 @@ def _by_sow(events: Iterable[dict]) -> Dict[int, List[dict]]:
     return grouped
 
 
-def current_cycle(events: List[dict]) -> dict:
+def current_cycle(events: List[dict], settings: Optional[dict] = None) -> dict:
     """母豬目前的生產週期狀態。
 
     只看**最後一次離乳(或進場)之後**的事件 —— 上一胎的配種與這一胎的
     無關,混在一起會讓推算取到過期的日期。
 
-    回傳各關鍵事件的日期;沒發生過的是 None。配種取**該批的第一天**:
-    這個場一次配種連續 2–3 天,用最後一天算預產期會systematically 短算。
+    回傳各關鍵事件的日期;沒發生過的是 None。
+
+    **配種取該批的第一天。** 一次發情連配 2–3 天、一天一次(使用者說明,
+    每天可能還換不同公豬),用最後一天算預產期會系統性短算。
+
+    **但相隔太久的配種是另一批。** 她沒受孕、隔約三週再度發情又配,那次
+    要重新起算;繼續沿用第一批會讓預產期早三週。門檻是
+    `mating_series_days`,拿來跟**前一筆配種**比而不是跟該批第一天比 ——
+    這樣連續幾天一天一筆永遠算同一批,不會因為批次拉長就被誤判成新的一批。
     """
+    cfg = settings_with_defaults(settings)
+    series_gap = timedelta(days=cfg["mating_series_days"])
+
     state = {"mate": None, "preg_check": None, "preg_positive": None,
              "farrow": None, "wean": None, "exited": None}
+    last_mate = None            # 該批最後一筆配種,用來判斷下一筆是否同批
 
     for e in events:
         code, when = e["event_type"], e["event_date"]
@@ -196,13 +221,20 @@ def current_cycle(events: List[dict]) -> dict:
             state["exited"] = when
         elif code == WEAN:
             state["wean"] = when
+            last_mate = None
             # 離乳結束一個週期,下一胎重新開始
             state["mate"] = state["preg_check"] = state["farrow"] = None
             state["preg_positive"] = None
         elif code == MATE:
-            if state["mate"] is None or state["farrow"] is not None:
+            # 新的一批的三種情形:這一胎還沒配過、上一胎剛分娩完、
+            # 或是距離前一筆配種已經隔太久(沒受孕、重發情再配)。
+            new_series = (state["mate"] is None
+                          or state["farrow"] is not None
+                          or (last_mate is not None and when - last_mate > series_gap))
+            if new_series:
                 state["mate"] = when      # 一批配種只取第一天
                 state["farrow"] = None
+            last_mate = when
         elif code == PREG_CHECK:
             state["preg_check"] = when
             positive = (e.get("detail") or {}).get("positive")
@@ -213,10 +245,12 @@ def current_cycle(events: List[dict]) -> dict:
             # 這個場目前就有 50 頭處於驗孕陰性狀態。
             if positive is False:
                 state["mate"] = None
+                last_mate = None
         elif code == FARROW:
             state["farrow"] = when
         elif code == ABORT:
             state["mate"] = None          # 流產:回到待配種
+            last_mate = None
     return state
 
 
@@ -235,7 +269,7 @@ def sow_status(sow: dict, events: List[dict], today: date,
     根本不會走到這個分支,所以這裡不用再另外判斷陰性。
     """
     cfg = settings_with_defaults(settings)
-    c = current_cycle(events)
+    c = current_cycle(events, cfg)
 
     if c["exited"] or sow.get("status") not in (None, "active"):
         return {"state": "exited", "since": c["exited"], "day": None, "due": None}
@@ -285,7 +319,7 @@ def tasks_for_sow(sow: dict, events: List[dict], cfg: dict) -> List[Task]:
     if sow.get("status") not in (None, "active"):
         return []
 
-    c = current_cycle(events)
+    c = current_cycle(events, cfg)
     if c["exited"]:
         return []
 
@@ -464,7 +498,7 @@ def overdue_sows(sows: Iterable[dict], events: Iterable[dict], today: date,
         rows = grouped.get(sow["id"], [])
         if not rows:
             continue
-        c = current_cycle(rows)
+        c = current_cycle(rows, cfg)
         if c["exited"] or c["mate"] or c["farrow"]:
             continue
 
@@ -903,7 +937,7 @@ def pen_pressure(sows: Iterable[dict], events: Iterable[dict], pens: Iterable[di
     for sow in sows:
         if sow.get("status") not in (None, "active"):
             continue
-        c = current_cycle(grouped.get(sow["id"], []))
+        c = current_cycle(grouped.get(sow["id"], []), cfg)
         if c["mate"] and not c["farrow"]:
             due = c["mate"] + timedelta(days=cfg["gestation_days"]
                                         - cfg["pre_farrow_move_days"])

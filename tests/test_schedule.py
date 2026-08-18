@@ -51,6 +51,43 @@ class TestCycleTracking:
                            ev(1, "MT", date(2026, 2, 4))])
         assert c["mate"] == date(2026, 2, 3)
 
+    def test_three_day_series_takes_the_first_day(self):
+        """一次發情連配三天、一天一次(使用者說明的實際做法),而且每天
+        可能換不同公豬 —— 三筆都算同一批,預產期從第一天算。
+        """
+        c = current_cycle([ev(1, "MT", date(2026, 2, 3)),
+                           ev(1, "MT", date(2026, 2, 4)),
+                           ev(1, "MT", date(2026, 2, 5))])
+        assert c["mate"] == date(2026, 2, 3)
+
+    def test_a_repeat_service_starts_a_new_series(self):
+        """沒受孕、隔約三週重發情又配 —— 那是**另一次**配種,預產期要從
+        新的第一天算。沿用第一批會早算三週,而這個場很少逐頭補登驗孕
+        陰性,所以不能只靠 PD(−) 來斷開兩批。
+        """
+        c = current_cycle([
+            ev(1, "MT", date(2026, 2, 3)),
+            ev(1, "MT", date(2026, 2, 4)),
+            ev(1, "MT", date(2026, 2, 24)),      # 三週後重發情
+            ev(1, "MT", date(2026, 2, 25)),
+        ])
+        assert c["mate"] == date(2026, 2, 24)
+
+    def test_the_series_gap_is_configurable(self):
+        """間隔門檻是設定值,不是寫死的 —— 別的場的配種批次不一定同長。"""
+        events = [ev(1, "MT", date(2026, 2, 3)),
+                  ev(1, "MT", date(2026, 2, 10))]      # 隔 7 天
+        assert current_cycle(events)["mate"] == date(2026, 2, 10)
+        assert current_cycle(
+            events, {"mating_series_days": 10})["mate"] == date(2026, 2, 3)
+
+    def test_a_long_series_of_daily_matings_stays_one_batch(self):
+        """門檻是跟**前一筆**比,不是跟該批第一天比 —— 否則一天一筆連續
+        記下去,第六天就會被誤判成新的一批。
+        """
+        days = [ev(1, "MT", date(2026, 2, 3) + timedelta(days=i)) for i in range(8)]
+        assert current_cycle(days)["mate"] == date(2026, 2, 3)
+
     def test_weaning_resets_the_cycle(self):
         c = current_cycle([
             ev(1, "MT", date(2025, 10, 13)),
