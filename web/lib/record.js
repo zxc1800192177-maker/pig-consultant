@@ -338,11 +338,17 @@ export function recordedRow(event) {
   const animalId = (kind === "boar" || kind === "boar-entry") ? event.boarId
     : kind === "market-death" ? null
     : event.sowId;
+  // 補登的(日期不在清單的天數範圍內)一定要把日期寫出來。平常 extra 有
+  // 內容時就不顯示日期,但補登的列如果只寫「公豬 B9」,使用者會看不出來
+  // 這筆到底記成哪一天 —— 而他剛剛就是為了那個日期才補登的。
+  const sub = event.backdated
+    ? [extra, event.date].filter(Boolean).join(" ・ ")
+    : (extra || event.date);
   return `
     <div class="done-row">
       <div class="done-b">
         <div class="done-t">${event.earTag ? `${escapeHtml(event.earTag)} ` : ""}${escapeHtml(name)}</div>
-        <div class="done-s">${escapeHtml(extra || event.date)}</div>
+        <div class="done-s">${escapeHtml(sub)}</div>
       </div>
       ${event.canUndo
         ? `<button class="btn-ghost undo" data-undo="${event.id}" data-kind="${kind}"

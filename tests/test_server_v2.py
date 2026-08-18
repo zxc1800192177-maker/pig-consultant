@@ -1259,6 +1259,73 @@ class TestRecordPage:
         events = app.handle_get("/api/recent-events", token)[1]["events"]
         assert events[0]["earTag"] == "1183"
 
+    def test_a_backdated_record_still_shows_in_the_recent_list(self, farm):
+        """補登的記錄不能從「已記錄」裡消失。
+
+        使用者回報「配種記錄完沒有出現在已記錄」,追了很久才發現原因是他
+        補登的日期在清單的天數範圍之外 —— 資料有存進去(成功訊息會跳、
+        母豬卡看得到),但清單用**事件日期**篩,所以整筆不見。從使用者的
+        角度,這跟「沒記到」完全一樣。他補登的範圍不一定,所以放寬天數
+        解不掉,改成「不管日期多早,剛記的一定看得到」。
+        """
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        long_ago = (date.today() - timedelta(days=40)).isoformat()
+
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": long_ago,
+               "detail": {"boar_tag": "B1"}}, token)
+
+        events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
+        mated = [e for e in events if e.get("kind") == "sow" and e["type"] == "MT"]
+        assert mated, "40 天前的補登記錄從已記錄清單裡消失了"
+        assert mated[0]["date"] == long_ago
+
+    def test_a_backdated_record_is_listed_first(self, farm):
+        """補登的要排在最前面。照事件日期排的話它會沉到清單底部,使用者
+        剛記完低頭一看還是找不到 —— 那等於沒修。
+        """
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        for day in (0, 1, 2):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": "MT",
+                   "date": (date.today() - timedelta(days=day)).isoformat()}, token)
+        backdated = (date.today() - timedelta(days=40)).isoformat()
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "WN", "date": backdated}, token)
+
+        events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
+        assert events[0]["date"] == backdated
+        assert events[0]["backdated"] is True
+        assert not events[1]["backdated"]
+
+    def test_records_inside_the_window_are_not_marked_backdated(self, farm):
+        """在範圍內的照舊,不能每一筆都被標成補登(前端會多印一個日期)。"""
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat()}, token)
+        events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
+        assert all(not e["backdated"] for e in events)
+
+    def test_old_records_do_not_all_come_back(self, farm):
+        """只有「最近記進來的那幾筆」破例,不是所有舊資料都湧回來 ——
+        匯入三萬筆的當下那三萬筆全是「剛記進來的」,沒有上限清單會爆掉。
+        """
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        for day in range(30, 30 + config.RECENT_JUST_RECORDED * 3):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": "MT",
+                   "date": (date.today() - timedelta(days=day)).isoformat(),
+                   "detail": {"boar_tag": f"B{day}"}}, token)
+
+        events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
+        old = [e for e in events if e.get("kind") == "sow"]
+        assert len(old) == config.RECENT_JUST_RECORDED, (
+            f"破例的筆數應該有上限,實際回了 {len(old)} 筆")
+
     def test_owner_can_undo_anything(self, farm):
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
