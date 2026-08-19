@@ -828,3 +828,21 @@ describe("自訂工作的設定列", () => {
     assert.doesNotMatch(customTaskSetting(task({ name: "<img src=x>" })), /<img/);
   });
 });
+
+describe("清單列的 class 名稱是點擊處理器的契約", () => {
+  // 這條測試因為一個真實的線上故障而存在:紀錄表單的「一頭一列」原本也
+  // 叫 .sow-row,改名時把 app.js 裡母豬清單的 closest(".sow-row") 一起
+  // 換掉了,結果點耳號打不開母豬卡 —— 而且畫面看起來完全正常,只是點了
+  // 沒反應。class 名稱在這裡不只是樣式,是清單與點擊處理器之間的約定。
+  it("母豬列是 .sow-row,而且帶得到 data-sow", () => {
+    const html = sowRow({ id: 7, earTag: "1183", parity: 2, status: "active" });
+    assert.match(html, /class="sow-row"/);
+    assert.match(html, /data-sow="7"/);
+  });
+
+  it("公豬列同樣是 .sow-row,帶 data-boar", () => {
+    const html = boarRow({ id: 3, earTag: "D6", status: "active" });
+    assert.match(html, /class="sow-row"/);
+    assert.match(html, /data-boar="3"/);
+  });
+});

@@ -1307,7 +1307,10 @@ document.addEventListener("click", (e) => {
       ? `展開全部 ${box.childElementCount} 頭 ›` : "收合 ⌃";
     return;
   }
-  const row = e.target.closest(".rec-row");
+  // 母豬/公豬清單的一列(lib/v2.js 的 .sow-row)。**不是**紀錄表單裡
+  // 「一頭一列」的 .rec-row —— 兩者曾經同名,把表單那組改名時連這裡
+  // 一起改掉,結果點耳號打不開母豬卡。
+  const row = e.target.closest(".sow-row");
   if (row) {
     if (row.dataset.boar) return openBoar(Number(row.dataset.boar));
     return openSow(Number(row.dataset.sow));
