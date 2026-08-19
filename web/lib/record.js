@@ -124,6 +124,9 @@ export const RECORD_FORMS = {
     fields: [{ key: "count", label: "頭數", type: "int", min: 1, max: 30, required: true }],
   },
   PL: {
+    // 每頭的頭數與原因都不一樣(這窩壓死三隻、那窩下痢一隻),不能整批
+    // 共用一組值 —— 共用等於把第一頭的數字複製給所有豬。
+    perSowRows: true,
     label: "仔豬死亡", target: "sow",
     fields: [
       { key: "count", label: "頭數", type: "int", min: 1, max: 30, required: true },
@@ -136,15 +139,21 @@ export const RECORD_FORMS = {
   DTH: {
     // 使用者決定跟公豬死亡合併成同一個事件,不分公母 —— 選母豬還是
     // 公豬由記錄當下的切換鈕決定(target: "either"),不是表單本身寫死。
+    perSowRows: true,
     label: "種豬死亡", target: "either",
     fields: [{ key: "reason", label: "原因", type: "text" }],
   },
-  AB: { label: "流產", target: "sow", fields: [] },
+  // 流產沒有任何欄位,只有「哪幾頭、哪一天」—— 用耳號連續加入多筆的
+  // 做法(跟驗孕一樣)最單純,不必為了零個欄位長出一堆列。
+  AB: { label: "流產", target: "sow", multiSow: true, fields: [] },
   MKD: {
     // 肉豬(育肥豬)不掛在任何一頭母豬或公豬身上 —— 牠們本來就不是這個
     // 系統追蹤身分的對象,沒有耳號、沒有進場記錄。target: "none" 讓表單
     // 不畫耳號欄位,只記使用者要的三件事:日期、原因、公斤數
     // (使用者決定)。
+    // 一次死好幾頭時每頭的原因與重量都不同。沒有耳號,所以列裡不畫
+    // 動物選擇器,一列就是一頭肉豬。
+    perSowRows: true,
     label: "肉豬死亡", target: "none",
     fields: [
       { key: "reason", label: "死亡原因", type: "text", required: true },
@@ -153,6 +162,9 @@ export const RECORD_FORMS = {
     ],
   },
   SAL: {
+    // 一批淘汰的原因常常不一樣(一頭年齡太大、一頭肢蹄問題),所以原因
+    // 放在各自的列裡,不整批共用 —— 共用會把一個沒發生的原因記到別頭上。
+    perSowRows: true,
     label: "淘汰", target: "sow",
     fields: [{ key: "reason", label: "原因", type: "choice", required: true,
                // 同樣取自實際記錄:年齡太大 48.0%、不能懷孕 18.6%
@@ -160,17 +172,25 @@ export const RECORD_FORMS = {
                          "肢蹄問題", "其他"] }],
   },
   MV: {
+    // 整批移進產房是同一個區域,但**每頭進不同的欄位** —— 所以區域整批
+    // 共用一個值,欄位編號每頭一個。這正是這個事件最花時間的地方:
+    // 二十頭要開二十次表單,每次都重選一樣的區域。
+    perSowRows: true,
     label: "移欄", target: "sow",
     // 直接打欄位編號,不必先到設定頁一個一個新增 —— 一區動輒幾百個
     // 欄位,要求先手動建一輪根本不會有人做(使用者要求)。第一次打到
     // 的編號會自動建立,之後同一區打同樣編號會找到同一個欄位。
     fields: [
-      { key: "zone", label: "區域", type: "choice", required: true, options: ZONE_OPTIONS },
+      { key: "zone", label: "區域", type: "choice", required: true,
+        options: ZONE_OPTIONS, shared: true },
       { key: "pen_name", label: "欄位編號", type: "pen", required: true,
         hint: "直接輸入,新編號會自動建立" },
     ],
   },
   SC: {
+    // 採精量、活力、濃度每頭都是自己的數字。target 是 boar,所以列裡
+    // 畫的是公豬耳號,不是母豬。
+    perSowRows: true,
     label: "採精", target: "boar",
     fields: [
       { key: "volume", label: "採精量", type: "int", min: 1, max: 999, required: true,

@@ -725,3 +725,38 @@ describe("一次記多頭:每頭數字不同的事件", () => {
     }
   });
 });
+
+describe("一次記多頭:例外事件、場務、公豬", () => {
+  it("仔豬死亡、淘汰、種豬死亡、肉豬死亡都是一頭一列", () => {
+    // 頭數、原因、重量每頭都不一樣,共用一組值會把沒發生的事記到別頭上。
+    for (const code of ["PL", "SAL", "DTH", "MKD"]) {
+      assert.equal(usesPerSowRows(code), true, `${code} 應該是一頭一列`);
+    }
+  });
+
+  it("流產沒有欄位,用耳號連續加入的做法就好", () => {
+    // 零個欄位卻長出一堆列只是浪費畫面 —— 要記的只有「哪幾頭、哪一天」。
+    assert.equal(usesPerSowRows("AB"), false);
+    assert.equal(supportsMultiSow("AB"), true);
+    assert.deepEqual(formFor("AB").fields, []);
+  });
+
+  it("移欄的區域整批共用,欄位編號每頭一個", () => {
+    // 整批移進產房是同一區,但每頭進不同的欄位 —— 這正是最花時間的地方。
+    assert.equal(usesPerSowRows("MV"), true);
+    const fields = formFor("MV").fields;
+    assert.equal(fields.find((f) => f.key === "zone").shared, true);
+    assert.ok(!fields.find((f) => f.key === "pen_name").shared,
+      "欄位編號每頭不同,不能整批共用");
+  });
+
+  it("採精是公豬事件,列裡要畫公豬耳號", () => {
+    assert.equal(usesPerSowRows("SC"), true);
+    assert.equal(targetsBoar("SC"), true);
+  });
+
+  it("肉豬死亡沒有耳號,列裡不該有動物選擇器", () => {
+    assert.equal(usesPerSowRows("MKD"), true);
+    assert.equal(targetsNothing("MKD"), true);
+  });
+});

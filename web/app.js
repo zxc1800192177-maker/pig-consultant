@@ -1420,10 +1420,12 @@ async function openRecordForm(code) {
     ${SIDE_EFFECTS[code]
       ? `<p class="rec-warn-note">送出後:${escapeHtml(SIDE_EFFECTS[code])}</p>` : ""}
     ${createsNewAnimal(code) ? newAnimalFields()
+      // 一頭一列時,耳號在各自的列裡,共用區不再畫選擇器 —— 種豬死亡
+      // 例外:母豬/公豬的切換鈕仍然是整批共用的,只是不帶耳號欄位。
+      : usesPerSowRows(code) ? (targetsEither(code) ? kindToggleOnly() : "")
       : targetsEither(code) ? eitherAnimalFields()
       : targetsBoar(code) ? boarPickerField()
       : targetsNothing(code) ? ""
-      : usesPerSowRows(code) && !createsNewAnimal(code) ? ""
       : supportsMultiSow(code) ? multiSowPickerField() : sowPickerField()}
     ${supportsMultiService(code) ? serviceRowsField()
       : `<label class="fld"><span>日期</span>
@@ -1457,6 +1459,9 @@ function perSowRowsField(spec) {
     <button type="button" class="btn-ghost" id="recAddSowRow">+ 再加一頭</button>
     <datalist id="sowTags">
       ${sows.map((s) => `<option value="${escapeHtml(s.earTag)}"></option>`).join("")}
+    </datalist>
+    <datalist id="boarTags">
+      ${boars.map((b) => `<option value="${escapeHtml(b.earTag)}"></option>`).join("")}
     </datalist>`;
 }
 
@@ -1471,12 +1476,40 @@ function perSowRowMarkup(spec, i) {
         <span class="rec-row-n"></span>
         <button type="button" class="btn-ghost rec-row-del">移除</button>
       </div>
-      ${createsNewAnimal(recordCode) ? "" : `
-      <label class="fld"><span>母豬耳號</span>
-        <input list="sowTags" class="rec-row-tag" inputmode="numeric"
-               placeholder="輸入或選擇耳號" autocomplete="off"></label>`}
+      ${rowAnimalPicker(spec)}
       ${spec.fields.filter((f) => !f.shared).map((f) => fieldMarkup(f, sfx)).join("")}
     </div>`;
+}
+
+/** 只有母豬/公豬切換鈕,沒有耳號欄位 —— 一頭一列的種豬死亡用。
+ * 整批是同一種(一次死的通常是同一欄的),耳號則各列各填。
+ */
+function kindToggleOnly() {
+  return `
+    <div class="seg" id="recKind">
+      <button type="button" class="seg-b is-active" data-kind="sow">母豬</button>
+      <button type="button" class="seg-b" data-kind="boar">公豬</button>
+    </div>`;
+}
+
+/** 列裡的動物選擇器,依這種事件記在誰身上而不同:
+ *
+ *   母豬事件(分娩、離乳、仔豬死亡、淘汰、移欄)→ 母豬耳號
+ *   採精                                      → 公豬耳號
+ *   種豬死亡(記在母豬或公豬,由上面的切換鈕決定)→ 兩種耳號都給建議
+ *   肉豬死亡                                   → 沒有耳號,整列就是一頭
+ *   種豬進場                                   → 耳號本身就是欄位之一
+ */
+function rowAnimalPicker(spec) {
+  if (spec.target === "new" || spec.target === "none") return "";
+  const boarSide = spec.target === "boar";
+  const label = boarSide ? "公豬耳號"
+    : spec.target === "either" ? "耳號" : "母豬耳號";
+  const list = boarSide ? "boarTags" : "sowTags";
+  return `
+    <label class="fld"><span>${label}</span>
+      <input list="${list}" class="rec-row-tag" inputmode="numeric"
+             placeholder="輸入或選擇耳號" autocomplete="off"></label>`;
 }
 
 function renumberSowRows() {
@@ -1521,7 +1554,12 @@ function readSowRows(spec) {
         : (row.querySelector(".rec-row-tag")?.value || "").trim();
       return { tag, raw };
     })
-    .filter((r) => r.tag);
+    // 肉豬死亡沒有耳號,改用「這列有沒有填東西」判斷 —— 否則整批都會
+    // 因為 tag 是空的而被濾掉。其餘事件仍以耳號為準:按了「再加一頭」
+    // 又沒用時不該逼使用者先移除才能送出。
+    .filter((r) => (spec.target === "none"
+      ? Object.values(r.raw).some((v) => v !== "" && v !== false && v != null)
+      : r.tag));
 }
 
 /** 配種列:一次發情連配的每一天各一列(日期 + 公豬)。
@@ -2094,24 +2132,50 @@ async function submitNewAnimalRows(spec, when) {
  */
 async function submitPerSowRows(spec, when) {
   const rows = readSowRows(spec);
-  if (!rows.length) return showRecordError("請至少填一頭母豬的耳號");
+  const noTag = spec.target === "none";
+  if (!rows.length) {
+    return showRecordError(noTag ? "請至少填一頭" : "請至少填一頭的耳號");
+  }
 
-  const dupes = rows.map((r) => r.tag).filter((t, i, a) => a.indexOf(t) !== i);
-  if (dupes.length) return showRecordError(`${dupes[0]} 填了兩次`);
+  if (!noTag) {
+    const dupes = rows.map((r) => r.tag).filter((t, i, a) => a.indexOf(t) !== i);
+    if (dupes.length) return showRecordError(`${dupes[0]} 填了兩次`);
+  }
+
+  // 種豬死亡記在母豬還是公豬,由整批共用的切換鈕決定;採精固定公豬。
+  const onBoar = targetsBoar(recordCode) || (targetsEither(recordCode)
+    && document.querySelector("#recKind .is-active")?.dataset.kind === "boar");
+  const herd = onBoar ? boars : sows;
+  const shared = spec.fields.some((f) => f.shared) ? readRecordFields(spec) : {};
+  const rowKeys = spec.fields.filter((f) => !f.shared).map((f) => f.key);
 
   const jobs = [];
   for (const [i, row] of rows.entries()) {
-    const sow = sows.find((s) => s.earTag === row.tag);
-    if (!sow) return showRecordError(`第 ${i + 1} 頭:找不到耳號 ${row.tag}`);
-    const { detail, problems } = buildDetail(recordCode, row.raw);
-    if (problems.length) return showRecordError(`${row.tag}:${problems[0]}`);
-    jobs.push({ tag: row.tag, sowId: sow.id, detail });
+    let animal = null;
+    if (!noTag) {
+      animal = herd.find((a) => a.earTag === row.tag);
+      if (!animal) return showRecordError(`第 ${i + 1} 頭:找不到耳號 ${row.tag}`);
+    }
+    // 共用欄位(移欄的區域)墊底,列裡真的有的欄位蓋上去 —— 整份 raw
+    // 直接展開會讓列裡不存在的共用欄位被讀成空字串而蓋掉共用值。
+    const merged = { ...shared };
+    for (const k of rowKeys) merged[k] = row.raw[k];
+    const { detail, problems } = buildDetail(recordCode, merged);
+    if (problems.length) {
+      return showRecordError(`${row.tag || `第 ${i + 1} 頭`}:${problems[0]}`);
+    }
+    jobs.push({ tag: row.tag || `第 ${i + 1} 頭`, id: animal?.id, detail });
   }
 
   const results = await Promise.all(jobs.map(async (job) => {
-    const { ok, data } = await api("/api/sow-events", postJson({
-      sowId: job.sowId, type: recordCode, date: when, detail: job.detail,
-    }));
+    const body = noTag
+      ? { date: when, reason: job.detail.reason, weightKg: job.detail.weight_kg }
+      : onBoar
+        ? { boarId: job.id, type: recordCode, date: when, detail: job.detail }
+        : { sowId: job.id, type: recordCode, date: when, detail: job.detail };
+    const path = noTag ? "/api/market-deaths"
+      : onBoar ? "/api/boar-events" : "/api/sow-events";
+    const { ok, data } = await api(path, postJson(body));
     return { tag: job.tag, ok, error: data?.error };
   }));
 
@@ -2119,7 +2183,8 @@ async function submitPerSowRows(spec, when) {
   const done = results.length - failed.length;
 
   if (done) {
-    await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
+    await Promise.all([reloadSows(), reloadBoars(), reloadRecent(),
+                       reloadTasks(), reloadAlerts()]);
   }
   if (failed.length) {
     const prefix = done ? `已記錄 ${done} 頭,` : "";
