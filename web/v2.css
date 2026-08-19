@@ -161,6 +161,21 @@ body { padding-bottom: 96px; }
 }
 #recAddService { margin-top: 10px; min-height: 44px; padding: 10px 14px; }
 
+/* 逐胎離乳評分。一列一胎,胎次、日期、評分由左至右 —— 使用者要看的是
+   歷年趨勢,並排才比得出來(散在事件時間軸裡要一直往下捲)。
+   ●○ 用符號而不是只有數字:掃一眼就看得出高低,不必逐格讀數字。 */
+.ws-row { padding: 10px 0; border-bottom: 1px solid var(--border-light); }
+.ws-row:last-child { border-bottom: none; }
+.ws-top {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+}
+.ws-p { font-weight: 600; font-size: 13.5px; }
+.ws-d { font-size: 12px; color: var(--ink-faint); margin-top: 2px; }
+.ws-s { font-size: 13px; color: var(--accent); flex-shrink: 0; letter-spacing: 1px; }
+.ws-s b { color: var(--ink); margin-left: 3px; }
+/* 未評分刻意不給顏色也不給符號 —— 它不是「低分」,是沒有這個資料。 */
+.ws-none { color: var(--ink-faint); letter-spacing: normal; }
+
 /* 一頭一列(分娩、離乳、寄養):每頭自己的耳號與數字。跟配種列同樣的
    盒子外觀,讓「這一整塊屬於同一頭」一眼看得出來 —— 分娩有五個欄位,
    沒有框線的話兩頭的數字會糊在一起分不清誰是誰。 */

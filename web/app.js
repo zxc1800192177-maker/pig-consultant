@@ -14,6 +14,7 @@ import {
   alertRow, boarPerformanceGrid, boarRow, buildAlerts, customTaskRow, customTaskSetting,
   eventName, eventRow, formatMonth, formatWeek, monthPickerGrid, monthReportGrid,
   performanceGrid, pendingCheckRow, reviewRow, settingRow, shiftDate, shiftMonth, sowRow,
+  weanScoreCard,
   statusPills, taskGroup, timelineCaption, TIMELINE_LIMIT, visibleEvents, yearOfMonth,
 } from "./lib/v2.js";
 import {
@@ -1164,6 +1165,7 @@ async function openSow(sowId) {
       </div>
     </div>
     ${performanceGrid(data.performance)}
+    ${weanScoreCard(data.events)}
     <div class="card">
       <h3>事件時間軸</h3>
       <p class="hint">${timelineCaption(data.events.length, shownEvents.length)}</p>

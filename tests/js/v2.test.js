@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  weanScoreCard,
+  weanScoreRows,
   TIMELINE_LIMIT,
   alertRow,
   boarPerformanceGrid,
@@ -844,5 +846,64 @@ describe("清單列的 class 名稱是點擊處理器的契約", () => {
     const html = boarRow({ id: 3, earTag: "D6", status: "active" });
     assert.match(html, /class="sow-row"/);
     assert.match(html, /data-boar="3"/);
+  });
+});
+
+describe("逐胎離乳評分", () => {
+  // 評分本來只出現在事件時間軸的摘要裡,要一胎一胎往下捲才找得到。
+  // 使用者要看的是歷年趨勢,所以要把每一胎並排。
+  const ev = (type, date, detail = {}) => ({ type, date, detail });
+
+  it("每次離乳一列,帶著評分", () => {
+    const rows = weanScoreRows([
+      ev("FW", "2025-03-01"), ev("WN", "2025-03-23", { weaned: 10, wean_score: 4 }),
+    ]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].score, 4);
+    assert.equal(rows[0].weaned, 10);
+  });
+
+  it("胎次用分娩次數算,不是離乳次數", () => {
+    // 沒保住的那一胎照樣佔一個胎次 —— 用離乳次數數,後面每一胎的編號
+    // 都會往前挪一格,跟母豬卡上的胎次對不起來。
+    const rows = weanScoreRows([
+      ev("FW", "2025-01-01"), ev("WN", "2025-01-23", { wean_score: 3 }),
+      ev("FW", "2025-06-01"),                      // 這一胎沒有離乳記錄
+      ev("FW", "2025-11-01"), ev("WN", "2025-11-23", { wean_score: 5 }),
+    ]);
+    assert.deepEqual(rows.map((r) => r.parity), [1, 3]);
+  });
+
+  it("沒評分是 null,不補一個中間值", () => {
+    // 補了會讓「沒人看過」跟「看過覺得普通」變成同一件事(憲法第三條)。
+    const rows = weanScoreRows([ev("FW", "2025-03-01"), ev("WN", "2025-03-23", { weaned: 9 })]);
+    assert.equal(rows[0].score, null);
+  });
+
+  it("排除離群值的記錄", () => {
+    const rows = weanScoreRows([
+      { type: "WN", date: "2025-03-23", detail: { wean_score: 1 }, excluded: true },
+    ]);
+    assert.deepEqual(rows, []);
+  });
+
+  it("一次也沒離乳過就不畫這張卡,不是畫一張空表", () => {
+    assert.equal(weanScoreCard([ev("FW", "2025-03-01")]), "");
+    assert.equal(weanScoreCard([]), "");
+  });
+
+  it("未評分顯示「未評分」,不是 0 分", () => {
+    const html = weanScoreCard([ev("FW", "2025-03-01"), ev("WN", "2025-03-23", {})]);
+    assert.match(html, /未評分/);
+    assert.doesNotMatch(html, /0 分/);
+  });
+
+  it("平均只算有評分的那幾胎", () => {
+    const html = weanScoreCard([
+      ev("FW", "2025-01-01"), ev("WN", "2025-01-23", { wean_score: 5 }),
+      ev("FW", "2025-06-01"), ev("WN", "2025-06-23", {}),
+      ev("FW", "2025-11-01"), ev("WN", "2025-11-23", { wean_score: 3 }),
+    ]);
+    assert.match(html, /已評分 2 次,平均 4\.0 分/);
   });
 });

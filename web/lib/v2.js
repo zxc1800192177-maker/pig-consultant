@@ -496,3 +496,72 @@ export function alertRow(row) {
       <div class="rem-w">${escapeHtml(row.right)}</div>
     </div>`;
 }
+
+/** 逐胎的離乳仔豬評分。
+ *
+ * 評分本來只出現在事件時間軸的摘要裡,一胎一胎往下捲才找得到 ——
+ * 使用者要的是「這頭豬歷年帶仔帶得怎麼樣」,那必須把每一胎並排看
+ * (使用者要求)。
+ *
+ * 胎次用**分娩次數**數,不是離乳次數:沒保住的那一胎照樣佔一個胎次,
+ * 用離乳次數數會讓後面每一胎的編號都往前挪一格,跟母豬卡上的胎次對不起來。
+ *
+ * **沒評分就是沒評分**,顯示「—」,不補一個中間值 —— 補了會讓「沒人看過」
+ * 跟「看過覺得普通」變成同一件事(憲法第三條第 6 款)。
+ *
+ * 排除 excluded 的事件:那些是匯入時使用者判定為離群值的記錄。
+ */
+export function weanScoreRows(events) {
+  const rows = [];
+  let parity = 0;
+  const ordered = [...(events || [])]
+    .filter((e) => !e.excluded)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+
+  for (const e of ordered) {
+    if (e.type === "FW") parity += 1;
+    if (e.type !== "WN") continue;
+    const d = e.detail || {};
+    rows.push({
+      parity: parity || null,
+      date: e.date,
+      weaned: Number.isInteger(d.weaned) ? d.weaned : null,
+      score: Number.isInteger(d.wean_score) ? d.wean_score : null,
+    });
+  }
+  return rows;
+}
+
+/** 逐胎離乳評分的卡片。一次也沒離乳過就整張不顯示 —— 空表格比沒有更糟。 */
+export function weanScoreCard(events) {
+  const rows = weanScoreRows(events);
+  if (!rows.length) return "";
+
+  const scored = rows.filter((r) => r.score != null);
+  const avg = scored.length
+    ? (scored.reduce((n, r) => n + r.score, 0) / scored.length).toFixed(1)
+    : null;
+
+  // 兩行:上行「第 N 胎 ⋯ 評分」,下行日期。375px 手機上三欄並排時,
+  // 中間的日期欄會被擠到換行,把「隻」單獨留在第二行。
+  const body = rows.slice().reverse().map((r) => `
+    <div class="ws-row">
+      <div class="ws-top">
+        <span class="ws-p">${r.parity ? `第 ${r.parity} 胎` : "—"}</span>
+        ${r.score == null
+          ? '<span class="ws-s ws-none">未評分</span>'
+          : `<span class="ws-s">${"●".repeat(r.score)}${
+              "○".repeat(5 - r.score)} <b>${r.score}</b></span>`}
+      </div>
+      <div class="ws-d">${escapeHtml(r.date)} 離乳${
+        r.weaned != null ? ` ${r.weaned} 隻` : ""}</div>
+    </div>`).join("");
+
+  return `
+    <div class="card">
+      <h3>逐胎離乳評分</h3>
+      <p class="hint">${rows.length} 次離乳${
+        avg ? ` ・ 已評分 ${scored.length} 次,平均 ${avg} 分` : " ・ 尚未評分過"}</p>
+      <div class="ws">${body}</div>
+    </div>`;
+}
