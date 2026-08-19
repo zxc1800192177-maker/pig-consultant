@@ -734,11 +734,10 @@ describe("一次記多頭:例外事件、場務、公豬", () => {
     }
   });
 
-  it("流產沒有欄位,用耳號連續加入的做法就好", () => {
-    // 零個欄位卻長出一堆列只是浪費畫面 —— 要記的只有「哪幾頭、哪一天」。
+  it("流產維持一次一頭(使用者決定)", () => {
+    // 流產不像配種、驗孕那樣整批同時發生,是零星出現的例外。
     assert.equal(usesPerSowRows("AB"), false);
-    assert.equal(supportsMultiSow("AB"), true);
-    assert.deepEqual(formFor("AB").fields, []);
+    assert.equal(supportsMultiSow("AB"), false);
   });
 
   it("移欄的區域整批共用,欄位編號每頭一個", () => {

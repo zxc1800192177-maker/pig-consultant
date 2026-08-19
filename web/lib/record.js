@@ -143,9 +143,9 @@ export const RECORD_FORMS = {
     label: "種豬死亡", target: "either",
     fields: [{ key: "reason", label: "原因", type: "text" }],
   },
-  // 流產沒有任何欄位,只有「哪幾頭、哪一天」—— 用耳號連續加入多筆的
-  // 做法(跟驗孕一樣)最單純,不必為了零個欄位長出一堆列。
-  AB: { label: "流產", target: "sow", multiSow: true, fields: [] },
+  // 流產維持一次一頭(使用者決定)—— 它不像配種、驗孕那樣整批同時發生,
+  // 是零星出現的例外,沒有一次記好幾頭的需求。
+  AB: { label: "流產", target: "sow", fields: [] },
   MKD: {
     // 肉豬(育肥豬)不掛在任何一頭母豬或公豬身上 —— 牠們本來就不是這個
     // 系統追蹤身分的對象,沒有耳號、沒有進場記錄。target: "none" 讓表單
