@@ -161,6 +161,19 @@ body { padding-bottom: 96px; }
 }
 #recAddService { margin-top: 10px; min-height: 44px; padding: 10px 14px; }
 
+/* 一頭一列(分娩、離乳、寄養):每頭自己的耳號與數字。跟配種列同樣的
+   盒子外觀,讓「這一整塊屬於同一頭」一眼看得出來 —— 分娩有五個欄位,
+   沒有框線的話兩頭的數字會糊在一起分不清誰是誰。 */
+.rec-row {
+  margin-top: 14px; padding: 12px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--surface-2);
+}
+.rec-row-h { display: flex; justify-content: space-between; align-items: center; }
+.rec-row-n { font-weight: 600; color: var(--ink); }
+.rec-row-del { min-height: 40px; padding: 8px 12px; font-size: 12.5px; }
+.rec-row .fld:first-of-type { margin-top: 8px; }
+#recAddSowRow { margin-top: 10px; min-height: 44px; padding: 10px 14px; }
+
 /* 「耳號看不清楚」按鈕。按下去會變成已選狀態,所以要看得出開關 ——
    巡欄時是低頭單手操作,不能只靠顏色深淺分辨。 */
 .rec-unknown { display: block; width: 100%; margin-top: 10px; min-height: 44px; }

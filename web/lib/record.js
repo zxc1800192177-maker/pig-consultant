@@ -72,6 +72,7 @@ export const RECORD_FORMS = {
     ],
   },
   FW: {
+    perSowRows: true,
     label: "分娩", target: "sow",
     fields: [
       { key: "born_alive", label: "活仔數", type: "int", min: 0, max: 30, required: true },
@@ -89,6 +90,7 @@ export const RECORD_FORMS = {
     ],
   },
   WN: {
+    perSowRows: true,
     label: "離乳", target: "sow",
     fields: [
       { key: "weaned", label: "離乳頭數", type: "int", min: 0, max: 30, required: true },
@@ -103,15 +105,21 @@ export const RECORD_FORMS = {
     ],
   },
   PD: {
-    label: "驗孕", target: "sow",
+    // 驗孕整批一起做,而且結果通常一致 —— 唯一的欄位就是「有沒有懷孕」,
+    // 整批共用一個值完全合理,所以用跟配種一樣的做法(耳號連續加入多筆,
+    // 欄位共用)。分娩、離乳那些「每頭數字不同」的則是一頭一列,見
+    // perSowRows。
+    label: "驗孕", target: "sow", multiSow: true,
     fields: [{ key: "positive", label: "結果", type: "bool",
                yes: "有懷孕", no: "沒懷孕", required: true }],
   },
   FON: {
+    perSowRows: true,
     label: "寄養移入", target: "sow",
     fields: [{ key: "count", label: "頭數", type: "int", min: 1, max: 30, required: true }],
   },
   FOF: {
+    perSowRows: true,
     label: "寄養移出", target: "sow",
     fields: [{ key: "count", label: "頭數", type: "int", min: 1, max: 30, required: true }],
   },
@@ -174,12 +182,17 @@ export const RECORD_FORMS = {
     ],
   },
   GA: {
+    // 一批進場常常是同一天、同一個來源、同一個品種(使用者說明),所以
+    // 一次建好幾頭:耳號等每頭不同的欄位一頭一列,品種整批共用一個值,
+    // 不必打二十次。進場日期跟其他事件一樣是整張表單共用的那個日期欄。
+    perSowRows: true,
     label: "種豬進場", target: "new",
     // 母豬跟公豬共用同一張表單(用上面的 母豬/公豬 切換鈕決定送去哪個
     // API),父母耳號兩邊都可能知道也可能不知道,所以是選填。
     fields: [
       { key: "earTag", label: "耳號", type: "text", required: true },
-      { key: "breed", label: "品種", type: "text" },
+      // shared:整批共用一個值,畫在共用區而不是每一列各一個。
+      { key: "breed", label: "品種", type: "text", shared: true },
       { key: "birthDate", label: "出生日期", type: "date" },
       { key: "sire_tag", label: "父系耳號", type: "text" },
       { key: "dam_tag", label: "母系耳號", type: "text" },
@@ -236,6 +249,16 @@ export function supportsMultiSow(code) {
  */
 export function supportsMultiService(code) {
   return Boolean(formFor(code)?.multiService);
+}
+
+/** 這種事件一次記多頭,但**每頭的欄位各自不同** —— 分娩的活仔數、離乳的
+ * 離乳頭數,每頭都是自己的數字,不能像配種的公豬那樣整批共用一組值。
+ *
+ * 所以表單長成「一頭一列」:每列自己的耳號 + 自己的欄位,填完一次送出。
+ * 使用者的原話是一隻一隻送太慢,每送一次還要等幾秒。
+ */
+export function usesPerSowRows(code) {
+  return Boolean(formFor(code)?.perSowRows);
 }
 
 /** 預設開幾列。使用者說一次通常配 2–3 次,而且整批配完才一起記,

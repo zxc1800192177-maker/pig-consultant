@@ -22,6 +22,7 @@ import {
   recordedRow,
   supportsMultiService,
   supportsMultiSow,
+  usesPerSowRows,
   targetsBoar,
   targetsEither,
   targetsNothing,
@@ -61,11 +62,17 @@ describe("表單定義", () => {
 describe("配種一次記多頭", () => {
   // 同一天、同一隻公豬,常常是一整批母豬一起配 —— 逐頭開表單重打一次
   // 公豬耳號跟發情穩定度太沒效率(使用者要求)。
-  it("配種支援一次多頭,其他事件不支援", () => {
+  it("配種與驗孕支援一次多頭", () => {
+    // 這兩種的欄位整批共用得起來:配種是同一隻公豬,驗孕是同一個結果。
     assert.equal(supportsMultiSow("MT"), true);
+    assert.equal(supportsMultiSow("PD"), true);
+  });
+
+  it("每頭數字不同的事件不用這種共用欄位的做法", () => {
+    // 分娩的活仔數、離乳的離乳頭數每頭都不一樣,共用一組值等於把第一頭
+    // 的數字複製給所有豬。這些走的是「一頭一列」(perSowRows)。
     assert.equal(supportsMultiSow("FW"), false);
     assert.equal(supportsMultiSow("WN"), false);
-    assert.equal(supportsMultiSow("PD"), false);
   });
 
   it("不認得的代碼不支援,不是拋例外", () => {
@@ -684,5 +691,37 @@ describe("採精", () => {
     assert.ok(extra.includes("活力 80%"));
     assert.ok(extra.includes("濃度 3.5 億/mL"));
     assert.ok(extra.includes("3 劑"));
+  });
+});
+
+describe("一次記多頭:每頭數字不同的事件", () => {
+  // 使用者的原話:「記錄一隻送一隻太慢了,而且每送出一次都要等個幾秒」。
+  // 配種那種「欄位整批共用」的做法對這些行不通 —— 活仔數、離乳頭數每頭
+  // 都是自己的數字,共用一組值等於把第一頭的數字複製給所有豬。
+  it("分娩、離乳、寄養都是一頭一列", () => {
+    for (const code of ["FW", "WN", "FON", "FOF"]) {
+      assert.equal(usesPerSowRows(code), true, `${code} 應該是一頭一列`);
+    }
+  });
+
+  it("配種與驗孕不是 —— 它們的欄位整批共用得起來", () => {
+    assert.equal(usesPerSowRows("MT"), false);
+    assert.equal(usesPerSowRows("PD"), false);
+  });
+
+  it("不認得的代碼不是,也不拋例外", () => {
+    assert.equal(usesPerSowRows("ZZ"), false);
+  });
+
+  it("種豬進場也是一頭一列,但品種整批共用", () => {
+    // 一批進場常常同一天、同一個來源、同品種(使用者說明)——
+    // 品種打二十次正是要省掉的事。
+    assert.equal(usesPerSowRows("GA"), true);
+    const fields = formFor("GA").fields;
+    assert.equal(fields.find((f) => f.key === "breed").shared, true);
+    for (const key of ["earTag", "birthDate", "sire_tag", "dam_tag"]) {
+      assert.ok(!fields.find((f) => f.key === key).shared,
+        `${key} 每頭不同,不能整批共用`);
+    }
   });
 });

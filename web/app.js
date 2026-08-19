@@ -19,7 +19,7 @@ import {
 import {
   DEFAULT_SERVICE_ROWS, SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor,
   hasOtherOption, OTHER_REASON, recordedRow, supportsMultiService, supportsMultiSow,
-  targetsBoar, targetsEither, targetsNothing,
+  targetsBoar, targetsEither, targetsNothing, usesPerSowRows,
 } from "./lib/record.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1307,7 +1307,7 @@ document.addEventListener("click", (e) => {
       ? `展開全部 ${box.childElementCount} 頭 ›` : "收合 ⌃";
     return;
   }
-  const row = e.target.closest(".sow-row");
+  const row = e.target.closest(".rec-row");
   if (row) {
     if (row.dataset.boar) return openBoar(Number(row.dataset.boar));
     return openSow(Number(row.dataset.sow));
@@ -1423,17 +1423,105 @@ async function openRecordForm(code) {
       : targetsEither(code) ? eitherAnimalFields()
       : targetsBoar(code) ? boarPickerField()
       : targetsNothing(code) ? ""
+      : usesPerSowRows(code) && !createsNewAnimal(code) ? ""
       : supportsMultiSow(code) ? multiSowPickerField() : sowPickerField()}
     ${supportsMultiService(code) ? serviceRowsField()
       : `<label class="fld"><span>日期</span>
       <input type="date" id="recDate" value="${todayIso()}"></label>`}
-    ${spec.fields.filter((f) => !f.perService).map(fieldMarkup).join("")}
+    ${usesPerSowRows(code)
+      ? spec.fields.filter((f) => f.shared).map((f) => fieldMarkup(f)).join("")
+        + perSowRowsField(spec)
+      : spec.fields.filter((f) => !f.perService).map(fieldMarkup).join("")}
     <p class="rec-err is-hidden" id="recErr"></p>
     <button type="button" class="btn-primary" id="recSubmit">記錄</button>`;
 
   if (supportsMultiService(code)) renumberServiceRows();
+  if (usesPerSowRows(code)) renumberSowRows();
   renderUnknownButton();
   box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/** 一頭一列:分娩、離乳、寄養這些「每頭數字都不一樣」的事件。
+ *
+ * 使用者的原話是「記錄一隻送一隻太慢了,而且每送出一次都要等個幾秒」。
+ * 配種那種「耳號加很多筆、欄位整批共用」的做法對這些事件行不通 ——
+ * 活仔數、離乳頭數共用一組值等於把第一頭的數字複製給所有豬,那是憑空
+ * 捏造資料(憲法第三條)。所以改成每頭一列,自己的耳號配自己的數字。
+ *
+ * 日期仍然整批共用:整批同一天離乳、當天記當天的分娩,是這個場的做法;
+ * 每列各放一個日期會讓 375px 手機上的一列高到看不完。真的跨日就分兩次記。
+ */
+function perSowRowsField(spec) {
+  return `
+    <div id="recSowRows">${perSowRowMarkup(spec, 0)}</div>
+    <button type="button" class="btn-ghost" id="recAddSowRow">+ 再加一頭</button>
+    <datalist id="sowTags">
+      ${sows.map((s) => `<option value="${escapeHtml(s.earTag)}"></option>`).join("")}
+    </datalist>`;
+}
+
+/** 第 i 列。欄位 id 帶 __i 後綴,否則每列的 id 會撞在一起,
+ * getElementById 只找得到第一列,第二頭以後的數字全部讀成第一頭的。
+ */
+function perSowRowMarkup(spec, i) {
+  const sfx = `__${i}`;
+  return `
+    <div class="rec-row" data-row="${i}">
+      <div class="rec-row-h">
+        <span class="rec-row-n"></span>
+        <button type="button" class="btn-ghost rec-row-del">移除</button>
+      </div>
+      ${createsNewAnimal(recordCode) ? "" : `
+      <label class="fld"><span>母豬耳號</span>
+        <input list="sowTags" class="rec-row-tag" inputmode="numeric"
+               placeholder="輸入或選擇耳號" autocomplete="off"></label>`}
+      ${spec.fields.filter((f) => !f.shared).map((f) => fieldMarkup(f, sfx)).join("")}
+    </div>`;
+}
+
+function renumberSowRows() {
+  const rows = [...document.querySelectorAll("#recSowRows .rec-row")];
+  rows.forEach((row, i) => {
+    const label = row.querySelector(".rec-row-n");
+    if (label) label.textContent = `第 ${i + 1} 頭`;
+    const del = row.querySelector(".rec-row-del");
+    if (del) del.classList.toggle("is-hidden", rows.length <= 1);
+  });
+}
+
+function addSowRow() {
+  const box = $("recSowRows");
+  const spec = formFor(recordCode);
+  if (!box || !spec) return;
+  // 用目前最大的 data-row + 1,不是列數 —— 中間刪過列的話列數會重複,
+  // 後綴撞在一起就等於兩列共用同一組欄位。
+  const used = [...box.querySelectorAll(".rec-row")].map((r) => Number(r.dataset.row));
+  box.insertAdjacentHTML("beforeend",
+    perSowRowMarkup(spec, used.length ? Math.max(...used) + 1 : 0));
+  renumberSowRows();
+}
+
+function removeSowRow(row) {
+  const box = $("recSowRows");
+  if (!row || !box || box.querySelectorAll(".rec-row").length <= 1) return;
+  row.remove();
+  renumberSowRows();
+}
+
+/** 讀出每一列。耳號空白的列直接略過 —— 按了「再加一頭」又不用時,
+ * 不該逼使用者先移除才能送出。
+ */
+function readSowRows(spec) {
+  return [...document.querySelectorAll("#recSowRows .rec-row")]
+    .map((row) => {
+      const raw = readRecordFields(spec, `__${row.dataset.row}`);
+      // 種豬進場沒有「選一頭既有母豬」的欄位,耳號本身就是那一列的識別。
+      const tag = createsNewAnimal(recordCode)
+        ? (raw.earTag || "").trim()
+        : (row.querySelector(".rec-row-tag")?.value || "").trim();
+      return { tag, raw };
+    })
+    .filter((r) => r.tag);
 }
 
 /** 配種列:一次發情連配的每一天各一列(日期 + 公豬)。
@@ -1672,13 +1760,18 @@ function eitherAnimalFields() {
     <div id="recAnimalPicker">${sowPickerField()}</div>`;
 }
 
-function fieldMarkup(field) {
+/** 畫一個欄位。`sfx` 是列的後綴 —— 「一頭一列」的表單(分娩、離乳……)
+ * 同一種欄位會出現好幾次,id 撞在一起的話 getElementById 只找得到第一個,
+ * 第二頭以後的數字會全部讀成第一頭的。讀值的 readRecordFields() 要帶
+ * 同一個後綴,兩邊必須對稱。
+ */
+function fieldMarkup(field, sfx = "") {
   const hint = field.hint ? `<em class="fld-h">${escapeHtml(field.hint)}</em>` : "";
 
   if (field.type === "boar") {
     return `
       <label class="fld"><span>${escapeHtml(field.label)}</span>
-        <input list="boarTags" id="f_${field.key}" placeholder="輸入或選擇耳號"
+        <input list="boarTags" id="f_${field.key}${sfx}" placeholder="輸入或選擇耳號"
                autocomplete="off"></label>
       <datalist id="boarTags">
         ${boars.map((b) => `<option value="${escapeHtml(b.earTag)}"></option>`).join("")}
@@ -1690,14 +1783,14 @@ function fieldMarkup(field) {
     // (使用者決定)。
     return `
       <label class="fld fld-checkbox">
-        <input type="checkbox" id="f_${field.key}">
+        <input type="checkbox" id="f_${field.key}${sfx}">
         <span>${escapeHtml(field.label)}</span>
       </label>${hint}`;
   }
   if (field.type === "bool") {
     return `
       <div class="fld"><span>${escapeHtml(field.label)}</span>
-        <div class="seg" data-field="${field.key}">
+        <div class="seg" data-field="${field.key}${sfx}">
           <button type="button" class="seg-b" data-val="true">${escapeHtml(field.yes)}</button>
           <button type="button" class="seg-b" data-val="false">${escapeHtml(field.no)}</button>
         </div>
@@ -1707,7 +1800,7 @@ function fieldMarkup(field) {
     // 1~5 的按鈕而不是輸入框:巡欄時單手操作,而且按鈕本身就說明了範圍
     return `
       <div class="fld"><span>${escapeHtml(field.label)}</span>
-        <div class="seg score" data-field="${field.key}">
+        <div class="seg score" data-field="${field.key}${sfx}">
           ${[1, 2, 3, 4, 5].map((n) =>
             `<button type="button" class="seg-b" data-val="${n}">${n}</button>`).join("")}
         </div>${hint}
@@ -1721,7 +1814,7 @@ function fieldMarkup(field) {
     // 點到「其他」才由下面 document 的委派點擊處理器切換顯示。
     return `
       <div class="fld"><span>${escapeHtml(field.label)}</span>
-        <div class="chips" data-field="${field.key}">
+        <div class="chips" data-field="${field.key}${sfx}">
           ${field.options.map((o) => {
             const opt = typeof o === "string" ? { value: o, label: o } : o;
             return `<button type="button" class="chip" data-val="${escapeHtml(opt.value)}"
@@ -1729,7 +1822,7 @@ function fieldMarkup(field) {
           }).join("")}
         </div>
         ${hasOtherOption(field)
-          ? `<input type="text" id="f_${field.key}_other" class="fld-other is-hidden"
+          ? `<input type="text" id="f_${field.key}_other${sfx}" class="fld-other is-hidden"
                     placeholder="請輸入實際原因">`
           : ""}${hint}
       </div>`;
@@ -1740,7 +1833,7 @@ function fieldMarkup(field) {
     // 打過的編號會出現在建議裡,但永遠可以打一個新的。
     return `
       <label class="fld"><span>${escapeHtml(field.label)}</span>
-        <input list="penNames" id="f_${field.key}" placeholder="輸入欄位編號"
+        <input list="penNames" id="f_${field.key}${sfx}" placeholder="輸入欄位編號"
                autocomplete="off"></label>
       <datalist id="penNames">
         ${[...new Set(pens.map((p) => p.name))]
@@ -1752,7 +1845,7 @@ function fieldMarkup(field) {
     // 判斷)跟按鈕上顯示的符號分開,符號以後想換不必動到已存的資料。
     return `
       <div class="fld"><span>${escapeHtml(field.label)}</span>
-        <div class="seg tri" data-field="${field.key}">
+        <div class="seg tri" data-field="${field.key}${sfx}">
           ${field.options.map((o) =>
             `<button type="button" class="seg-b" data-val="${escapeHtml(o.value)}"
              >${escapeHtml(o.label)}</button>`).join("")}
@@ -1765,7 +1858,7 @@ function fieldMarkup(field) {
   // 進輸入框 —— 使用者不改就是這個數字,不是留白等著被當成沒填。
   return `
     <label class="fld"><span>${escapeHtml(field.label)}</span>
-      <input type="${type}" id="f_${field.key}"
+      <input type="${type}" id="f_${field.key}${sfx}"
              ${field.default !== undefined ? `value="${escapeHtml(String(field.default))}"` : ""}
              ${field.type === "decimal" ? 'step="0.1"' : ""}
              ${field.type === "int" ? 'inputmode="numeric"' : ""}></label>${hint}`;
@@ -1784,7 +1877,7 @@ function todayIso() {
  * 裡使用者說明的實際原因 —— 沒打字就當沒填,讓 buildDetail() 既有的
  * 必填檢查去擋(「請填寫原因」),不必另外寫一套錯誤訊息。
  */
-function readRecordFields(spec) {
+function readRecordFields(spec, sfx = "") {
   const raw = {};
   for (const field of spec.fields) {
     // perService 的欄位不在共用區,而是每一列配種各一個 ——
@@ -1793,17 +1886,17 @@ function readRecordFields(spec) {
     if (field.type === "checkbox") {
       // 原生勾選框讀 .checked,不是 .is-active —— 沒勾就是預設的
       // false,不是「還沒填」。
-      raw[field.key] = $(`f_${field.key}`)?.checked ?? false;
+      raw[field.key] = $(`f_${field.key}${sfx}`)?.checked ?? false;
     } else if (["bool", "score", "choice", "tri"].includes(field.type)) {
       const picked = document.querySelector(
-        `[data-field="${field.key}"] .is-active`);
+        `[data-field="${field.key}${sfx}"] .is-active`);
       let val = picked ? picked.dataset.val : "";
       if (field.type === "choice" && val === OTHER_REASON) {
-        val = ($(`f_${field.key}_other`)?.value || "").trim();
+        val = ($(`f_${field.key}_other${sfx}`)?.value || "").trim();
       }
       raw[field.key] = val;
     } else {
-      raw[field.key] = $(`f_${field.key}`)?.value ?? "";
+      raw[field.key] = $(`f_${field.key}${sfx}`)?.value ?? "";
     }
   }
   return raw;
@@ -1833,6 +1926,15 @@ async function submitRecord() {
   }
   const when = services ? services.map((s) => s.date).sort()[0] : $("recDate")?.value;
   if (!when) return showRecordError("請選擇日期");
+
+  // 一頭一列。種豬進場要先判斷 —— 它也是一頭一列,但走的是「建立新的豬」
+  // 那條路(送去 /api/sows),不是在既有母豬身上記一筆。順序反過來的話
+  // 進場會被當成一般事件,去查一頭還不存在的母豬而報「找不到耳號」。
+  if (usesPerSowRows(recordCode)) {
+    return createsNewAnimal(recordCode)
+      ? submitNewAnimalRows(spec, when)
+      : submitPerSowRows(spec, when);
+  }
 
   const raw = readRecordFields(spec);
   const { detail, problems } = buildDetail(recordCode, raw);
@@ -1929,6 +2031,105 @@ async function submitRecord() {
   // 耳號的民國年後綴、狀態、生產表現都會停在記錄之前的樣子。
   // 不明母豬時 sow 是 null(那頭豬是伺服器現建的,前端沒有她的 id)。
   if (sow && openSowId === sow.id) await openSow(sow.id);
+}
+
+/** 種豬進場一次建好幾頭。品種與進場日期整批共用,其餘每頭一列。
+ *
+ * 跟一般事件不同的地方:這裡是**建立新的豬**,不是在既有的豬身上記一筆,
+ * 所以送去 /api/sows 或 /api/boars,而且耳號重複會被伺服器擋下來 ——
+ * 那正是想要的行為,不必在前端再擋一次。
+ */
+async function submitNewAnimalRows(spec, when) {
+  const rows = readSowRows(spec);
+  if (!rows.length) return showRecordError("請至少填一頭的耳號");
+
+  const dupes = rows.map((r) => r.tag).filter((t, i, a) => a.indexOf(t) !== i);
+  if (dupes.length) return showRecordError(`${dupes[0]} 填了兩次`);
+
+  const kind = document.querySelector("#recKind .is-active")?.dataset.kind || "sow";
+  const path = kind === "boar" ? "/api/boars" : "/api/sows";
+  const shared = readRecordFields(spec);      // 共用欄位(品種)
+
+  // 只把「列裡真的有的欄位」蓋到共用值上。整份 row.raw 直接展開的話,
+  // 列裡不存在的共用欄位(品種)會被讀成空字串而把共用值蓋掉 —— 實測
+  // 三頭都建成功但品種全空,就是這個。
+  const rowKeys = spec.fields.filter((f) => !f.shared).map((f) => f.key);
+  const jobs = [];
+  for (const row of rows) {
+    const merged = { ...shared };
+    for (const k of rowKeys) merged[k] = row.raw[k];
+    const { detail, problems } = buildDetail(recordCode, merged);
+    if (problems.length) return showRecordError(`${row.tag}:${problems[0]}`);
+    jobs.push({ tag: row.tag, detail });
+  }
+
+  const results = await Promise.all(jobs.map(async (job) => {
+    const { ok, data } = await api(path, postJson({
+      earTag: job.detail.earTag, breed: job.detail.breed,
+      birthDate: job.detail.birthDate, entryDate: when,
+      sireTag: job.detail.sire_tag, damTag: job.detail.dam_tag,
+    }));
+    return { tag: job.tag, ok, error: data?.error };
+  }));
+
+  const failed = results.filter((r) => !r.ok);
+  const done = results.length - failed.length;
+  if (done) await Promise.all([reloadSows(), reloadBoars(), reloadRecent()]);
+  if (failed.length) {
+    const prefix = done ? `已建立 ${done} 頭,` : "";
+    return showRecordError(
+      `${prefix}${failed.length} 頭失敗:` +
+      failed.map((f) => `${f.tag}(${f.error || "建立失敗"})`).join("、"));
+  }
+
+  closeRecordForm();
+  showBanner(`已進場 ${done} 頭`, "ok");
+}
+
+/** 一頭一列的送出。每列各自驗證、各自送一筆,**互相獨立** —— 跟配種
+ * 一次記多頭同一個道理:一列填錯不該讓已經填好的其他幾頭整批重打。
+ *
+ * 驗證在送出**之前**全部做完:數字打錯時當場指出是第幾頭,而不是先寫了
+ * 三筆進資料庫才在第四筆報錯,留下一個做到一半的狀態。
+ */
+async function submitPerSowRows(spec, when) {
+  const rows = readSowRows(spec);
+  if (!rows.length) return showRecordError("請至少填一頭母豬的耳號");
+
+  const dupes = rows.map((r) => r.tag).filter((t, i, a) => a.indexOf(t) !== i);
+  if (dupes.length) return showRecordError(`${dupes[0]} 填了兩次`);
+
+  const jobs = [];
+  for (const [i, row] of rows.entries()) {
+    const sow = sows.find((s) => s.earTag === row.tag);
+    if (!sow) return showRecordError(`第 ${i + 1} 頭:找不到耳號 ${row.tag}`);
+    const { detail, problems } = buildDetail(recordCode, row.raw);
+    if (problems.length) return showRecordError(`${row.tag}:${problems[0]}`);
+    jobs.push({ tag: row.tag, sowId: sow.id, detail });
+  }
+
+  const results = await Promise.all(jobs.map(async (job) => {
+    const { ok, data } = await api("/api/sow-events", postJson({
+      sowId: job.sowId, type: recordCode, date: when, detail: job.detail,
+    }));
+    return { tag: job.tag, ok, error: data?.error };
+  }));
+
+  const failed = results.filter((r) => !r.ok);
+  const done = results.length - failed.length;
+
+  if (done) {
+    await Promise.all([reloadSows(), reloadRecent(), reloadTasks(), reloadAlerts()]);
+  }
+  if (failed.length) {
+    const prefix = done ? `已記錄 ${done} 頭,` : "";
+    return showRecordError(
+      `${prefix}${failed.length} 頭失敗:` +
+      failed.map((f) => `${f.tag}(${f.error || "記錄失敗"})`).join("、"));
+  }
+
+  closeRecordForm();
+  showBanner(`已記錄 ${done} 頭${spec.label}`, "ok");
 }
 
 /** 配種一次記多頭的送出邏輯。每一頭各自送一筆 /api/sow-events(互相
@@ -2289,6 +2490,10 @@ document.addEventListener("click", (e) => {
   if (e.target.id === "recSubmit") return submitRecord();
   if (e.target.id === "recSowAdd") return addSowTag();
   if (e.target.id === "recAddService") return addServiceRow();
+  if (e.target.id === "recAddSowRow") return addSowRow();
+
+  const delSowRow = e.target.closest(".rec-row-del");
+  if (delSowRow) return removeSowRow(delSowRow.closest(".rec-row"));
   const identify = e.target.closest("[data-identify]");
   if (identify) {
     return identifyUnknownSow(Number(identify.dataset.identify),
