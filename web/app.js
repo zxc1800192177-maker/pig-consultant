@@ -1314,15 +1314,20 @@ document.addEventListener("click", (e) => {
   // 一起改掉,結果點耳號打不開母豬卡。
   // 記錄檢查的一列 —— 點進去看那頭母豬的完整時間軸,才判斷得出哪一筆
   // 才是記錯的。要先切到母豬頁,否則卡片畫在一個看不見的分頁裡。
-  const dp = e.target.closest(".dp-row");
-  if (dp) {
-    if (e.target.closest(".dp-fix")) {
-      fixingType = dp.dataset.type;
-      return openFixForm(dp);
-    }
+  // **只有按鈕會動作**,點到列上的空白處不該把人帶走 —— 使用者回報過
+  // 點空白也會跳到母豬卡。整列可點對「一列只有一個動作」的清單才合理,
+  // 這裡有兩個動作,整列可點等於多出一個看不見的第三種行為。
+  const dpFix = e.target.closest(".dp-fix");
+  if (dpFix) {
+    const row = dpFix.closest(".dp-row");
+    fixingType = row.dataset.type;
+    return openFixForm(row);
+  }
+  const dpOpen = e.target.closest(".dp-open");
+  if (dpOpen) {
     // 看她的完整時間軸才判斷得出哪一筆才是記錯的
     showTab("sows");
-    return openSow(Number(dp.dataset.sow));
+    return openSow(Number(dpOpen.closest(".dp-row").dataset.sow));
   }
   if (e.target.id === "dpFixCancel") {
     return $("dpFixForm").classList.add("is-hidden");
@@ -2470,8 +2475,8 @@ async function reloadDataProblems() {
       <div class="dp-w">${escapeHtml(p.why)}</div>
       <div class="dp-detail is-hidden">${escapeHtml(JSON.stringify(p.detail))}</div>
       <div class="dp-acts">
-        <button type="button" class="btn-ghost dp-fix">修正這筆</button>
-        <button type="button" class="btn-ghost dp-open">看她的記錄</button>
+        <button type="button" class="btn-soft dp-fix">修正這筆</button>
+        <button type="button" class="btn-soft dp-open">看她的記錄</button>
       </div>
     </div>`).join("");
 }

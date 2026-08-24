@@ -162,9 +162,13 @@ body { padding-bottom: 96px; }
 #recAddService { margin-top: 10px; min-height: 44px; padding: 10px 14px; }
 
 /* 記錄檢查的一列。點得進母豬卡去看完整時間軸,所以整列要有可點的感覺。 */
-.dp-row { padding: 11px 0; border-bottom: 1px solid var(--border-light); }
-.dp-acts { display: flex; gap: 8px; margin-top: 8px; }
-.dp-acts .btn-ghost { min-height: 40px; padding: 8px 12px; font-size: 12.5px; }
+/* 整列**不可點** —— 只有下面兩顆按鈕會動作。使用者回報過點空白處也會
+   跳到母豬卡:一列有兩個動作時,整列可點等於多出一個看不見的第三種行為。 */
+.dp-row { padding: 12px 0; border-bottom: 1px solid var(--border-light); }
+.dp-acts { display: flex; gap: 8px; margin-top: 10px; }
+/* 兩顆按鈕平分寬度,看得出來是按鈕而不是文字 —— .btn-soft 的註解講的
+   正是這件事:.btn-ghost 在手機上看不出可按,可點範圍幾乎只有文字本身。 */
+.dp-acts .btn-soft { flex: 1; min-height: 44px; font-size: 13px; }
 .dp-row:last-child { border-bottom: none; }
 .dp-t { font-size: 14px; font-weight: 600; }
 .dp-w { font-size: 12.5px; color: var(--ink-soft); margin-top: 3px; }

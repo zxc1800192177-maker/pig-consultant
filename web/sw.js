@@ -7,7 +7,7 @@
 //
 // CACHE_VERSION 需要在每次靜態檔案改版時手動遞增,否則使用者的瀏覽器
 // 會一直吃到舊快取,看不到新版畫面。
-const CACHE_VERSION = "v61";
+const CACHE_VERSION = "v62";
 const CACHE_NAME = `pig-consultant-${CACHE_VERSION}`;
 
 // 程式碼:一律先問網路,拿不到才用快取(也就是只在離線時用)。
