@@ -73,6 +73,10 @@ export function monthPickerGrid(year, selectedMonth) {
 
 // 把事件的 detail 整理成一句話。欄位是哪些由 importer.py 決定,
 // 這裡只負責挑出有值的來顯示。
+//
+// **注意**:紀錄頁「已記錄」清單另有一份 record.js 的 recordSummary(),
+// 兩份各自維護。加欄位時兩邊都要加 —— 只加一邊的話,同一筆事件在母豬卡
+// 看得到、在已記錄看不到(總飼養頭數就這樣漏過一次)。
 export function describeEvent(event) {
   const d = event.detail || {};
   const bits = [];
@@ -80,6 +84,8 @@ export function describeEvent(event) {
   if (d.born_alive != null) bits.push(`活仔 ${d.born_alive}`);
   if (d.stillborn) bits.push(`死胎 ${d.stillborn}`);
   if (d.mummified) bits.push(`木乃伊 ${d.mummified}`);
+  // 沒填代表沒記,不代表「跟活仔數一樣」,所以不顯示也不補值
+  if (d.raised != null) bits.push(`總飼養 ${d.raised} 隻`);
   if (d.weaned != null) bits.push(`離乳 ${d.weaned} 隻`);
   if (d.count != null) bits.push(`${d.count} 隻`);
   if (d.reason) bits.push(d.reason);
@@ -514,20 +520,30 @@ export function alertRow(row) {
 export function weanScoreRows(events) {
   const rows = [];
   let parity = 0;
+  let raised = null;          // 這一胎分娩時填的總飼養頭數
   const ordered = [...(events || [])]
     .filter((e) => !e.excluded)
     .sort((a, b) => String(a.date).localeCompare(String(b.date)));
 
   for (const e of ordered) {
-    if (e.type === "FW") parity += 1;
+    if (e.type === "FW") {
+      parity += 1;
+      // 總飼養頭數記在**分娩**那筆上,離乳那筆沒有 —— 要往前找到這一胎的
+      // 分娩才拿得到。沒填就是 null,不拿活仔數頂替:那兩個是不同的數字
+      // (併窩、寄養調整後才是實際要養的頭數)。
+      raised = Number.isInteger((e.detail || {}).raised) ? e.detail.raised : null;
+      continue;
+    }
     if (e.type !== "WN") continue;
     const d = e.detail || {};
     rows.push({
       parity: parity || null,
       date: e.date,
+      raised,
       weaned: Number.isInteger(d.weaned) ? d.weaned : null,
       score: Number.isInteger(d.wean_score) ? d.wean_score : null,
     });
+    raised = null;            // 用掉了,下一胎重新從她自己的分娩取
   }
   return rows;
 }
@@ -554,7 +570,8 @@ export function weanScoreCard(events) {
               "○".repeat(5 - r.score)} <b>${r.score}</b></span>`}
       </div>
       <div class="ws-d">${escapeHtml(r.date)} 離乳${
-        r.weaned != null ? ` ${r.weaned} 隻` : ""}</div>
+        r.weaned != null ? ` ${r.weaned} 隻` : ""}${
+        r.raised != null ? ` ・ 總飼養 ${r.raised} 隻` : ""}</div>
     </div>`).join("");
 
   return `

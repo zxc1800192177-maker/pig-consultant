@@ -81,7 +81,7 @@ export const RECORD_FORMS = {
       // 分娩當天常會併窩、寄養調整,留給這頭母豬養的頭數因此可能跟活仔數
       // 不一樣(使用者決定)。跟離乳評分同樣的道理:**可以不填**,沒填
       // 不補值(憲法第三條第 6 款)—— 不代表「跟活仔數一樣」,只是沒記。
-      { key: "raised", label: "飼養頭數", type: "int", min: 0, max: 30,
+      { key: "raised", label: "總飼養頭數", type: "int", min: 0, max: 30,
         hint: "分娩當天併窩、寄養調整後,實際留給這頭母豬養的頭數,可以不填" },
       // 使用者決定:預設沒有助產,有的話使用者自己勾選 —— 跟上面幾個
       // 「沒填代表沒記」的欄位不同,這裡沒勾**就是**答案(沒有助產),
@@ -372,7 +372,7 @@ export function recordSummary(event) {
   if (d.born_alive != null) bits.push(`活仔 ${d.born_alive}`);
   if (d.stillborn) bits.push(`死胎 ${d.stillborn}`);
   // 沒填代表沒記,不代表「跟活仔數一樣」,所以不顯示不補值
-  if (d.raised != null) bits.push(`飼養 ${d.raised}`);
+  if (d.raised != null) bits.push(`總飼養 ${d.raised} 隻`);
   // 沒助產是預設情形,不特別標;有助產才值得在摘要裡點出來
   if (d.assisted) bits.push("助產");
   if (d.weaned != null) bits.push(`離乳 ${d.weaned} 隻`);

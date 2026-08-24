@@ -518,10 +518,12 @@ describe("已記錄清單", () => {
     assert.ok(extra.includes("死胎 2"));
   });
 
-  it("填了飼養頭數才顯示,沒填不補成活仔數", () => {
+  it("填了總飼養頭數才顯示,沒填不補成活仔數", () => {
+    // 用詞跟表單標籤、逐胎評分表一致(使用者叫它「總飼養數」)——
+    // 同一個數字在三個地方三種叫法,使用者會以為是三件事。
     const withRaised = recordSummary(
       ev({ type: "FW", detail: { born_alive: 12, raised: 10 } }));
-    assert.ok(withRaised.extra.includes("飼養 10"));
+    assert.ok(withRaised.extra.includes("總飼養 10 隻"));
 
     const without = recordSummary(ev({ type: "FW", detail: { born_alive: 12 } }));
     assert.doesNotMatch(without.extra, /飼養/);

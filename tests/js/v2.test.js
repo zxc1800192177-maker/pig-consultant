@@ -907,3 +907,61 @@ describe("逐胎離乳評分", () => {
     assert.match(html, /已評分 2 次,平均 4\.0 分/);
   });
 });
+
+describe("逐胎的總飼養頭數", () => {
+  // 總飼養頭數記在**分娩**那筆上,離乳那筆沒有 —— 評分表一列是一次離乳,
+  // 所以要往前找到這一胎的分娩才拿得到(使用者要求兩邊都顯示)。
+  const ev = (type, date, detail = {}) => ({ type, date, detail });
+
+  it("從那一胎的分娩帶過來", () => {
+    const rows = weanScoreRows([
+      ev("FW", "2025-03-01", { born_alive: 12, raised: 11 }),
+      ev("WN", "2025-03-23", { weaned: 10 }),
+    ]);
+    assert.equal(rows[0].raised, 11);
+  });
+
+  it("每一胎各拿自己那次分娩的,不會沿用上一胎的", () => {
+    const rows = weanScoreRows([
+      ev("FW", "2025-01-01", { raised: 11 }), ev("WN", "2025-01-23", {}),
+      ev("FW", "2025-06-01", {}),             ev("WN", "2025-06-23", {}),
+    ]);
+    assert.deepEqual(rows.map((r) => r.raised), [11, null]);
+  });
+
+  it("沒填就是 null,不拿活仔數頂替", () => {
+    // 兩者是不同的數字:併窩、寄養調整後才是實際要養的頭數。
+    const rows = weanScoreRows([
+      ev("FW", "2025-03-01", { born_alive: 12 }), ev("WN", "2025-03-23", {}),
+    ]);
+    assert.equal(rows[0].raised, null);
+  });
+
+  it("有填才顯示在卡片上", () => {
+    const withRaised = weanScoreCard([
+      ev("FW", "2025-03-01", { raised: 11 }), ev("WN", "2025-03-23", { weaned: 10 }),
+    ]);
+    assert.match(withRaised, /總飼養 11 隻/);
+
+    const without = weanScoreCard([
+      ev("FW", "2025-03-01", {}), ev("WN", "2025-03-23", { weaned: 10 }),
+    ]);
+    assert.doesNotMatch(without, /總飼養/);
+  });
+});
+
+describe("時間軸的總飼養頭數", () => {
+  // 母豬卡的時間軸用 describeEvent(),已記錄清單用 record.js 的
+  // recordSummary() —— 兩份各自維護,總飼養頭數一度只加了其中一邊。
+  it("分娩那一列顯示總飼養頭數", () => {
+    const text = describeEvent({
+      type: "FW", detail: { born_alive: 12, stillborn: 1, raised: 11 },
+    });
+    assert.match(text, /總飼養 11 隻/);
+  });
+
+  it("沒填就不顯示,不補成活仔數", () => {
+    const text = describeEvent({ type: "FW", detail: { born_alive: 12 } });
+    assert.doesNotMatch(text, /飼養/);
+  });
+});
