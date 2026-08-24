@@ -1374,6 +1374,12 @@ let boars = [];
 let allBoars = [];
 let pens = [];               // 移欄表單用,含即時佔用狀態
 let recordCode = null;      // 目前開著的表單是哪一種事件
+// 「已記錄」預設只顯示前幾筆,其餘收起來(使用者要求)。10 筆大約是
+// 一個畫面的高度,足夠確認「剛剛那幾筆記進去了沒」。
+const RECENT_COLLAPSED = 10;
+let recentEvents = [];      // 最近 7 天的記錄,展開/收合共用同一份
+let recentExpanded = false;
+
 let recSowTags = [];        // 配種一次記多頭時,目前已加入清單的耳號
 // 這次記錄是不是記在「耳號看不清楚」的母豬身上。用一個布林值而不是往
 // recSowTags 塞一個特殊字串 —— 那個陣列裡放的都是真實耳號,混一個哨兵
@@ -2270,12 +2276,38 @@ async function reloadRecent() {
   const { ok, data } = await api("/api/recent-events?days=7");
   if (!ok) return;
 
-  $("recDoneCount").textContent = data.events.length
-    ? `最近 7 天 ${data.events.length} 筆` : "";
-  box.innerHTML = data.events.map(recordedRow).join("")
-    || '<p class="hint">最近 7 天還沒有記錄。</p>';
-
+  recentEvents = data.events;
+  $("recDoneCount").textContent = recentEvents.length
+    ? `最近 7 天 ${recentEvents.length} 筆` : "";
+  renderRecentList();
   renderPendingIdentity();
+}
+
+/** 「已記錄」清單。**預設只畫前 10 筆**(使用者要求)—— 一天記三四十筆
+ * 是常態,整批攤開會把紀錄頁的表單推到看不到的地方,而使用者來這一區
+ * 通常只是要確認「剛剛那筆記進去了沒」,那一定在最前面。
+ *
+ * 這裡是重畫而不是用 CSS 遮住多的部分(工作清單的 .tags-fold 那種做法)——
+ * 那邊每一格高度一樣,固定 max-height 剛好切在整行;這裡每一列高度不一,
+ * 補登的列還會多一行日期,固定高度一定會切在某一列中間。
+ */
+function renderRecentList() {
+  const box = $("recDone");
+  if (!box) return;
+  if (!recentEvents.length) {
+    box.innerHTML = '<p class="hint">最近 7 天還沒有記錄。</p>';
+    return;
+  }
+
+  const shown = recentExpanded
+    ? recentEvents : recentEvents.slice(0, RECENT_COLLAPSED);
+  const rest = recentEvents.length - shown.length;
+
+  box.innerHTML = shown.map(recordedRow).join("")
+    + (recentEvents.length > RECENT_COLLAPSED
+      ? `<button class="foldbtn" id="recDoneFold">${
+          recentExpanded ? "收合 ⌃" : `展開其餘 ${rest} 筆 ›`}</button>`
+      : "");
 }
 
 /** 待確認身分:耳號看不清楚時用日期先記著的母豬。
@@ -2561,6 +2593,10 @@ document.addEventListener("click", (e) => {
   if (e.target.id === "recSowAdd") return addSowTag();
   if (e.target.id === "recAddService") return addServiceRow();
   if (e.target.id === "recAddSowRow") return addSowRow();
+  if (e.target.id === "recDoneFold") {
+    recentExpanded = !recentExpanded;
+    return renderRecentList();
+  }
 
   const delSowRow = e.target.closest(".rec-row-del");
   if (delSowRow) return removeSowRow(delSowRow.closest(".rec-row"));
