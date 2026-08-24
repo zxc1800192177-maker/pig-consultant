@@ -551,6 +551,8 @@ class Application:
             return self._import_commit(payload, token)
         if path == "/api/sows/identify":
             return self._identify_unknown_sow(payload, token)
+        if path == "/api/sow-events/fix":
+            return self._fix_event(payload, token)
         return 404, {"error": "not found"}
 
     def handle_delete(self, path: str, token: Optional[str] = None) -> Tuple[int, dict]:
@@ -923,16 +925,9 @@ class Application:
         detail = detail if isinstance(detail, dict) else {}
         detail = {k: v for k, v in list(detail.items())[:config.MAX_EVENT_FIELDS]}
 
-        # 離乳仔豬評分由牧場主自評,1~5 分,**可以不評**。
-        # 沒評分時不可以補一個中間值 —— 那會讓「沒人看過」與「看過覺得
-        # 普通」變成同一件事(憲法第三條第 6 款)。
-        if "wean_score" in detail:
-            score = detail["wean_score"]
-            if score in (None, ""):
-                detail.pop("wean_score")
-            elif isinstance(score, bool) or not isinstance(score, int) \
-                    or not 1 <= score <= 5:
-                return 400, {"error": "離乳評分請填 1 到 5,或留空不評"}
+        problem = self._check_event_detail(code, detail)
+        if problem:
+            return 400, {"error": problem}
 
         # 移欄:直接打欄位編號,不必先到設定頁一個一個新增 —— 一區動輒
         # 幾百個欄位,要求先手動建一輪根本不會有人做(使用者要求)。
@@ -1170,10 +1165,16 @@ class Application:
         cfg = self._farm_settings(farm_id)
 
         found = schedule.data_problems(sows, events, _today(), cfg)
+        by_id = {e["id"]: (e.get("detail") or {}) for e in events}
         return 200, {
             "problems": [
                 {"sowId": p.sow_id, "earTag": p.ear_tag, "kind": p.kind,
-                 "date": _iso(p.when), "why": p.why}
+                 "date": _iso(p.when), "why": p.why,
+                 "eventId": p.event_id, "type": p.event_type,
+                 # 修正表單要帶出這筆的現況,使用者才是在「改一筆記錄」
+                 # 而不是「填一張空表單」——後者會逼他把沒要改的欄位
+                 # 重打一次,漏打的就變成把原本有的資料清掉。
+                 "detail": by_id.get(p.event_id, {})}
                 for p in found[:config.MAX_DATA_PROBLEMS]
             ],
             "total": len(found),
@@ -1640,6 +1641,77 @@ class Application:
 
         self.store.delete_boar_event(farm_id, event_id)
         return 200, {"ok": True}
+
+    @staticmethod
+    def _check_event_detail(code, detail) -> Optional[str]:
+        """事件內容的檢查。**新增與修正共用同一份** —— 各寫一份的話,修正
+        就會變成一條可以繞過檢查、把任意內容寫進資料庫的後門,而它偏偏是
+        給「資料已經有問題」的情況用的。
+
+        會就地修改 detail(把留空的評分拿掉),回傳錯誤訊息或 None。
+        """
+        # 離乳仔豬評分由牧場主自評,1~5 分,**可以不評**。
+        # 沒評分時不可以補一個中間值 —— 那會讓「沒人看過」與「看過覺得
+        # 普通」變成同一件事(憲法第三條第 6 款)。
+        if "wean_score" in detail:
+            score = detail["wean_score"]
+            if score in (None, ""):
+                detail.pop("wean_score")
+            elif isinstance(score, bool) or not isinstance(score, int) \
+                    or not 1 <= score <= 5:
+                return "離乳評分請填 1 到 5,或留空不評"
+        return None
+
+    def _fix_event(self, payload, token) -> Tuple[int, dict]:
+        """修正一筆既有記錄的日期或內容。記錄檢查抓到異常時用來改正。
+
+        **改的是同一筆,不是刪掉重記。** 重記會換一個新的 id,母豬卡上的
+        位置、收回按鈕都會跟著跳掉,而且原本那筆是誰記的(recorded_by)
+        會消失 —— 數字對不上時就查不出來是誰記的了。
+
+        **驗證跟新增走同一套**:日期格式、離乳評分 1~5、欄位數上限。
+        少了這些,修正就成了一個可以繞過所有檢查把任意內容寫進資料庫的
+        後門,而它偏偏是給「資料已經有問題」的情況用的。
+
+        只有牧場主能改 —— 這是在動既有的歷史記錄,不是員工修正自己剛記
+        錯的那一筆(那條路是收回重記,見 _delete_event)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        event_id = payload.get("eventId")
+        if not isinstance(event_id, int):
+            return 400, {"error": "請指定要修正的記錄"}
+
+        events = self.store.list_sow_events(farm_id)
+        target = next((e for e in events if e["id"] == event_id), None)
+        if target is None:
+            return 404, {"error": "找不到這筆記錄"}
+
+        when = target["event_date"]
+        if payload.get("date") is not None:
+            when = _date(payload.get("date"))
+            if when is None:
+                return 400, {"error": "日期格式錯誤"}
+            if when > _today():
+                return 400, {"error": "日期不能在未來"}
+
+        detail = target.get("detail") or {}
+        if isinstance(payload.get("detail"), dict):
+            detail = {k: v for k, v in
+                      list(payload["detail"].items())[:config.MAX_EVENT_FIELDS]}
+            problem = self._check_event_detail(target["event_type"], detail)
+            if problem:
+                return 400, {"error": problem}
+
+        ok = self.store.update_sow_event(farm_id, event_id, when, detail)
+        if not ok:
+            return 404, {"error": "找不到這筆記錄"}
+        return 200, {"ok": True, "date": _iso(when), "detail": detail}
 
     def _identify_unknown_sow(self, payload, token) -> Tuple[int, dict]:
         """把一頭「不明-MMDD」的母豬認回真正的耳號。

@@ -1316,9 +1316,18 @@ document.addEventListener("click", (e) => {
   // 才是記錯的。要先切到母豬頁,否則卡片畫在一個看不見的分頁裡。
   const dp = e.target.closest(".dp-row");
   if (dp) {
+    if (e.target.closest(".dp-fix")) {
+      fixingType = dp.dataset.type;
+      return openFixForm(dp);
+    }
+    // 看她的完整時間軸才判斷得出哪一筆才是記錯的
     showTab("sows");
     return openSow(Number(dp.dataset.sow));
   }
+  if (e.target.id === "dpFixCancel") {
+    return $("dpFixForm").classList.add("is-hidden");
+  }
+  if (e.target.id === "dpFixSubmit") return submitFix();
 
   const row = e.target.closest(".sow-row");
   if (row) {
@@ -1385,6 +1394,8 @@ let recordCode = null;      // 目前開著的表單是哪一種事件
 // 「已記錄」預設只顯示前幾筆,其餘收起來(使用者要求)。10 筆大約是
 // 一個畫面的高度,足夠確認「剛剛那幾筆記進去了沒」。
 const RECENT_COLLAPSED = 10;
+let fixingEventId = null;   // 記錄檢查裡正在修正的那一筆
+let fixingType = "";
 let recentEvents = [];      // 最近 7 天的記錄,展開/收合共用同一份
 let recentExpanded = false;
 
@@ -2444,15 +2455,114 @@ async function reloadDataProblems() {
   }
 
   card.classList.toggle("is-hidden", data.problems.length === 0);
-  if (!data.problems.length) return;
+  if (!data.problems.length) {
+    box.innerHTML = "";           // 修好之後不要把舊的那幾列留在 DOM 裡
+    $("dpFixForm")?.classList.add("is-hidden");
+    return;
+  }
 
   $("dataProblemCount").textContent = data.total > data.problems.length
     ? `${data.problems.length} / ${data.total} 筆` : `${data.total} 筆`;
   box.innerHTML = data.problems.map((p) => `
-    <div class="dp-row" data-sow="${p.sowId}">
+    <div class="dp-row" data-problem="${p.eventId}" data-sow="${p.sowId}"
+         data-type="${escapeHtml(p.type)}" data-date="${escapeHtml(p.date)}">
       <div class="dp-t">${escapeHtml(p.earTag)}</div>
       <div class="dp-w">${escapeHtml(p.why)}</div>
+      <div class="dp-detail is-hidden">${escapeHtml(JSON.stringify(p.detail))}</div>
+      <div class="dp-acts">
+        <button type="button" class="btn-ghost dp-fix">修正這筆</button>
+        <button type="button" class="btn-ghost dp-open">看她的記錄</button>
+      </div>
     </div>`).join("");
+}
+
+/** 修正一筆異常記錄。日期與內容都能改 —— 兩種錯法都常見:離乳日期打錯
+ * (哺乳變成 90 天),或數字打錯(單窩 56 隻,其實是 5 或 6)。
+ *
+ * 改的是**同一筆**,不是刪掉重記:重記會換一個新的 id,母豬卡上的位置
+ * 與收回按鈕都會跳掉,而且原本是誰記的也會跟著消失。
+ */
+function openFixForm(row) {
+  const code = row.dataset.type;
+  const spec = formFor(code);
+  const box = $("dpFixForm");
+  if (!spec || !box) return;
+
+  fixingEventId = Number(row.dataset.problem);
+  box.classList.remove("is-hidden");
+  box.innerHTML = `
+    <div class="rec-head">
+      <h3>修正:${escapeHtml(row.querySelector(".dp-t").textContent)} ${
+        escapeHtml(spec.label)}</h3>
+      <button type="button" class="btn-ghost" id="dpFixCancel">取消</button>
+    </div>
+    <p class="hint">${escapeHtml(row.querySelector(".dp-w").textContent)}</p>
+    <label class="fld"><span>日期</span>
+      <input type="date" id="dpFixDate" value="${escapeHtml(row.dataset.date)}"></label>
+    ${spec.fields.filter((f) => !f.shared && !f.perService)
+       .map((f) => fieldMarkup(f, "_fix")).join("")}
+    <p class="rec-err is-hidden" id="dpFixErr"></p>
+    <button type="button" class="btn-primary" id="dpFixSubmit">儲存修正</button>`;
+
+  // 表單畫好之後才把現有的值填回去 —— fieldMarkup 不接受預設值。
+  let current = {};
+  try { current = JSON.parse(row.querySelector(".dp-detail").textContent); }
+  catch { current = {}; }
+  fillRecordFields(spec, "_fix", current);
+  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/** 把既有的值填回表單。修正一筆記錄時要看得到它現在長什麼樣子 ——
+ * 給一張空表單等於逼使用者把沒要改的欄位重打一次,漏打的那幾格就會
+ * 變成把原本有的資料清掉。
+ */
+function fillRecordFields(spec, sfx, detail) {
+  for (const field of spec.fields) {
+    const val = detail[field.key];
+    if (val === undefined || val === null) continue;
+    if (field.type === "checkbox") {
+      const box = $(`f_${field.key}${sfx}`);
+      if (box) box.checked = Boolean(val);
+    } else if (["bool", "score", "choice", "tri"].includes(field.type)) {
+      const group = document.querySelector(`[data-field="${field.key}${sfx}"]`);
+      group?.querySelectorAll("[data-val]").forEach((b) =>
+        b.classList.toggle("is-active", b.dataset.val === String(val)));
+    } else {
+      const input = $(`f_${field.key}${sfx}`);
+      if (input) input.value = val;
+    }
+  }
+}
+
+async function submitFix() {
+  const err = $("dpFixErr");
+  const body = { eventId: fixingEventId };
+
+  const when = $("dpFixDate")?.value;
+  if (when) body.date = when;
+
+  // 表單已經帶出這筆的現況,所以送的是**完整的一筆**,驗證跟新增走
+  // 同一套。不必去分辨「哪幾格被改過」—— 那種判斷遇到有預設值的欄位
+  // 就會出錯(單睪/賀尼亞頭數預設 0,看起來永遠像是被填過的)。
+  const spec = formFor(fixingType);
+  if (!spec) return;
+  const built = buildDetail(fixingType, readRecordFields(spec, "_fix"));
+  if (built.problems.length) {
+    err.textContent = built.problems[0];
+    return err.classList.remove("is-hidden");
+  }
+  body.detail = built.detail;
+
+  const { ok, data } = await api("/api/sow-events/fix", postJson(body));
+  if (!ok) {
+    err.textContent = data.error || "修正失敗";
+    return err.classList.remove("is-hidden");
+  }
+
+  $("dpFixForm").classList.add("is-hidden");
+  showBanner("已修正", "ok");
+  await Promise.all([reloadDataProblems(), reloadSows(), reloadRecent(),
+                     reloadTasks(), reloadAlerts()]);
 }
 
 // ── 生產月報 ──

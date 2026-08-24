@@ -2198,3 +2198,105 @@ class TestDataProblemsEndpoint:
 
         st, body = app.handle_get("/api/data-problems", a_owner)
         assert body["problems"] == []
+
+
+class TestFixingAnAbnormalRecord:
+    """記錄檢查抓到異常後,要能直接把那筆改正(使用者要求)。
+
+    改的是**同一筆**,不是刪掉重記 —— 重記會換一個新的 id,母豬卡上的
+    位置與收回按鈕都會跳掉,而且原本是誰記的(recorded_by)會消失。
+    """
+
+    def _bad_lactation(self, app, owner):
+        """哺乳 90 天 —— 一定是離乳日期打錯了。"""
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "FW", "date": "2026-03-01",
+               "detail": {"born_alive": 11}}, owner)
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "WN", "date": "2026-05-30",
+               "detail": {"weaned": 10}}, owner)
+        problems = app.handle_get("/api/data-problems", owner)[1]["problems"]
+        return sow_id, problems
+
+    def test_the_problem_carries_the_record_id_to_fix(self, farm):
+        """只給日期的話,同一頭同一天可能有好幾筆,按下去不知道改哪一筆。"""
+        app, owner, _ = farm
+        _, problems = self._bad_lactation(app, owner)
+        assert problems[0]["eventId"]
+        assert problems[0]["type"] == "WN"
+
+    def test_correcting_the_date_clears_the_problem(self, farm):
+        app, owner, _ = farm
+        sow_id, problems = self._bad_lactation(app, owner)
+        st, _ = _post(app, "/api/sow-events/fix",
+                      {"eventId": problems[0]["eventId"],
+                       "date": "2026-03-23"}, owner)
+        assert st == 200
+        assert app.handle_get("/api/data-problems", owner)[1]["problems"] == []
+
+    def test_it_edits_in_place_keeping_the_same_record(self, farm):
+        app, owner, _ = farm
+        sow_id, problems = self._bad_lactation(app, owner)
+        event_id = problems[0]["eventId"]
+        _post(app, "/api/sow-events/fix",
+              {"eventId": event_id, "date": "2026-03-23"}, owner)
+
+        events = app.handle_get(f"/api/sows/{sow_id}", owner)[1]["events"]
+        wean = [e for e in events if e["type"] == "WN"]
+        assert len(wean) == 1, "應該是改同一筆,不是多出一筆"
+        assert wean[0]["id"] == event_id
+        assert wean[0]["date"] == "2026-03-23"
+
+    def test_the_detail_can_be_corrected_too(self, farm):
+        """單窩 56 隻那種,要改的是數字不是日期。"""
+        app, owner, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1585"}, owner)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "FW", "date": "2026-03-01",
+               "detail": {"born_alive": 56}}, owner)
+        events = app.handle_get(f"/api/sows/{sow_id}", owner)[1]["events"]
+        event_id = events[0]["id"]
+
+        st, _ = _post(app, "/api/sow-events/fix",
+                      {"eventId": event_id, "detail": {"born_alive": 6}}, owner)
+        assert st == 200
+        again = app.handle_get(f"/api/sows/{sow_id}", owner)[1]["events"]
+        assert again[0]["detail"]["born_alive"] == 6
+
+    def test_the_same_checks_as_recording_apply(self, farm):
+        """修正不能變成繞過檢查的後門 —— 它偏偏是給已經有問題的資料用的。"""
+        app, owner, _ = farm
+        sow_id, problems = self._bad_lactation(app, owner)
+        st, body = _post(app, "/api/sow-events/fix",
+                         {"eventId": problems[0]["eventId"],
+                          "detail": {"wean_score": 9}}, owner)
+        assert st == 400
+        assert "1 到 5" in body["error"]
+
+    def test_a_future_date_is_refused(self, farm):
+        app, owner, _ = farm
+        _, problems = self._bad_lactation(app, owner)
+        future = (date.today() + timedelta(days=30)).isoformat()
+        st, _ = _post(app, "/api/sow-events/fix",
+                      {"eventId": problems[0]["eventId"], "date": future}, owner)
+        assert st == 400
+
+    def test_a_worker_cannot_edit_history(self, farm):
+        """動既有的歷史記錄不是員工的權限 —— 員工記錯的那條路是收回重記。"""
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        _, problems = self._bad_lactation(app, owner)
+        st, _ = _post(app, "/api/sow-events/fix",
+                      {"eventId": problems[0]["eventId"],
+                       "date": "2026-03-23"}, worker)
+        assert st == 403
+
+    def test_another_farms_record_cannot_be_touched(self, farm):
+        app, a_owner, _ = farm
+        b_owner = _owner(app, "otherfarm")
+        _, problems = self._bad_lactation(app, b_owner)
+        st, _ = _post(app, "/api/sow-events/fix",
+                      {"eventId": problems[0]["eventId"],
+                       "date": "2026-03-23"}, a_owner)
+        assert st == 404

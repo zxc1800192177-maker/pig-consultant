@@ -437,6 +437,16 @@ class Store:
         """把一筆事件改掛到另一頭母豬 —— 「不明母豬」補登身分用。"""
         raise NotImplementedError
 
+    def update_sow_event(self, farm_id: int, event_id: int,
+                         event_date=None, detail=None) -> bool:
+        """修正一筆既有事件的日期或內容 —— 記錄檢查抓到異常時用來改正。
+
+        **不是刪掉重記**:重記會換一個新的 id,母豬卡的時間軸位置、
+        「已記錄」裡的收回按鈕都會跟著跳掉,而且原本那筆的 recorded_by
+        (誰記的)會消失,數字對不上時就查不出是誰記的了。
+        """
+        raise NotImplementedError
+
     def list_sows(self, farm_id: int, status: Optional[str] = None) -> List[dict]:
         raise NotImplementedError
 
@@ -835,6 +845,17 @@ class InMemoryStore(Store):
             return dict(rows[0])
         sow_id = self.add_sow(farm_id, ear_tag, is_unknown=is_unknown)
         return self.get_sow(farm_id, sow_id)
+
+    def update_sow_event(self, farm_id, event_id, event_date=None, detail=None) -> bool:
+        for e in self.sow_events:
+            if e["id"] == event_id and e["farm_id"] == farm_id:
+                if event_date is not None:
+                    e["event_date"] = event_date
+                if detail is not None:
+                    e["detail"] = detail
+                self._forget_event_keys()   # 判重索引含日期與 detail
+                return True
+        return False
 
     def reassign_sow_event(self, farm_id, event_id, sow_id) -> bool:
         target = self.get_sow(farm_id, sow_id)
@@ -1574,6 +1595,24 @@ class PostgresStore(Store):
                 " WHERE farm_id = %s AND ear_tag = %s", (farm_id, ear_tag)),
                 self.SOW_COLS)
         return rows[0] if rows else None
+
+    def update_sow_event(self, farm_id, event_id, event_date=None, detail=None) -> bool:
+        sets, args = [], []
+        if event_date is not None:
+            sets.append("event_date = %s"); args.append(event_date)
+        if detail is not None:
+            sets.append("detail = %s"); args.append(Jsonb(detail))
+        if not sets:
+            return False
+        args += [event_id, farm_id]
+        with self._connect() as conn:
+            row = conn.execute(
+                f"UPDATE sow_events SET {', '.join(sets)}"
+                " WHERE id = %s AND farm_id = %s RETURNING id", args).fetchone()
+        ok = row is not None
+        if ok:
+            self._invalidate_farm_events_cache(farm_id)
+        return ok
 
     def reassign_sow_event(self, farm_id, event_id, sow_id) -> bool:
         with self._connect() as conn:

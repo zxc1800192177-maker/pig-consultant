@@ -1123,6 +1123,8 @@ def monthly_report(sows: Iterable[dict], events: Iterable[dict],
 
 
 class DataProblem(NamedTuple):
+    # event_id 是要能「點進去修正」的關鍵 —— 只給日期的話,同一頭同一天
+    # 可能有好幾筆,使用者按下去我們不知道該改哪一筆。
     """一筆看起來記錯的記錄。
 
     `why` 要能讓使用者自己判斷 —— 直接把兩筆衝突的記錄與相隔天數寫出來,
@@ -1134,12 +1136,15 @@ class DataProblem(NamedTuple):
     kind: str
     when: date
     why: str
+    event_id: int
+    event_type: str
 
 
 # 偵錯規則的代碼。畫面上要分組顯示,文字在 core/labels.py。
 (PROBLEM_TOO_SOON, PROBLEM_WEAN_NO_FARROW, PROBLEM_LONG_LACTATION,
- PROBLEM_AFTER_EXIT, PROBLEM_FUTURE) = (
-    "too_soon", "wean_no_farrow", "long_lactation", "after_exit", "future")
+ PROBLEM_AFTER_EXIT, PROBLEM_FUTURE, PROBLEM_IMPLAUSIBLE) = (
+    "too_soon", "wean_no_farrow", "long_lactation", "after_exit", "future",
+    "implausible")
 
 
 def data_problems(sows: Iterable[dict], events: Iterable[dict], today: date,
@@ -1188,6 +1193,14 @@ def data_problems(sows: Iterable[dict], events: Iterable[dict], today: date,
             if code in EXIT_EVENTS:
                 exited = (when, code)
 
+            # 數字本身不合理(單窩 56 隻,其實是 5 或 6)。門檻沿用匯入
+            # 時那份 —— 同一件事只能有一個標準,兩邊各定一個遲早會分岔,
+            # 而且使用者會看到「匯入時說有問題、平常卻不說」。
+            if hit is None:
+                bad = _implausible_numbers(code, e.get("detail") or {})
+                if bad:
+                    hit = (PROBLEM_IMPLAUSIBLE, f"{when} {_label(code)}:{bad}")
+
             if code == FARROW:
                 for prev_code in (FARROW, WEAN):
                     prev = last[prev_code]
@@ -1217,10 +1230,40 @@ def data_problems(sows: Iterable[dict], events: Iterable[dict], today: date,
 
             if hit:
                 found.append(DataProblem(sow_id, tags.get(sow_id, ""),
-                                         hit[0], when, hit[1]))
+                                         hit[0], when, hit[1],
+                                         e.get("id", 0), code))
 
     found.sort(key=lambda p: (p.when, p.ear_tag), reverse=True)
     return found
+
+
+def _implausible_numbers(code: str, detail: dict) -> Optional[str]:
+    """數字本身就不合理的記錄。門檻取自 importer.LIMITS —— 匯入時的離群值
+    判定與平常的記錄檢查是同一件事,不該有兩套標準。
+
+    在函式裡才 import:schedule 是規則層,importer 是格式層,模組層級
+    互相依賴會讓「誰可以用誰」變得不清楚。這裡只借一份數字。
+    """
+    from importer import LIMITS
+
+    if code == FARROW:
+        nums = [detail.get(k) for k in ("born_alive", "stillborn", "mummified")]
+        if any(isinstance(n, int) and n < 0 for n in nums):
+            return "活仔/死胎/木乃伊出現負數"
+        total = sum(n for n in nums if isinstance(n, int))
+        if total > LIMITS["max_litter"]:
+            return f"單窩總仔數 {total} 隻,超過 {LIMITS['max_litter']}"
+    if code == WEAN:
+        weaned = detail.get("weaned")
+        if isinstance(weaned, int) and weaned < 0:
+            return "離乳數為負"
+        if isinstance(weaned, int) and weaned > LIMITS["max_litter"]:
+            return f"離乳 {weaned} 隻,超過 {LIMITS['max_litter']}"
+    if code == PIGLET_LOSS:
+        count = detail.get("count")
+        if isinstance(count, int) and count < 0:
+            return "仔豬損失數為負"
+    return None
 
 
 def _label(code: str) -> str:

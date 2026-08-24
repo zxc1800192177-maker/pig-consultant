@@ -1636,3 +1636,44 @@ class TestDataProblems:
         strict = data_problems([sow(1, "1183")], events, self.TODAY,
                                {"min_cycle_days": 200})
         assert strict
+
+
+class TestImplausibleNumbers:
+    """數字本身就不合理的記錄 —— 使用者真實資料裡的另一筆錯誤就是這種:
+    單窩 56 隻(實際上大概是 5 或 6 打成 56)。
+
+    門檻沿用 importer.LIMITS:匯入時的離群值判定與平常的記錄檢查是同一
+    件事,兩邊各定一套標準的話,使用者會看到「匯入時說有問題、平常卻
+    不說」。
+    """
+
+    TODAY = date(2026, 9, 10)
+
+    def test_a_litter_far_too_large(self):
+        found = data_problems([sow(1, "1585")],
+                              [ev(1, "FW", date(2026, 6, 1),
+                                  {"born_alive": 56, "stillborn": 1})],
+                              self.TODAY)
+        assert [p.kind for p in found] == ["implausible"]
+        assert "57 隻" in found[0].why
+
+    def test_a_normal_litter_is_fine(self):
+        assert data_problems([sow(1, "1585")],
+                             [ev(1, "FW", date(2026, 6, 1),
+                                 {"born_alive": 12, "stillborn": 1})],
+                             self.TODAY) == []
+
+    def test_negative_numbers(self):
+        found = data_problems([sow(1, "1585")],
+                              [ev(1, "FW", date(2026, 6, 1),
+                                  {"born_alive": -3})], self.TODAY)
+        assert [p.kind for p in found] == ["implausible"]
+
+    def test_the_threshold_matches_the_import_check(self):
+        """兩邊必須是同一個數字,不是各自寫一個。"""
+        from importer import LIMITS
+        found = data_problems([sow(1, "1585")],
+                              [ev(1, "FW", date(2026, 6, 1),
+                                  {"born_alive": LIMITS["max_litter"] + 1})],
+                              self.TODAY)
+        assert found and str(LIMITS["max_litter"]) in found[0].why
