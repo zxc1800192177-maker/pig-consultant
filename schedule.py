@@ -45,6 +45,21 @@ DEFAULTS = {
     # 門檻落在哪裡都不敏感。
     "mating_series_days": 5,
 
+    # 兩次生產事件之間**生理上最少**要隔幾天。低於這個數字就不是「這頭豬
+    # 很特別」,是記錄記錯了 —— 幾乎都是耳號打錯,把別頭的事件記到她身上
+    # (使用者回報:記錄時常常記錯耳號)。
+    #
+    # 100 天量自這個場的真實資料,不是估的:
+    #
+    #   分娩 → 分娩      3,963 筆,最短 119 天,低於 110 天的 0 筆
+    #   離乳 → 離乳      3,917 筆,最短 118 天,低於 110 天的 0 筆
+    #   離乳 → 下次分娩  3,963 筆,最短 111 天,低於 110 天的 0 筆
+    #
+    # 取 100 天,比真實最短值(111)還低一截 —— 寧可漏掉幾筆可疑的,
+    # 也不要把正常記錄報成錯誤。誤報一多,整份清單就會被當成雜訊略過,
+    # 那就等於沒有這個功能。
+    "min_cycle_days": 100,
+
     # 配種後幾天,從配種區移至待產區。**配種了、沒登記驗孕陰性就當懷孕**
     # (使用者決定)—— 不必等驗孕陽性才觸發,這個場很少逐頭驗孕,等驗孕
     # 的話大多數其實已經懷孕的母豬會一直卡在配種區。
@@ -129,6 +144,7 @@ SETTING_RANGES = {
     "preg_check_days": (14, 60),
     "open_sow_alert_days": (7, 180),
     "mating_series_days": (1, 14),
+    "min_cycle_days": (30, 140),
     "to_gestation_zone_days": (7, 150),
     "farrowing_pens": (0, 5000),
     "review_decline_litters": (1, 10),
@@ -1104,3 +1120,109 @@ def monthly_report(sows: Iterable[dict], events: Iterable[dict],
     }
 
     return {"start": start, "end": end, "herdSize": herd, "metrics": metrics}
+
+
+class DataProblem(NamedTuple):
+    """一筆看起來記錯的記錄。
+
+    `why` 要能讓使用者自己判斷 —— 直接把兩筆衝突的記錄與相隔天數寫出來,
+    而不是只說「有問題」。他要拿這句話去對照紙本或回想當天的情形,
+    系統只負責指出矛盾,不替他決定哪一筆才是對的。
+    """
+    sow_id: int
+    ear_tag: str
+    kind: str
+    when: date
+    why: str
+
+
+# 偵錯規則的代碼。畫面上要分組顯示,文字在 core/labels.py。
+(PROBLEM_TOO_SOON, PROBLEM_WEAN_NO_FARROW, PROBLEM_LONG_LACTATION,
+ PROBLEM_AFTER_EXIT, PROBLEM_FUTURE) = (
+    "too_soon", "wean_no_farrow", "long_lactation", "after_exit", "future")
+
+
+def data_problems(sows: Iterable[dict], events: Iterable[dict], today: date,
+                  settings: Optional[dict] = None) -> List[DataProblem]:
+    """找出生理上不可能、幾乎一定是記錯的記錄。
+
+    **這不是「值得檢視」。** 那份名單講的是母豬表現不好,是關於豬;這裡
+    講的是記錄本身自相矛盾,是關於資料。使用者回報記錄時常常打錯耳號,
+    一打錯就等於把別頭的事件記到這頭身上,兩邊的歷史同時被弄髒 ——
+    她多一筆不該有的,那頭少一筆該有的。
+
+    只報**不可能**的,不報「可疑」的:門檻量自真實資料(見 min_cycle_days
+    的註解,三種間隔各約 4,000 筆,最短 111 天),取 100 天比實際最短值
+    還低一截。誤報一多這份清單就會被當成雜訊略過,那等於沒有這個功能。
+    """
+    cfg = settings_with_defaults(settings)
+    min_gap = cfg["min_cycle_days"]
+    max_lact = cfg["lactation_days"] * 2      # 哺乳天數的合理上限,見下
+
+    grouped = _by_sow(events)
+    tags = {s["id"]: s.get("ear_tag", "") for s in sows}
+    found: List[DataProblem] = []
+
+    for sow_id, rows in grouped.items():
+        if sow_id not in tags:
+            continue                          # 別的牧場或已刪除的豬
+        last = {FARROW: None, WEAN: None}
+        exited = None                         # (日期, 代碼)
+
+        for e in rows:
+            code, when = e["event_type"], e["event_date"]
+            # **一筆記錄只報一個問題**,取最具體的那個。同一個打錯的耳號
+            # 常常同時觸發好幾條規則(離乳隔太近、而且前面找不到分娩),
+            # 全部列出來會讓清單看起來比實際的錯誤多好幾倍,反而難用。
+            hit = None
+
+            if when > today:
+                hit = (PROBLEM_FUTURE, f"{_label(code)}記在 {when},是未來的日期")
+
+            # 死亡或淘汰之後不可能再有生產事件。她已經不在場了,這筆
+            # 一定是記到別頭身上 —— 或者離群那筆本身記錯了豬。
+            if hit is None and exited and code in (FARROW, WEAN, MATE):
+                hit = (PROBLEM_AFTER_EXIT,
+                       f"{exited[0]} 已經{_label(exited[1])},"
+                       f"{when} 卻又有{_label(code)}記錄")
+            if code in EXIT_EVENTS:
+                exited = (when, code)
+
+            if code == FARROW:
+                for prev_code in (FARROW, WEAN):
+                    prev = last[prev_code]
+                    if hit is None and prev and (when - prev).days < min_gap:
+                        hit = (PROBLEM_TOO_SOON,
+                               f"{prev} {_label(prev_code)},{when} 又分娩,"
+                               f"只隔 {(when - prev).days} 天"
+                               f"(至少要 {min_gap} 天)")
+                last[FARROW] = when
+
+            elif code == WEAN:
+                prev = last[WEAN]
+                fw = last[FARROW]
+                if hit is None and prev and (when - prev).days < min_gap:
+                    hit = (PROBLEM_TOO_SOON,
+                           f"{prev} 離乳,{when} 又離乳,"
+                           f"只隔 {(when - prev).days} 天(至少要 {min_gap} 天)")
+                elif hit is None and fw is None:
+                    hit = (PROBLEM_WEAN_NO_FARROW,
+                           f"{when} 離乳,但之前沒有分娩記錄")
+                elif hit is None and (when - fw).days > max_lact:
+                    hit = (PROBLEM_LONG_LACTATION,
+                           f"{fw} 分娩到 {when} 離乳,哺乳 {(when - fw).days} 天"
+                           f"(超過 {max_lact} 天)")
+                last[WEAN] = when
+                last[FARROW] = None           # 這一胎結束了
+
+            if hit:
+                found.append(DataProblem(sow_id, tags.get(sow_id, ""),
+                                         hit[0], when, hit[1]))
+
+    found.sort(key=lambda p: (p.when, p.ear_tag), reverse=True)
+    return found
+
+
+def _label(code: str) -> str:
+    return {FARROW: "分娩", WEAN: "離乳", MATE: "配種",
+            DEATH: "死亡", CULL: "淘汰"}.get(code, code)

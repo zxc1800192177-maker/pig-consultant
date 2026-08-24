@@ -2151,3 +2151,50 @@ class TestIdentifyingAnUnknownSow:
         st, _ = _post(app, "/api/sows/identify",
                       {"sowId": unknown, "earTag": "1183"}, worker)
         assert st == 403
+
+
+class TestDataProblemsEndpoint:
+    """記錄檢查:找出生理上不可能、幾乎一定是打錯耳號的記錄。"""
+
+    def test_it_reports_the_impossible_pair(self, farm):
+        app, owner, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
+        for code, when in (("FW", "2026-05-16"), ("WN", "2026-06-07"),
+                           ("WN", "2026-07-05")):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": code, "date": when}, owner)
+
+        st, body = app.handle_get("/api/data-problems", owner)
+        assert st == 200
+        assert body["total"] == 1
+        assert body["problems"][0]["earTag"] == "1183"
+        assert "只隔 28 天" in body["problems"][0]["why"]
+
+    def test_a_normal_history_reports_nothing(self, farm):
+        app, owner, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
+        for code, when in (("FW", "2026-01-05"), ("WN", "2026-01-27"),
+                           ("FW", "2026-05-25"), ("WN", "2026-06-16")):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": code, "date": when}, owner)
+
+        st, body = app.handle_get("/api/data-problems", owner)
+        assert body["problems"] == []
+
+    def test_a_worker_cannot_see_it(self, farm):
+        """要處理這些得刪改既有記錄,那不是員工的權限(比照值得檢視)。"""
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        st, _ = app.handle_get("/api/data-problems", worker)
+        assert st == 403
+
+    def test_another_farm_is_not_included(self, farm):
+        app, a_owner, _ = farm
+        b_owner = _owner(app, "otherfarm")
+        sow_id = _post(app, "/api/sows", {"earTag": "9999"}, b_owner)[1]["id"]
+        for when in ("2026-06-07", "2026-07-05"):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": "WN", "date": when}, b_owner)
+
+        st, body = app.handle_get("/api/data-problems", a_owner)
+        assert body["problems"] == []

@@ -161,6 +161,14 @@ body { padding-bottom: 96px; }
 }
 #recAddService { margin-top: 10px; min-height: 44px; padding: 10px 14px; }
 
+/* 記錄檢查的一列。點得進母豬卡去看完整時間軸,所以整列要有可點的感覺。 */
+.dp-row {
+  padding: 11px 0; border-bottom: 1px solid var(--border-light); cursor: pointer;
+}
+.dp-row:last-child { border-bottom: none; }
+.dp-t { font-size: 14px; font-weight: 600; }
+.dp-w { font-size: 12.5px; color: var(--ink-soft); margin-top: 3px; }
+
 /* 逐胎離乳評分。一列一胎,胎次、日期、評分由左至右 —— 使用者要看的是
    歷年趨勢,並排才比得出來(散在事件時間軸裡要一直往下捲)。
    ●○ 用符號而不是只有數字:掃一眼就看得出高低,不必逐格讀數字。 */

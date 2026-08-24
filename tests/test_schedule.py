@@ -15,7 +15,8 @@ import config
 import schedule
 from schedule import (
     CHECK_DUE, FARROW_DUE, INDUCE, MATE_DUE, MOVE_IN, WEAN_DUE,
-    build_week_tasks, current_cycle, overdue_sows, pen_pressure, tasks_for_sow,
+    build_week_tasks, current_cycle, data_problems, overdue_sows, pen_pressure,
+    tasks_for_sow,
 )
 
 D = schedule.DEFAULTS
@@ -1528,3 +1529,110 @@ class TestMonthlyReport:
         assert r["metrics"]["psy"]["value"] is None
         assert r["metrics"]["cull_rate"]["value"] is None
         assert r["metrics"]["mortality_rate"]["value"] is None
+
+
+class TestDataProblems:
+    """偵錯:找出生理上不可能、幾乎一定是打錯耳號造成的記錄。
+
+    使用者回報記錄時常常打錯耳號 —— 一打錯就等於把別頭的事件記到這頭
+    身上,兩邊的歷史同時被弄髒。他舉的例子是「8/7 離乳,9/5 不可能再
+    離乳一次或分娩」。
+
+    **只報不可能的,不報可疑的。** 門檻量自這個場的真實資料(三種間隔各
+    約 4,000 筆,最短 111 天),取 100 天。整份 32,159 筆真實事件跑下來
+    只報 1 筆(早就知道的哺乳 50 天離群值),誤報是 0。
+    """
+
+    TODAY = date(2026, 9, 10)
+
+    def _find(self, events, sows=None):
+        sows = sows or [sow(1, "1183")]
+        return data_problems(sows, events, self.TODAY)
+
+    def test_weaning_twice_in_a_month(self):
+        """使用者的原始例子。"""
+        found = self._find([
+            ev(1, "FW", date(2026, 7, 16)),
+            ev(1, "WN", date(2026, 8, 7)),
+            ev(1, "WN", date(2026, 9, 5)),
+        ])
+        assert len(found) == 1
+        assert found[0].kind == "too_soon"
+        assert "只隔 29 天" in found[0].why
+
+    def test_farrowing_a_month_after_weaning(self):
+        """同一個例子的另一半:9/5 也不可能分娩。"""
+        found = self._find([
+            ev(1, "FW", date(2026, 7, 16)),
+            ev(1, "WN", date(2026, 8, 7)),
+            ev(1, "FW", date(2026, 9, 5)),
+        ])
+        assert len(found) == 1
+        assert found[0].kind == "too_soon"
+
+    def test_a_normal_two_litter_history_is_not_flagged(self):
+        """正常的兩胎不能被報成錯誤 —— 誤報一多整份清單就會被當雜訊略過。"""
+        assert self._find([
+            ev(1, "FW", date(2026, 3, 1)), ev(1, "WN", date(2026, 3, 23)),
+            ev(1, "FW", date(2026, 7, 20)), ev(1, "WN", date(2026, 8, 11)),
+        ]) == []
+
+    def test_events_after_she_left_the_herd(self):
+        """已經淘汰或死亡的豬不可能再分娩 —— 一定是記到別頭身上。"""
+        found = self._find([
+            ev(1, "SAL", date(2026, 4, 1)),
+            ev(1, "FW", date(2026, 8, 1)),
+        ])
+        assert len(found) == 1
+        assert found[0].kind == "after_exit"
+        assert "淘汰" in found[0].why
+
+    def test_weaning_with_no_farrowing_before_it(self):
+        found = self._find([ev(1, "WN", date(2026, 8, 7))])
+        assert [p.kind for p in found] == ["wean_no_farrow"]
+
+    def test_a_lactation_far_too_long(self):
+        found = self._find([
+            ev(1, "FW", date(2026, 3, 1)), ev(1, "WN", date(2026, 5, 30)),
+        ])
+        assert [p.kind for p in found] == ["long_lactation"]
+
+    def test_a_future_date(self):
+        found = self._find([ev(1, "FW", date(2026, 12, 25))])
+        assert [p.kind for p in found] == ["future"]
+
+    def test_one_problem_per_record_not_several(self):
+        """同一個打錯的耳號常常同時觸發好幾條規則 —— 全部列出來會讓清單
+        看起來比實際的錯誤多好幾倍。一筆記錄只報最具體的那一個。
+        """
+        found = self._find([
+            ev(1, "FW", date(2026, 7, 16)),
+            ev(1, "WN", date(2026, 8, 7)),
+            ev(1, "WN", date(2026, 9, 5)),   # 又離乳,而且前面沒有分娩
+        ])
+        assert len(found) == 1, [p.why for p in found]
+
+    def test_the_ear_tag_is_carried_so_he_can_go_and_look(self):
+        found = self._find([ev(1, "WN", date(2026, 8, 7))])
+        assert found[0].ear_tag == "1183"
+        assert found[0].sow_id == 1
+
+    def test_excluded_records_are_skipped(self):
+        """匯入時已經判定為離群值的記錄不必再報一次。"""
+        assert self._find([
+            ev(1, "FW", date(2026, 7, 16)),
+            ev(1, "WN", date(2026, 8, 7)),
+            ev(1, "WN", date(2026, 9, 5), excluded=True),
+        ]) == []
+
+    def test_the_threshold_is_configurable(self):
+        events = [
+            ev(1, "FW", date(2026, 3, 1)), ev(1, "WN", date(2026, 3, 23)),
+            ev(1, "FW", date(2026, 7, 20)), ev(1, "WN", date(2026, 8, 11)),
+        ]
+        assert data_problems([sow(1, "1183")], events, self.TODAY) == []
+        # 門檻拉到 200 天,連正常的一胎間隔都會被報 —— 別的場週期不同,
+        # 這個數字必須可調。
+        strict = data_problems([sow(1, "1183")], events, self.TODAY,
+                               {"min_cycle_days": 200})
+        assert strict

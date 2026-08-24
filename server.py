@@ -466,6 +466,8 @@ class Application:
             return self._pens(token, path)
         if route == "/api/review":
             return self._review(token)
+        if route == "/api/data-problems":
+            return self._data_problems(token)
         if route == "/api/monthly-report":
             return self._monthly_report(token, path)
         if route == "/api/settings":
@@ -1144,6 +1146,37 @@ class Application:
         return 200, {
             "settings": schedule.settings_with_defaults(cleaned),
             "custom": sorted(cleaned.keys()),
+        }
+
+    def _data_problems(self, token) -> Tuple[int, dict]:
+        """記錄偵錯:生理上不可能、幾乎一定是打錯耳號的記錄。
+
+        跟「值得檢視」分開的兩件事:那份講的是母豬表現不好(關於豬),
+        這份講的是記錄自相矛盾(關於資料)。混在一起會讓使用者分不清
+        「這頭該淘汰」跟「這筆記錯了」。
+
+        只有牧場主看得到 —— 要處理這些得刪改既有記錄,那不是員工的權限
+        (比照值得檢視與月報,已確認的設計決定 #17)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        sows = self.store.list_sows(farm_id, None)
+        events = self.store.list_sow_events(farm_id)
+        cfg = self._farm_settings(farm_id)
+
+        found = schedule.data_problems(sows, events, _today(), cfg)
+        return 200, {
+            "problems": [
+                {"sowId": p.sow_id, "earTag": p.ear_tag, "kind": p.kind,
+                 "date": _iso(p.when), "why": p.why}
+                for p in found[:config.MAX_DATA_PROBLEMS]
+            ],
+            "total": len(found),
         }
 
     def _review(self, token) -> Tuple[int, dict]:

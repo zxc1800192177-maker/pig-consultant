@@ -75,7 +75,7 @@ async function refreshAccount() {
   // 使用者的資料 —— 跨牧場的資料外洩就是這樣發生的。
   await Promise.all([
     reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
-    reloadBoars(), reloadRecent(), reloadReview(), reloadMonthReport(), reloadSettings(),
+    reloadBoars(), reloadRecent(), reloadReview(), reloadDataProblems(), reloadMonthReport(), reloadSettings(),
     reloadCustomTaskSettings(),
   ]);
 }
@@ -634,7 +634,7 @@ async function init() {
     applyLoginGate();
     await Promise.all([
       reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
-      reloadBoars(), reloadRecent(), reloadReview(), reloadMonthReport(), reloadSettings(),
+      reloadBoars(), reloadRecent(), reloadReview(), reloadDataProblems(), reloadMonthReport(), reloadSettings(),
     reloadCustomTaskSettings(),
     ]);
   }
@@ -1312,6 +1312,14 @@ document.addEventListener("click", (e) => {
   // 母豬/公豬清單的一列(lib/v2.js 的 .sow-row)。**不是**紀錄表單裡
   // 「一頭一列」的 .rec-row —— 兩者曾經同名,把表單那組改名時連這裡
   // 一起改掉,結果點耳號打不開母豬卡。
+  // 記錄檢查的一列 —— 點進去看那頭母豬的完整時間軸,才判斷得出哪一筆
+  // 才是記錯的。要先切到母豬頁,否則卡片畫在一個看不見的分頁裡。
+  const dp = e.target.closest(".dp-row");
+  if (dp) {
+    showTab("sows");
+    return openSow(Number(dp.dataset.sow));
+  }
+
   const row = e.target.closest(".sow-row");
   if (row) {
     if (row.dataset.boar) return openBoar(Number(row.dataset.boar));
@@ -2418,6 +2426,35 @@ async function reloadReview() {
     || '<p class="hint">目前沒有需要特別看一眼的母豬。</p>';
 }
 
+/** 記錄檢查:生理上不可能、幾乎一定是打錯耳號的記錄。
+ *
+ * 沒問題時整張卡收起來 —— 一張永遠寫著「沒有問題」的卡,看久了就不會
+ * 再看,真的出問題那天也一樣會被略過。
+ */
+async function reloadDataProblems() {
+  const box = $("dataProblemList");
+  const card = $("dataProblemCard");
+  if (!box || !card || !account.loggedIn) return;
+
+  const { ok, data, status } = await api("/api/data-problems");
+  if (!ok) {
+    // 員工看不到(要處理這些得刪改既有記錄,不是員工的權限)
+    card.classList.add("is-hidden");
+    return;
+  }
+
+  card.classList.toggle("is-hidden", data.problems.length === 0);
+  if (!data.problems.length) return;
+
+  $("dataProblemCount").textContent = data.total > data.problems.length
+    ? `${data.problems.length} / ${data.total} 筆` : `${data.total} 筆`;
+  box.innerHTML = data.problems.map((p) => `
+    <div class="dp-row" data-sow="${p.sowId}">
+      <div class="dp-t">${escapeHtml(p.earTag)}</div>
+      <div class="dp-w">${escapeHtml(p.why)}</div>
+    </div>`).join("");
+}
+
 // ── 生產月報 ──
 //
 // null 代表「用伺服器判斷的當月」;一旦拿到回應就固定成該月字串,
@@ -2501,7 +2538,7 @@ async function saveSettings() {
   showBanner("設定已儲存", "ok");
   // 參數變了,推算出來的東西全部要重算
   await Promise.all([
-    reloadSettings(), reloadTasks(), reloadAlerts(), reloadReview(), reloadMonthReport(),
+    reloadSettings(), reloadTasks(), reloadAlerts(), reloadReview(), reloadDataProblems(), reloadMonthReport(),
   ]);
 }
 

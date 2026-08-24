@@ -197,6 +197,11 @@ MAX_PEN_NAME_CHARS = 30
 #
 # 之後讀得到耳號時,把她的事件併回真正那頭母豬(見 reassign_sow_event)。
 UNKNOWN_SOW_PREFIX = "不明-"
+
+# 記錄偵錯一次最多回幾筆。整場跑下來通常只有個位數(真實資料 32,159 筆
+# 事件只報 1 筆),但匯入一份有問題的檔案時可能一次冒出幾百筆 ——
+# 全部塞給前端只會讓畫面卡住,而使用者本來也不可能一次處理幾百筆。
+MAX_DATA_PROBLEMS = 100
 MAX_TASK_NAME_CHARS = 40       # 自訂工作的名稱
 MAX_CUSTOM_TASKS_PER_FARM = 100
 MAX_EVENT_FIELDS = 12          # 單筆事件的 detail 最多幾個欄位
