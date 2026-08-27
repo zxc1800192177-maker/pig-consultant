@@ -1073,8 +1073,8 @@ class InMemoryStore(Store):
         return [dict(d) for d in rows]
 
 
-class _FarmEventsQuery:
-    """一次正在進行中的「查全場事件」,讓同時抵達的請求共用同一份結果。
+class _FarmQuery:
+    """一次正在進行中的整場查詢(事件或母豬),讓同時抵達的請求共用結果。
 
     為什麼光有快取不夠(實測出來的):前端開頁面時會平行打出 5 支都要查
     全場事件的 API。它們**幾乎同時**抵達,於是同時發現快取是空的,然後
@@ -1154,7 +1154,10 @@ class PostgresStore(Store):
         self._event_cache_version: Dict[int, int] = {}
         # 正在跑的整場查詢,一個牧場最多一份 —— 見 _FarmEventsQuery 與
         # list_sow_events 的說明。快取本身擋不住「同時抵達」的那一批請求。
-        self._event_inflight: Dict[int, "_FarmEventsQuery"] = {}
+        self._inflight: Dict[Tuple[str, int], "_FarmQuery"] = {}
+        # 母豬清單的版本號。事件那邊的版本號綁在 TTL 快取上,母豬沒有
+        # 快取,所以要自己一個 —— 兩者的「什麼時候算變了」並不相同。
+        self._sow_version: Dict[int, int] = {}
 
     def _cached_farm_events(self, farm_id: int) -> Optional[List[dict]]:
         with self._event_cache_lock:
@@ -1191,32 +1194,48 @@ class PostgresStore(Store):
             self._event_cache_version[farm_id] = (
                 self._event_cache_version.get(farm_id, 0) + 1)
 
-    def _join_or_lead_farm_query(self, farm_id: int):
+    def _join_or_lead(self, kind: str, farm_id: int, version: int):
         """要嘛加入已經在跑的整場查詢,要嘛自己當發起人去查。
 
         回傳 (query, is_leader)。is_leader 為真的人負責真的去查資料庫,
         並在結束時呼叫 query.finish();其他人只要等 query.wait()。
+
+        `kind` 讓事件與母豬各自排隊 —— 兩者都是「整場撈一次」的昂貴查詢,
+        機制一模一樣,所以共用這一份而不是各寫一套(兩套遲早會分岔)。
 
         **只有版本號相同才准搭順風車**:如果在別人開始查之後才發生寫入
         (版本號已經前進),那份還在跑的查詢看不到那筆新資料,後到的
         請求搭上去就會拿到舊的 —— 跟 _maybe_cache_farm_events 擋的是
         同一件事,只是換個入口。這種時候寧可自己再查一次。
         """
+        key = (kind, farm_id)
         with self._event_cache_lock:
-            version = self._event_cache_version.get(farm_id, 0)
-            running = self._event_inflight.get(farm_id)
+            running = self._inflight.get(key)
             if running is not None and running.version == version:
                 return running, False
             # 沒人在查,或在查的那份已經過時 —— 自己來。後者會覆蓋掉
             # 登記,原本那位仍然跑完、仍然會 finish(),只是不再有人加入。
-            query = _FarmEventsQuery(version)
-            self._event_inflight[farm_id] = query
+            query = _FarmQuery(version)
+            self._inflight[key] = query
             return query, True
 
-    def _clear_inflight(self, farm_id: int, query) -> None:
+    def _clear_inflight(self, kind: str, farm_id: int, query) -> None:
+        key = (kind, farm_id)
         with self._event_cache_lock:
-            if self._event_inflight.get(farm_id) is query:
-                del self._event_inflight[farm_id]
+            if self._inflight.get(key) is query:
+                del self._inflight[key]
+
+    def _sow_list_version(self, farm_id: int) -> int:
+        with self._event_cache_lock:
+            return self._sow_version.get(farm_id, 0)
+
+    def _bump_sow_version(self, farm_id: int) -> None:
+        """母豬清單變了。**沒有快取要清** —— 母豬的狀態(胎次、耳號後綴、
+        產房欄位)動得比事件頻繁,存幾秒鐘的舊清單風險遠大於省下的查詢。
+        這個版本號只用來擋「寫入之後才抵達的請求搭上寫入之前開始的查詢」。
+        """
+        with self._event_cache_lock:
+            self._sow_version[farm_id] = self._sow_version.get(farm_id, 0) + 1
 
     def _connect(self):
         conn = getattr(self._local, "batch_conn", None)
@@ -1542,14 +1561,38 @@ class PostgresStore(Store):
                 breed="", sire_tag="", dam_tag="", parity=0, created_by=None,
                 is_unknown=False) -> int:
         with self._connect() as conn:
-            return conn.execute(
+            sow_id = conn.execute(
                 "INSERT INTO sows (farm_id, ear_tag, entry_date, birth_date, breed,"
                 " sire_tag, dam_tag, parity, created_by, is_unknown)"
                 " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (farm_id, ear_tag, entry_date, birth_date, breed,
                  sire_tag, dam_tag, parity, created_by, is_unknown)).fetchone()[0]
+        self._bump_sow_version(farm_id)
+        return sow_id
 
     def list_sows(self, farm_id, status=None):
+        # 「查全群」跟事件一樣是開頁面時被好幾支 API 同時打的昂貴查詢
+        # (server.py 有 7 處這樣呼叫),所以同樣讓同時抵達的請求共用
+        # 一次查詢。**只做合流,不做快取**:母豬的狀態(胎次、耳號後綴、
+        # 產房欄位)動得比事件頻繁,存幾秒鐘的舊清單風險遠大於省下的查詢。
+        if status is not None:
+            return self._query_sows(farm_id, status)
+
+        query, is_leader = self._join_or_lead(
+            "sows", farm_id, self._sow_list_version(farm_id))
+        if not is_leader:
+            return [dict(r) for r in query.wait()]
+        try:
+            rows = self._query_sows(farm_id, None)
+        except BaseException as exc:
+            query.finish(None, exc)
+            self._clear_inflight("sows", farm_id, query)
+            raise
+        query.finish(rows, None)
+        self._clear_inflight("sows", farm_id, query)
+        return [dict(r) for r in rows]
+
+    def _query_sows(self, farm_id, status):
         sql = f"SELECT {self.SOW_COLS} FROM sows WHERE farm_id = %s"
         args = [farm_id]
         if status is not None:
@@ -1594,6 +1637,7 @@ class PostgresStore(Store):
                 f"SELECT {self.SOW_COLS} FROM sows"
                 " WHERE farm_id = %s AND ear_tag = %s", (farm_id, ear_tag)),
                 self.SOW_COLS)
+        self._bump_sow_version(farm_id)   # 這條路徑也會新增一頭豬
         return rows[0] if rows else None
 
     def update_sow_event(self, farm_id, event_id, event_date=None, detail=None) -> bool:
@@ -1644,7 +1688,12 @@ class PostgresStore(Store):
             row = conn.execute(
                 f"UPDATE sows SET {sets} WHERE id = %s AND farm_id = %s RETURNING id",
                 list(fields.values()) + [sow_id, farm_id]).fetchone()
-            return row is not None
+        ok = row is not None
+        if ok:
+            # 胎次 +1、離群改號、移欄 —— 這些都會改變母豬清單的內容,
+            # 之後才抵達的請求不該搭上更新前就開始的那次查詢。
+            self._bump_sow_version(farm_id)
+        return ok
 
     def delete_sow(self, farm_id, sow_id) -> bool:
         with self._connect() as conn:
@@ -1658,6 +1707,7 @@ class PostgresStore(Store):
             # 端(收回種豬進場)只在她完全沒有事件時才准刪,所以實際上清的
             # 是一份沒變的資料;但這條規則哪天放寬,這裡就是會出事的地方。
             self._invalidate_farm_events_cache(farm_id)
+            self._bump_sow_version(farm_id)
         return ok
 
     def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
@@ -1798,7 +1848,8 @@ class PostgresStore(Store):
             # 快取沒命中。同時抵達的那一批請求會全部走到這裡(這正是
             # 開頁面時的情形),所以不能各查各的 —— 讓第一個去查,
             # 其餘的等他。見 _FarmEventsQuery 的說明。
-            query, is_leader = self._join_or_lead_farm_query(farm_id)
+            query, is_leader = self._join_or_lead(
+                "events", farm_id, self._farm_events_cache_version(farm_id))
             if not is_leader:
                 return [dict(e) for e in query.wait()]
             version_before = query.version
@@ -1806,11 +1857,11 @@ class PostgresStore(Store):
                 rows = self._query_whole_farm_events(farm_id)
             except BaseException as exc:
                 query.finish(None, exc)
-                self._clear_inflight(farm_id, query)
+                self._clear_inflight("events", farm_id, query)
                 raise
             # 先讓等待的人拿到結果,再處理快取 —— 他們已經等夠久了。
             query.finish(rows, None)
-            self._clear_inflight(farm_id, query)
+            self._clear_inflight("events", farm_id, query)
             self._maybe_cache_farm_events(farm_id, version_before, rows)
             return [dict(e) for e in rows]
 

@@ -345,7 +345,7 @@ class TestSimultaneousRequestsShareOneQuery:
         assert len(errors) == 5, "五條都要收到錯誤,不能有人卡住"
         assert all(isinstance(e, RuntimeError) for e in errors)
         # 失敗不能把登記留在原地,否則之後的查詢會去等一個已經死掉的查詢
-        assert store._event_inflight == {}
+        assert store._inflight == {}
 
     def test_a_request_arriving_after_a_write_does_not_join_a_stale_query(self):
         """後到的請求不能搭上「寫入之前就開始」的那份查詢 —— 那份看不到
@@ -373,7 +373,7 @@ class TestSimultaneousRequestsShareOneQuery:
     def test_the_inflight_registry_is_empty_once_everyone_is_done(self):
         store = _CountingStore(delay=0.1)
         _run_together(lambda: store.list_sow_events(1), 5)
-        assert store._event_inflight == {}, "查完要把登記清掉,不能一直長大"
+        assert store._inflight == {}, "查完要把登記清掉,不能一直長大"
 
     def test_separate_farms_do_not_wait_for_each_other(self):
         """A 牧場的查詢不能擋住 B 牧場 —— 合流是「同一個牧場」才合,
@@ -387,3 +387,96 @@ class TestSimultaneousRequestsShareOneQuery:
 
         assert not errors, errors
         assert elapsed < 0.9, f"不同牧場被串成序列了,花了 {elapsed:.2f} 秒"
+
+
+class _SlowSowStore(PostgresStore):
+    """整群查詢很慢的 store,用來測母豬清單的合流。"""
+
+    # 對照 PostgresStore.SOW_COLS 的欄位順序
+    ROW = (1, 1, "1183", None, None, "", "", "", 0, "active", None, "", None, False)
+
+    def __init__(self, delay):
+        self.delay = delay
+        self.queries = 0
+        self._count_lock = threading.Lock()
+        super().__init__("not-a-valid-connection-string")
+
+    def _connect(self):
+        with self._count_lock:
+            self.queries += 1
+        return _SlowConnection([self.ROW], self.delay)
+
+
+class TestSimultaneousSowListsShareOneQuery:
+    """母豬清單跟事件一樣是「開頁面時好幾支 API 同時撈」的昂貴查詢 ——
+    server.py 有 7 處在撈全群。事件那一半先修了,這是剩下的另一半,也是
+    當初 status 137 之後唯一還沒補的當機風險。
+
+    **只做合流,不做快取**:母豬的狀態(胎次、耳號後綴、產房欄位)動得
+    比事件頻繁,存幾秒鐘的舊清單風險遠大於省下的那次查詢。
+    """
+
+    def test_five_simultaneous_reads_hit_the_database_once(self):
+        store = _SlowSowStore(delay=0.3)
+        results, errors = _run_together(lambda: store.list_sows(1), 5)
+
+        assert not errors, errors
+        assert store.queries == 1, (
+            f"5 支同時撈全群,資料庫被查了 {store.queries} 次")
+        assert len(results) == 5
+        assert all(len(r) == 1 for r in results), "等結果的人也要拿到資料"
+
+    def test_waiters_get_their_own_copies(self):
+        store = _SlowSowStore(delay=0.2)
+        results, errors = _run_together(lambda: store.list_sows(1), 4)
+        assert not errors, errors
+
+        results[0][0]["ear_tag"] = "動過了"
+        for rows in results[1:]:
+            assert rows[0]["ear_tag"] == "1183"
+
+    def test_a_filtered_query_does_not_join(self):
+        """只要在場的那種便宜得多,而且不同 status 的結果不能互相共用。"""
+        store = _SlowSowStore(delay=0.05)
+        store.list_sows(1, "active")
+        store.list_sows(1, "active")
+        assert store.queries == 2
+
+    def test_events_and_sows_queue_separately(self):
+        """兩者共用同一套機制,但不能排進同一個隊伍 —— 母豬的查詢不該
+        等在事件的查詢後面,那會讓開頁面變成一條龍。
+        """
+        store = _SlowSowStore(delay=0.3)
+        t0 = time.monotonic()
+        _run_together(lambda: store.list_sows(1), 3)
+        one_kind = time.monotonic() - t0
+        assert one_kind < 0.9, f"合流後不該變慢,花了 {one_kind:.2f} 秒"
+
+    def test_a_failed_query_does_not_hang_the_waiters(self):
+        class _Boom(_SlowSowStore):
+            def _connect(self):
+                super()._connect()
+                time.sleep(self.delay)
+                raise RuntimeError("資料庫連線失敗")
+
+        store = _Boom(delay=0.2)
+        results, errors = _run_together(lambda: store.list_sows(1), 5)
+        assert not results
+        assert len(errors) == 5, "五支都要收到錯誤,不能有人卡住"
+        assert store._inflight == {}
+
+    def test_a_write_stops_later_readers_joining_an_older_query(self):
+        """寫入之後才抵達的請求,不能搭上寫入之前就開始的那次查詢 ——
+        那份查詢看不到剛寫進去的那頭豬。
+        """
+        store = _SlowSowStore(delay=0.4)
+        t = threading.Thread(target=lambda: store.list_sows(1))
+        t.start()
+        time.sleep(0.1)
+
+        store._bump_sow_version(1)      # 新增/更新一頭母豬
+        store.list_sows(1)              # 這支必須自己查
+        t.join(timeout=5)
+
+        assert store.queries == 2, (
+            f"寫入後才抵達的請求搭上了寫入前開始的查詢(只查了 {store.queries} 次)")
