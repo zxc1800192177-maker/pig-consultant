@@ -87,6 +87,9 @@ export function describeEvent(event) {
   // 沒填代表沒記,不代表「跟活仔數一樣」,所以不顯示也不補值
   if (d.raised != null) bits.push(`總飼養 ${d.raised} 隻`);
   if (d.weaned != null) bits.push(`離乳 ${d.weaned} 隻`);
+  // 新記錄是勾選(hernia),舊記錄是頭數(hernia_count)—— 兩個都要認。
+  if (d.hernia) bits.push("單睪/賀尼亞");
+  else if (d.hernia_count) bits.push(`單睪/賀尼亞 ${d.hernia_count}`);
   if (d.count != null) bits.push(`${d.count} 隻`);
   if (d.reason) bits.push(d.reason);
   if (d.boar_tag) bits.push(`公豬 ${d.boar_tag}`);
@@ -542,6 +545,8 @@ export function weanScoreRows(events) {
       raised,
       weaned: Number.isInteger(d.weaned) ? d.weaned : null,
       score: Number.isInteger(d.wean_score) ? d.wean_score : null,
+      // 新記錄是勾選,舊記錄是頭數 —— 兩個都算「這一胎有」。
+      hernia: Boolean(d.hernia) || Number(d.hernia_count) > 0,
     });
     raised = null;            // 用掉了,下一胎重新從她自己的分娩取
   }
@@ -563,7 +568,8 @@ export function weanScoreCard(events) {
   const body = rows.slice().reverse().map((r) => `
     <div class="ws-row">
       <div class="ws-top">
-        <span class="ws-p">${r.parity ? `第 ${r.parity} 胎` : "—"}</span>
+        <span class="ws-p">${r.parity ? `第 ${r.parity} 胎` : "—"}${
+          r.hernia ? '<span class="ws-flag">單睪/賀尼亞</span>' : ""}</span>
         ${r.score == null
           ? '<span class="ws-s ws-none">未評分</span>'
           : `<span class="ws-s">${"●".repeat(r.score)}${
@@ -574,11 +580,16 @@ export function weanScoreCard(events) {
         r.raised != null ? ` ・ 總飼養 ${r.raised} 隻` : ""}</div>
     </div>`).join("");
 
+  // 只有真的出現過才在標題點名 —— 沒有的母豬不該看到這幾個字,
+  // 那會讓「這頭沒問題」跟「這頭有問題」在畫面上長得一樣。
+  const hernia = rows.filter((r) => r.hernia);
   return `
     <div class="card">
       <h3>逐胎離乳評分</h3>
       <p class="hint">${rows.length} 次離乳${
         avg ? ` ・ 已評分 ${scored.length} 次,平均 ${avg} 分` : " ・ 尚未評分過"}</p>
+      ${hernia.length ? `<p class="ws-warn">${hernia.length} 胎有單睪/賀尼亞(第 ${
+        hernia.map((r) => r.parity).filter(Boolean).join("、")} 胎)</p>` : ""}
       <div class="ws">${body}</div>
     </div>`;
 }

@@ -433,33 +433,40 @@ describe("離乳仔豬評分", () => {
   });
 });
 
-describe("單睪/賀尼亞頭數", () => {
-  // 使用者決定:預設 0,大多數窩沒有這個問題,不必每筆都手動填 ——
-  // 有的話使用者自己改數字。跟「飼養頭數」那種留白代表沒記的欄位不同,
-  // 這裡欄位本身就帶著預設值 0。
-  it("表單定義帶預設值 0,不是必填", () => {
-    const field = formFor("WN").fields.find((f) => f.key === "hernia_count");
-    assert.equal(field.type, "int");
-    assert.equal(field.default, 0);
+describe("單睪/賀尼亞", () => {
+  // 使用者決定改成「有就打勾」,不填頭數 —— 巡欄時要的是「這窩有沒有
+  // 這個問題」,精確到幾隻在這裡沒有用途,反而多一次打字。
+  it("是勾選框,不是數字欄位", () => {
+    const field = formFor("WN").fields.find((f) => f.key === "hernia");
+    assert.equal(field.type, "checkbox");
     assert.ok(!field.required);
   });
 
-  it("送 0 就存成 0,是有效的答案不是沒填", () => {
-    const { detail, problems } = buildDetail(
-      "WN", { weaned: "11", hernia_count: "0" });
+  it("勾了就存 true", () => {
+    const { detail, problems } = buildDetail("WN", { weaned: "11", hernia: true });
     assert.deepEqual(problems, []);
-    assert.equal(detail.hernia_count, 0);
+    assert.equal(detail.hernia, true);
   });
 
-  it("填了非 0 的數字照樣收", () => {
-    const { detail, problems } = buildDetail(
-      "WN", { weaned: "11", hernia_count: "2" });
+  it("沒勾就不存這個鍵,跟「有助產」同一套慣例", () => {
+    // 勾選框只在勾了的時候存值(見 buildDetail)。沒有這個鍵就代表沒有,
+    // 而不是「不確定」—— 所以顯示的地方一律用 falsy 判斷就夠了。
+    const { detail, problems } = buildDetail("WN", { weaned: "11", hernia: false });
     assert.deepEqual(problems, []);
-    assert.equal(detail.hernia_count, 2);
+    assert.ok(!("hernia" in detail));
   });
 
-  it("超出範圍照樣被擋下來,不因為有預設值就跳過檢查", () => {
-    assert.ok(buildDetail("WN", { weaned: "11", hernia_count: "99" }).problems.length);
+  it("舊記錄存的頭數仍然顯示得出來", () => {
+    // 換欄位不能讓既有的記錄從畫面上消失。
+    assert.ok(recordSummary({ type: "WN", detail: { weaned: 10, hernia_count: 3 } })
+      .extra.includes("單睪/賀尼亞 3"));
+  });
+
+  it("沒有的時候摘要裡完全不提", () => {
+    assert.doesNotMatch(
+      recordSummary({ type: "WN", detail: { weaned: 10 } }).extra, /單睪/);
+    assert.doesNotMatch(
+      recordSummary({ type: "WN", detail: { weaned: 10, hernia: false } }).extra, /單睪/);
   });
 });
 

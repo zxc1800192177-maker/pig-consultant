@@ -94,11 +94,12 @@ export const RECORD_FORMS = {
     label: "離乳", target: "sow",
     fields: [
       { key: "weaned", label: "離乳頭數", type: "int", min: 0, max: 30, required: true },
-      // 使用者決定:預設 0,大多數窩沒有這個問題,不必每筆都手動填 0 ——
-      // 有的話使用者自己改數字。跟上面的離乳頭數不同,這裡沒改就是
-      // 明確的「0 隻」,不是沒填(欄位一開始就帶著 0)。
-      { key: "hernia_count", label: "單睪/賀尼亞頭數", type: "int", min: 0, max: 30,
-        default: 0 },
+      // 使用者決定改成「有就打勾」,不填頭數 —— 巡欄時要的是「這窩有沒有
+      // 這個問題」,精確到幾隻在這裡沒有用途,反而多一次打字。
+      //
+      // 舊記錄存的是數字(hernia_count),所以顯示的地方兩個鍵都要看,
+      // 不能因為換了欄位就讓既有的記錄從畫面上消失。
+      { key: "hernia", label: "有單睪/賀尼亞", type: "checkbox" },
       // 使用者要求的自評項目。**可以不評** —— 沒評分顯示「—」,不補值。
       { key: "wean_score", label: "離乳仔豬評分", type: "score",
         hint: "1~5 分,由你自己評。不想評可以留空" },
@@ -377,7 +378,9 @@ export function recordSummary(event) {
   if (d.assisted) bits.push("助產");
   if (d.weaned != null) bits.push(`離乳 ${d.weaned} 隻`);
   // 0 是預設情形,不特別標;有才值得在摘要裡點出來(跟死胎同樣的道理)
-  if (d.hernia_count) bits.push(`單睪/賀尼亞 ${d.hernia_count}`);
+  // 新記錄是勾選(hernia),舊記錄是頭數(hernia_count)—— 兩個都要認。
+  if (d.hernia) bits.push("單睪/賀尼亞");
+  else if (d.hernia_count) bits.push(`單睪/賀尼亞 ${d.hernia_count}`);
   // 未評分不顯示,也不補「—」以外的東西
   if (d.wean_score != null) bits.push(`評分 ${d.wean_score} 分`);
   if (d.count != null) bits.push(`${d.count} 隻`);

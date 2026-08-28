@@ -965,3 +965,57 @@ describe("時間軸的總飼養頭數", () => {
     assert.doesNotMatch(text, /飼養/);
   });
 });
+
+describe("單睪/賀尼亞的標示", () => {
+  // 使用者要求改成「有就打勾」,而且**只有真的有才特別標** —— 沒有的
+  // 母豬不該看到這幾個字,否則「沒問題」跟「有問題」在畫面上長得一樣。
+  const ev = (type, date, detail = {}) => ({ type, date, detail });
+
+  it("有勾就標在那一胎上", () => {
+    const rows = weanScoreRows([
+      ev("FW", "2025-01-01"), ev("WN", "2025-01-23", { weaned: 10, hernia: true }),
+    ]);
+    assert.equal(rows[0].hernia, true);
+    assert.match(weanScoreCard([
+      ev("FW", "2025-01-01"), ev("WN", "2025-01-23", { weaned: 10, hernia: true }),
+    ]), /單睪\/賀尼亞/);
+  });
+
+  it("沒有的胎次完全不提", () => {
+    const html = weanScoreCard([
+      ev("FW", "2025-01-01"), ev("WN", "2025-01-23", { weaned: 10 }),
+    ]);
+    assert.doesNotMatch(html, /單睪/);
+  });
+
+  it("舊記錄存的是頭數,一樣要標出來", () => {
+    // 換欄位不能讓既有的記錄從畫面上消失。
+    const rows = weanScoreRows([
+      ev("FW", "2025-01-01"), ev("WN", "2025-01-23", { weaned: 10, hernia_count: 2 }),
+    ]);
+    assert.equal(rows[0].hernia, true);
+  });
+
+  it("舊記錄的 0 隻不算有", () => {
+    const rows = weanScoreRows([
+      ev("FW", "2025-01-01"), ev("WN", "2025-01-23", { weaned: 10, hernia_count: 0 }),
+    ]);
+    assert.equal(rows[0].hernia, false);
+  });
+
+  it("卡片標題點出是哪幾胎", () => {
+    const html = weanScoreCard([
+      ev("FW", "2025-01-01"), ev("WN", "2025-01-23", { weaned: 10, hernia: true }),
+      ev("FW", "2025-06-01"), ev("WN", "2025-06-23", { weaned: 11 }),
+      ev("FW", "2025-11-01"), ev("WN", "2025-11-23", { weaned: 9, hernia: true }),
+    ]);
+    assert.match(html, /2 胎有單睪\/賀尼亞\(第 1、3 胎\)/);
+  });
+
+  it("時間軸那一列也看得到", () => {
+    // 母豬卡的時間軸與已記錄清單各有一份摘要,加欄位要兩邊都加。
+    assert.match(describeEvent({ type: "WN", detail: { weaned: 10, hernia: true } }),
+      /單睪\/賀尼亞/);
+    assert.doesNotMatch(describeEvent({ type: "WN", detail: { weaned: 10 } }), /單睪/);
+  });
+});
