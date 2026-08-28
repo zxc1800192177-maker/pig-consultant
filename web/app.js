@@ -37,6 +37,31 @@ async function api(path, options) {
   }
 }
 
+/** 送一筆母豬事件,遇到「記錄前的防線」時問使用者一次再決定。
+ *
+ * 伺服器對矛盾的記錄回 409(例如懷孕中的母豬要記離乳)。這幾乎都是
+ * **打錯耳號** —— 在按下記錄的當下問一句,比事後從記錄檢查裡撈回來
+ * 便宜得多。但使用者說「就是要記」時就得記得進去:完全不給記的話,
+ * 實務上會變成「先不記、等老闆來」,反而遺失資料。
+ */
+async function postSowEvent(body) {
+  const first = await api("/api/sow-events", postJson(body));
+  if (first.status !== 409 || !first.data?.needsConfirm) return first;
+
+  const who = first.data.earTag ? `${first.data.earTag}:` : "";
+  const asked = window.confirm(
+    `${who}${first.data.error}。
+
+是不是耳號打錯了?
+
+`
+    + `按「確定」仍然記錄下去,按「取消」回去改。`);
+  if (!asked) {
+    return { ok: false, status: 409, data: { error: "已取消" }, cancelled: true };
+  }
+  return api("/api/sow-events", postJson({ ...body, confirm: true }));
+}
+
 function postJson(body) {
   return {
     method: "POST",
@@ -2089,10 +2114,10 @@ async function submitRecord() {
     return showRecordError(tag ? `找不到耳號 ${tag}` : "請選擇母豬");
   }
 
-  const { ok, data } = await api("/api/sow-events", postJson({
+  const { ok, data } = await postSowEvent({
     ...(recUnknownSow ? { unknownTag: unknownTagFor(when) } : { sowId: sow.id }),
     type: recordCode, date: when, detail,
-  }));
+  });
   if (!ok) return showRecordError(data.error || "記錄失敗");
 
   closeRecordForm();
@@ -2211,7 +2236,11 @@ async function submitPerSowRows(spec, when) {
         : { sowId: job.id, type: recordCode, date: when, detail: job.detail };
     const path = noTag ? "/api/market-deaths"
       : onBoar ? "/api/boar-events" : "/api/sow-events";
-    const { ok, data } = await api(path, postJson(body));
+    // 母豬事件才有「記錄前的防線」—— 公豬採精與肉豬死亡沒有生產週期
+    // 可以矛盾,直接送。
+    const { ok, data } = path === "/api/sow-events"
+      ? await postSowEvent(body)
+      : await api(path, postJson(body));
     return { tag: job.tag, ok, error: data?.error };
   }));
 
@@ -2263,10 +2292,10 @@ async function submitMultiSowRecord(spec, when, detail, services) {
     // 同時寫入會各自去清同一個牧場的事件快取,徒增競爭;而且哪一筆先
     // 寫進去也影響不了結果,沒必要搶。
     for (const t of times) {
-      const { ok, data } = await api("/api/sow-events", postJson({
+      const { ok, data } = await postSowEvent({
         ...(unknown ? { unknownTag: unknownTagFor(first) } : { sowId: sow.id }),
         type: recordCode, date: t.date, detail: t.detail,
-      }));
+      });
       if (!ok) return { tag, ok: false, error: data?.error };
     }
     return { tag, ok: true };

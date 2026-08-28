@@ -1278,3 +1278,66 @@ def _implausible_numbers(code: str, detail: dict) -> Optional[str]:
 def _label(code: str) -> str:
     return {FARROW: "分娩", WEAN: "離乳", MATE: "配種",
             DEATH: "死亡", CULL: "淘汰"}.get(code, code)
+
+
+# 一天只可能發生一次的事件。仔豬死亡不在內(同一天死兩隻、死因相同就是
+# 各記一筆,見 db.py 的 seq 欄位);配種也不在內(同一天早上一次下午一次
+# 是真的兩次,靠 detail 的 session 區分)。
+ONCE_A_DAY = (FARROW, WEAN, PREG_CHECK, ABORT, CULL, DEATH)
+
+
+def record_conflict(code: str, when: date, events: List[dict],
+                    settings: Optional[dict] = None) -> Optional[str]:
+    """記錄之前的一道防線:這一筆跟她已有的記錄矛盾嗎?
+
+    回一句話說明矛盾在哪,沒問題回 None。**呼叫端應該讓使用者仍然記得
+    下去**(帶確認),不是硬擋 —— 這個專案已經有過教訓:完全不給記,
+    實務上會變成「先不記、等老闆來」,反而遺失資料(憲法第十一條第 5 款)。
+
+    真正要擋的是**打錯耳號**:使用者回報記錄時常常打錯,一打錯就等於把
+    事件記到別頭身上。懷孕中的母豬被記離乳、沒配種的被記分娩,幾乎都是
+    這樣來的 —— 在按下記錄的當下問一句,比事後從記錄檢查裡撈回來便宜得多。
+
+    **用「記錄那一天」的狀態判斷,不是今天的狀態。** 使用者常補登(見
+    farm-records-are-often-backdated),拿今天的狀態去判斷三個月前的那筆,
+    會把正確的補登擋掉。
+    """
+    cfg = settings_with_defaults(settings)
+
+    # 同一天同一種事件已經記過了。刻意只查同型同日,不比對內容 ——
+    # 內容不同更可疑(同一天離乳 10 隻又離乳 9 隻),不該因此放行。
+    if code in ONCE_A_DAY:
+        same = [e for e in events
+                if e["event_type"] == code and e["event_date"] == when
+                and not e.get("excluded")]
+        if same:
+            return f"{when} 已經記過一筆{_label(code)}了"
+
+    # 只看這一筆之前發生的事,才是「記錄當下」的狀態
+    before = sorted((e for e in events
+                     if not e.get("excluded") and e["event_date"] <= when),
+                    key=lambda e: (e["event_date"], e.get("id", 0)))
+    c = current_cycle(before, cfg)
+
+    if c["exited"]:
+        return f"她已經在 {c['exited']} 離群了"
+
+    if code == WEAN:
+        if c["farrow"] is None:
+            if c["mate"]:
+                return (f"她 {c['mate']} 配種後還沒有分娩記錄,"
+                        f"這時候不會有仔豬可以離乳")
+            return "她沒有分娩記錄,這時候不會有仔豬可以離乳"
+
+    if code == FARROW:
+        if c["farrow"] is not None:
+            return f"她 {c['farrow']} 已經分娩過了,還沒有離乳記錄"
+        if c["mate"] is None:
+            return "她沒有配種記錄"
+
+    if code == MATE:
+        # 分娩了還沒離乳 = 正在哺乳,不會這時候配種
+        if c["farrow"] is not None:
+            return f"她 {c['farrow']} 剛分娩,還在哺乳中"
+
+    return None

@@ -936,6 +936,18 @@ class Application:
         if problem:
             return 400, {"error": problem}
 
+        # 記錄前的一道防線:這一筆跟她已有的記錄矛盾嗎?(使用者要求)
+        # **不是硬擋** —— 帶 confirm 就放行。真正要接住的是打錯耳號,
+        # 而不是替使用者決定他的豬發生了什麼事;完全不給記的話,實務上
+        # 會變成「先不記、等老闆來」,反而遺失資料(憲法第十一條第 5 款)。
+        if not payload.get("confirm"):
+            mine = self.store.list_sow_events(farm_id, sow_id=sow_id)
+            clash = schedule.record_conflict(code, when, mine,
+                                             self._farm_settings(farm_id))
+            if clash:
+                return 409, {"error": clash, "needsConfirm": True,
+                             "earTag": sow["ear_tag"]}
+
         # 移欄:直接打欄位編號,不必先到設定頁一個一個新增 —— 一區動輒
         # 幾百個欄位,要求先手動建一輪根本不會有人做(使用者要求)。
         # 第一次用到某個編號就直接建立;之後同一區打同樣的編號會找到

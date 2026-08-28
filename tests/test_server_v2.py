@@ -125,7 +125,7 @@ class TestSows:
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, token)
+              {"sowId": sow_id, "type": "MT", "date": "2026-02-03", "confirm": True}, token)
 
         body = app.handle_get(f"/api/sows/{sow_id}", token)[1]
         assert body["sow"]["earTag"] == "1183"
@@ -156,7 +156,7 @@ class TestFarmIsolationOverHttp:
         alice, bob = _owner(app, "alice"), _owner(app, "bob")
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, alice)[1]["id"]
         status, _ = _post(app, "/api/sow-events",
-                          {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, bob)
+                          {"sowId": sow_id, "type": "MT", "date": "2026-02-03", "confirm": True}, bob)
         assert status == 404
 
     def test_farm_id_in_the_request_body_is_ignored(self):
@@ -179,7 +179,7 @@ class TestSameFarmSharing:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "WN", "date": "2026-02-26",
-               "detail": {"weaned": 10}}, worker)
+               "detail": {"weaned": 10}, "confirm": True}, worker)
 
         events = app.handle_get(f"/api/sows/{sow_id}", owner)[1]["events"]
         assert events[0]["detail"]["weaned"] == 10
@@ -191,7 +191,7 @@ class TestSameFarmSharing:
 
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, worker)
+              {"sowId": sow_id, "type": "MT", "date": "2026-02-03", "confirm": True}, worker)
 
         events = app.handle_get(f"/api/sows/{sow_id}", owner)[1]["events"]
         assert events[0]["recordedBy"] == worker_id
@@ -247,29 +247,29 @@ class TestWorkerCanFixOwnMistake:
     def test_worker_can_delete_own_latest(self, setup):
         app, owner, worker, sow_id = setup
         ev = _post(app, "/api/sow-events",
-                   {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, worker)[1]["id"]
+                   {"sowId": sow_id, "type": "MT", "date": "2026-02-03", "confirm": True}, worker)[1]["id"]
         assert app.handle_delete(f"/api/sow-events/{ev}", worker)[0] == 200
 
     def test_worker_cannot_delete_someone_elses(self, setup):
         app, owner, worker, sow_id = setup
         ev = _post(app, "/api/sow-events",
-                   {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, owner)[1]["id"]
+                   {"sowId": sow_id, "type": "MT", "date": "2026-02-03", "confirm": True}, owner)[1]["id"]
         assert app.handle_delete(f"/api/sow-events/{ev}", worker)[0] == 403
 
     def test_worker_cannot_delete_an_older_record(self, setup):
         app, owner, worker, sow_id = setup
         old = _post(app, "/api/sow-events",
-                    {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, worker)[1]["id"]
+                    {"sowId": sow_id, "type": "MT", "date": "2026-02-03", "confirm": True}, worker)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "PD", "date": "2026-03-01"}, worker)
+              {"sowId": sow_id, "type": "PD", "date": "2026-03-01", "confirm": True}, worker)
         assert app.handle_delete(f"/api/sow-events/{old}", worker)[0] == 403
 
     def test_owner_can_delete_anything(self, setup):
         app, owner, worker, sow_id = setup
         old = _post(app, "/api/sow-events",
-                    {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, worker)[1]["id"]
+                    {"sowId": sow_id, "type": "MT", "date": "2026-02-03", "confirm": True}, worker)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "PD", "date": "2026-03-01"}, worker)
+              {"sowId": sow_id, "type": "PD", "date": "2026-03-01", "confirm": True}, worker)
         assert app.handle_delete(f"/api/sow-events/{old}", owner)[0] == 200
 
 
@@ -321,7 +321,7 @@ class TestUndoAnimalEntry:
         app, owner, farm_id = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, owner)
+              {"sowId": sow_id, "type": "MT", "date": "2026-02-03", "confirm": True}, owner)
         status, body = app.handle_delete(f"/api/sows/{sow_id}", owner)
         assert status == 409
         assert app.store.get_sow(farm_id, sow_id) is not None
@@ -349,7 +349,7 @@ class TestUndoAnimalEntry:
         sow_id = _post(app, "/api/sows",
                        {"earTag": "1183", "entryDate": today}, owner)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": "2026-02-03"}, owner)
+              {"sowId": sow_id, "type": "MT", "date": "2026-02-03", "confirm": True}, owner)
 
         events = app.handle_get("/api/recent-events?days=1", owner)[1]["events"]
         entry = next(e for e in events if e["kind"] == "sow-entry")
@@ -512,7 +512,7 @@ class TestEventSideEffects:
         app, token, _, sow_id = sow
         body = _post(app, "/api/sow-events",
                      {"sowId": sow_id, "type": "FW", "date": "2026-02-04",
-                      "detail": {"born_alive": 10}}, token)[1]
+                      "detail": {"born_alive": 10}, "confirm": True}, token)[1]
         assert body["sow"]["parity"] == 1
 
     def test_weaning_frees_the_pen(self, sow):
@@ -521,7 +521,7 @@ class TestEventSideEffects:
         app.store.update_sow(farm_id, sow_id, pen_id=pen)
 
         body = _post(app, "/api/sow-events",
-                     {"sowId": sow_id, "type": "WN", "date": "2026-02-26"}, token)[1]
+                     {"sowId": sow_id, "type": "WN", "date": "2026-02-26", "confirm": True}, token)[1]
         assert body["sow"]["penId"] is None
 
     def test_culling_appends_the_roc_year(self, sow):
@@ -529,7 +529,7 @@ class TestEventSideEffects:
         app, token, _, sow_id = sow
         body = _post(app, "/api/sow-events",
                      {"sowId": sow_id, "type": "SAL", "date": "2026-07-01",
-                      "detail": {"reason": "年齡太大"}}, token)[1]
+                      "detail": {"reason": "年齡太大"}, "confirm": True}, token)[1]
         assert body["sow"]["earTag"] == "2580-D115"
         assert body["sow"]["status"] == "culled"
 
@@ -537,13 +537,13 @@ class TestEventSideEffects:
         """補登去年的淘汰要標去年的年份 —— 用今天會標錯。"""
         app, token, _, sow_id = sow
         body = _post(app, "/api/sow-events",
-                     {"sowId": sow_id, "type": "SAL", "date": "2024-12-20"}, token)[1]
+                     {"sowId": sow_id, "type": "SAL", "date": "2024-12-20", "confirm": True}, token)[1]
         assert body["sow"]["earTag"] == "2580-D113"
 
     def test_bare_tag_is_free_again_after_culling(self, sow):
         app, token, _, sow_id = sow
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "SAL", "date": "2026-07-01"}, token)
+              {"sowId": sow_id, "type": "SAL", "date": "2026-07-01", "confirm": True}, token)
         assert _post(app, "/api/sows", {"earTag": "2580"}, token)[0] == 200
 
 
@@ -638,7 +638,7 @@ class TestMovePenEvent:
     def move(app, token, sow_id, date, zone="mating", pen_name="配-05"):
         return _post(app, "/api/sow-events",
                      {"sowId": sow_id, "type": "MV", "date": date,
-                      "detail": {"zone": zone, "pen_name": pen_name}}, token)
+                      "detail": {"zone": zone, "pen_name": pen_name}, "confirm": True}, token)
 
     def test_typing_a_new_name_creates_the_pen(self, setup):
         app, token, farm_id, sow_id = setup
@@ -693,7 +693,7 @@ class TestMovePenEvent:
         app, token, _, sow_id = setup
         status, _ = _post(app, "/api/sow-events",
                           {"sowId": sow_id, "type": "MV", "date": "2026-08-19",
-                           "detail": {"pen_name": "配-05"}}, token)
+                           "detail": {"pen_name": "配-05"}, "confirm": True}, token)
         assert status == 400
 
     def test_unknown_zone_is_rejected(self, setup):
@@ -705,7 +705,7 @@ class TestMovePenEvent:
         app, token, _, sow_id = setup
         status, _ = _post(app, "/api/sow-events",
                           {"sowId": sow_id, "type": "MV", "date": "2026-08-19",
-                           "detail": {"zone": "mating"}}, token)
+                           "detail": {"zone": "mating"}, "confirm": True}, token)
         assert status == 400
 
     def test_occupied_pen_is_rejected(self, setup):
@@ -789,18 +789,18 @@ class TestEventValidation:
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         assert _post(app, "/api/sow-events",
-                     {"sowId": sow_id, "type": "ZZZ", "date": "2026-02-03"}, token)[0] == 400
+                     {"sowId": sow_id, "type": "ZZZ", "date": "2026-02-03", "confirm": True}, token)[0] == 400
 
     def test_bad_date_rejected(self, farm):
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         assert _post(app, "/api/sow-events",
-                     {"sowId": sow_id, "type": "MT", "date": "昨天"}, token)[0] == 400
+                     {"sowId": sow_id, "type": "MT", "date": "昨天", "confirm": True}, token)[0] == 400
 
     def test_missing_sow_rejected(self, farm):
         app, token, _ = farm
         assert _post(app, "/api/sow-events",
-                     {"type": "MT", "date": "2026-02-03"}, token)[0] == 400
+                     {"type": "MT", "date": "2026-02-03", "confirm": True}, token)[0] == 400
 
 
 class TestTasksAndAlerts:
@@ -809,7 +809,7 @@ class TestTasksAndAlerts:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         farrowed = date.today() - timedelta(days=22)
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "FW", "date": farrowed.isoformat()}, token)
+              {"sowId": sow_id, "type": "FW", "date": farrowed.isoformat(), "confirm": True}, token)
 
         body = app.handle_get("/api/tasks", token)[1]
         kinds = {g["kind"] for g in body["groups"]}
@@ -821,7 +821,7 @@ class TestTasksAndAlerts:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         farrowed = date.today() - timedelta(days=22)
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "FW", "date": farrowed.isoformat()}, token)
+              {"sowId": sow_id, "type": "FW", "date": farrowed.isoformat(), "confirm": True}, token)
 
         group = app.handle_get("/api/tasks", token)[1]["groups"][0]
         assert group["label"] == "離乳"
@@ -1024,7 +1024,7 @@ class TestSettings:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         farrowed = date.today() - timedelta(days=15)
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "FW", "date": farrowed.isoformat()}, token)
+              {"sowId": sow_id, "type": "FW", "date": farrowed.isoformat(), "confirm": True}, token)
 
         # 預設泌乳 22 天 → 這週還不用離乳
         kinds = {g["kind"] for g in app.handle_get("/api/tasks", token)[1]["groups"]}
@@ -1112,7 +1112,7 @@ class TestWorthReviewEndpoint:
             _post(app, "/api/sow-events",
                   {"sowId": sow_id, "type": "FW",
                    "date": (date(2023, 1, 1) + timedelta(days=145 * i)).isoformat(),
-                   "detail": {"born_alive": alive}}, token)
+                   "detail": {"born_alive": alive}, "confirm": True}, token)
 
         body = app.handle_get("/api/review", token)[1]
         assert [s["earTag"] for s in body["sows"]] == ["1183"]
@@ -1170,7 +1170,7 @@ class TestMonthlyReportEndpoint:
         app, token, farm_id = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": "2026-04-19"}, token)
+              {"sowId": sow_id, "type": "MT", "date": "2026-04-19", "confirm": True}, token)
 
         other_token = _owner(app, "other-farmer")
         other_body = app.handle_get("/api/monthly-report?month=2026-08", other_token)[1]
@@ -1187,11 +1187,11 @@ class TestMonthlyReportEndpoint:
 
         mate_date = date(2026, 4, 19)
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": mate_date.isoformat()}, token)
+              {"sowId": sow_id, "type": "MT", "date": mate_date.isoformat(), "confirm": True}, token)
         farrow_date = mate_date + timedelta(days=schedule.DEFAULTS["gestation_days"])
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "FW", "date": farrow_date.isoformat(),
-               "detail": {"born_alive": 12, "stillborn": 1}}, token)
+               "detail": {"born_alive": 12, "stillborn": 1}, "confirm": True}, token)
 
         month_str = f"{farrow_date.year:04d}-{farrow_date.month:02d}"
         body = app.handle_get(f"/api/monthly-report?month={month_str}", token)[1]
@@ -1255,7 +1255,7 @@ class TestRecordPage:
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat()}, token)
+              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat(), "confirm": True}, token)
         events = app.handle_get("/api/recent-events", token)[1]["events"]
         assert events[0]["earTag"] == "1183"
 
@@ -1274,7 +1274,7 @@ class TestRecordPage:
 
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "MT", "date": long_ago,
-               "detail": {"boar_tag": "B1"}}, token)
+               "detail": {"boar_tag": "B1"}, "confirm": True}, token)
 
         events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
         mated = [e for e in events if e.get("kind") == "sow" and e["type"] == "MT"]
@@ -1290,10 +1290,10 @@ class TestRecordPage:
         for day in (0, 1, 2):
             _post(app, "/api/sow-events",
                   {"sowId": sow_id, "type": "MT",
-                   "date": (date.today() - timedelta(days=day)).isoformat()}, token)
+                   "date": (date.today() - timedelta(days=day)).isoformat(), "confirm": True}, token)
         backdated = (date.today() - timedelta(days=40)).isoformat()
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "WN", "date": backdated}, token)
+              {"sowId": sow_id, "type": "WN", "date": backdated, "confirm": True}, token)
 
         events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
         assert events[0]["date"] == backdated
@@ -1305,7 +1305,7 @@ class TestRecordPage:
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat()}, token)
+              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat(), "confirm": True}, token)
         events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
         assert all(not e["backdated"] for e in events)
 
@@ -1319,7 +1319,7 @@ class TestRecordPage:
             _post(app, "/api/sow-events",
                   {"sowId": sow_id, "type": "MT",
                    "date": (date.today() - timedelta(days=day)).isoformat(),
-                   "detail": {"boar_tag": f"B{day}"}}, token)
+                   "detail": {"boar_tag": f"B{day}"}, "confirm": True}, token)
 
         events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
         old = [e for e in events if e.get("kind") == "sow"]
@@ -1332,7 +1332,7 @@ class TestRecordPage:
         for day in (2, 1, 0):
             _post(app, "/api/sow-events",
                   {"sowId": sow_id, "type": "MT",
-                   "date": (date.today() - timedelta(days=day)).isoformat()}, token)
+                   "date": (date.today() - timedelta(days=day)).isoformat(), "confirm": True}, token)
         events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
         assert all(e["canUndo"] for e in events)
 
@@ -1343,9 +1343,9 @@ class TestRecordPage:
 
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "MT",
-               "date": (date.today() - timedelta(days=1)).isoformat()}, owner)
+               "date": (date.today() - timedelta(days=1)).isoformat(), "confirm": True}, owner)
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat()}, worker)
+              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat(), "confirm": True}, worker)
 
         events = app.handle_get("/api/recent-events?days=7", worker)[1]["events"]
         undoable = [e for e in events if e["canUndo"]]
@@ -1361,7 +1361,7 @@ class TestRecordPage:
         for day, who in ((2, owner), (1, worker), (0, worker)):
             _post(app, "/api/sow-events",
                   {"sowId": sow_id, "type": "MT",
-                   "date": (date.today() - timedelta(days=day)).isoformat()}, who)
+                   "date": (date.today() - timedelta(days=day)).isoformat(), "confirm": True}, who)
 
         events = app.handle_get("/api/recent-events?days=7", worker)[1]["events"]
         for e in events:
@@ -1376,7 +1376,7 @@ class TestRecordPage:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "WN", "date": date.today().isoformat(),
-               "detail": {"weaned": 11, "wean_score": 4}}, token)
+               "detail": {"weaned": 11, "wean_score": 4}, "confirm": True}, token)
         detail = app.handle_get("/api/sows/" + str(sow_id), token)[1]["events"][0]["detail"]
         assert detail["wean_score"] == 4
 
@@ -1387,7 +1387,7 @@ class TestRecordPage:
             status, _ = _post(app, "/api/sow-events",
                               {"sowId": sow_id, "type": "WN",
                                "date": date.today().isoformat(),
-                               "detail": {"wean_score": bad}}, token)
+                               "detail": {"wean_score": bad}, "confirm": True}, token)
             assert status == 400, bad
 
     def test_missing_wean_score_is_left_empty_not_filled_in(self, farm):
@@ -1398,7 +1398,7 @@ class TestRecordPage:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "WN", "date": date.today().isoformat(),
-               "detail": {"weaned": 11, "wean_score": None}}, token)
+               "detail": {"weaned": 11, "wean_score": None}, "confirm": True}, token)
         detail = app.handle_get("/api/sows/" + str(sow_id), token)[1]["events"][0]["detail"]
         assert "wean_score" not in detail
 
@@ -1443,7 +1443,7 @@ class TestBoarCard:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "MT", "date": "2026-02-03",
-               "detail": {"boar_tag": "D6"}}, token)
+               "detail": {"boar_tag": "D6"}, "confirm": True}, token)
 
         perf = app.handle_get(f"/api/boars/{boar_id}", token)[1]["performance"]
         assert perf["matings"] == 1
@@ -1455,7 +1455,7 @@ class TestBoarCard:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "MT", "date": "2026-02-03",
-               "detail": {"boar_tag": "D9"}}, token)
+               "detail": {"boar_tag": "D9"}, "confirm": True}, token)
 
         assert app.handle_get(f"/api/boars/{boar_id}", token)[1]["performance"] is None
 
@@ -1556,7 +1556,7 @@ class TestBoarCard:
         app, token, _, boar_id = setup
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat()}, token)
+              {"sowId": sow_id, "type": "MT", "date": date.today().isoformat(), "confirm": True}, token)
         _post(app, "/api/boar-events",
               {"boarId": boar_id, "type": "SC", "date": date.today().isoformat()}, token)
 
@@ -1578,7 +1578,7 @@ class TestBoarCard:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
 
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "MT", "date": "2026-08-17"}, worker)
+              {"sowId": sow_id, "type": "MT", "date": "2026-08-17", "confirm": True}, worker)
         _post(app, "/api/boar-events",
               {"boarId": boar_id, "type": "SC", "date": "2026-08-16"}, owner)
         workers_boar_event = _post(app, "/api/boar-events",
@@ -1662,7 +1662,7 @@ class TestBoarDeath:
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         status, _ = _post(app, "/api/sow-events",
-                          {"sowId": sow_id, "type": "DTH", "date": "2026-08-17"}, token)
+                          {"sowId": sow_id, "type": "DTH", "date": "2026-08-17", "confirm": True}, token)
         assert status == 200
         sow = app.handle_get(f"/api/sows/{sow_id}", token)[1]["sow"]
         assert sow["status"] == "dead"
@@ -1755,7 +1755,7 @@ class TestExitedSowsStayVisibleAndCountInAnalysis:
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "DTH", "date": "2026-07-01"}, token)
+              {"sowId": sow_id, "type": "DTH", "date": "2026-07-01", "confirm": True}, token)
         assert app.handle_get("/api/sows", token)[1]["sows"] == []
 
     def test_exited_sow_is_still_reachable_with_all_1(self, farm):
@@ -1763,7 +1763,7 @@ class TestExitedSowsStayVisibleAndCountInAnalysis:
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "DTH", "date": "2026-07-01"}, token)
+              {"sowId": sow_id, "type": "DTH", "date": "2026-07-01", "confirm": True}, token)
         rows = app.handle_get("/api/sows?all=1", token)[1]["sows"]
         assert rows[0]["earTag"] == "1183-D115"
         assert rows[0]["status"] == "dead"
@@ -1773,7 +1773,7 @@ class TestExitedSowsStayVisibleAndCountInAnalysis:
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
         _post(app, "/api/sow-events",
-              {"sowId": sow_id, "type": "DTH", "date": "2026-07-01"}, token)
+              {"sowId": sow_id, "type": "DTH", "date": "2026-07-01", "confirm": True}, token)
         status, body = app.handle_get(f"/api/sows/{sow_id}", token)
         assert status == 200
         assert body["sow"]["status"] == "dead"
@@ -1792,7 +1792,7 @@ class TestExitedSowsStayVisibleAndCountInAnalysis:
                 _post(app, "/api/sow-events",
                      {"sowId": sid, "type": "FW",
                       "date": (date(2023, 1, 1) + timedelta(days=145 * i)).isoformat(),
-                      "detail": {"born_alive": n}}, token)
+                      "detail": {"born_alive": n}, "confirm": True}, token)
 
         farrow(subject_id, [10, 10, 10])
         for pid, n in zip(peer_ids, range(11, 20)):
@@ -1809,7 +1809,7 @@ class TestExitedSowsStayVisibleAndCountInAnalysis:
         for pid, n in zip(poor_ids, range(1, 6)):
             farrow(pid, [n, n, n])
             _post(app, "/api/sow-events",
-                 {"sowId": pid, "type": "SAL", "date": "2026-07-01"}, token)
+                 {"sowId": pid, "type": "SAL", "date": "2026-07-01", "confirm": True}, token)
 
         with_exited = app.handle_get(f"/api/sows/{subject_id}", token)[1]
         tier_with = next(m["tier"] for m in with_exited["performance"]["metrics"]
@@ -1825,9 +1825,9 @@ class TestExitedSowsInReview:
             _post(app, "/api/sow-events",
                  {"sowId": sow_id, "type": "FW",
                   "date": (date(2023, 1, 1) + timedelta(days=145 * i)).isoformat(),
-                  "detail": {"born_alive": n}}, token)
+                  "detail": {"born_alive": n}, "confirm": True}, token)
         _post(app, "/api/sow-events",
-             {"sowId": sow_id, "type": "SAL", "date": "2026-07-01"}, token)
+             {"sowId": sow_id, "type": "SAL", "date": "2026-07-01", "confirm": True}, token)
 
         body = app.handle_get("/api/review", token)[1]
         assert body["sows"] == []
@@ -2015,7 +2015,7 @@ class TestUnknownEarTagSowsAreRealSows:
             st, body = _post(app, "/api/sow-events", {
                 "unknownTag": "0817", "type": "MT",
                 "date": (today - timedelta(days=back)).isoformat(),
-                "detail": {"boar_tag": boar}}, owner)
+                "detail": {"boar_tag": boar}, "confirm": True}, owner)
             assert st == 200, body
 
         sows = app.handle_get("/api/sows", owner)[1]["sows"]
@@ -2028,7 +2028,7 @@ class TestUnknownEarTagSowsAreRealSows:
         mated = date.today() - timedelta(days=1)
         _post(app, "/api/sow-events", {
             "unknownTag": "0817", "type": "MT",
-            "date": mated.isoformat()}, owner)
+            "date": mated.isoformat(), "confirm": True}, owner)
 
         sow_id = app.handle_get("/api/sows", owner)[1]["sows"][0]["id"]
         status = app.handle_get(f"/api/sows/{sow_id}", owner)[1]["status"]
@@ -2042,7 +2042,7 @@ class TestUnknownEarTagSowsAreRealSows:
         app, owner, _ = farm
         _post(app, "/api/sow-events", {
             "unknownTag": "../../1183", "type": "MT",
-            "date": date.today().isoformat()}, owner)
+            "date": date.today().isoformat(), "confirm": True}, owner)
         tags = [s["earTag"] for s in app.handle_get("/api/sows", owner)[1]["sows"]]
         assert all(t.startswith("不明-") for t in tags), tags
 
@@ -2053,7 +2053,7 @@ class TestUnknownEarTagSowsAreRealSows:
         for tag, back in (("0817", 3), ("0820", 0)):
             _post(app, "/api/sow-events", {
                 "unknownTag": tag, "type": "MT",
-                "date": (today - timedelta(days=back)).isoformat()}, owner)
+                "date": (today - timedelta(days=back)).isoformat(), "confirm": True}, owner)
         sows = app.handle_get("/api/sows", owner)[1]["sows"]
         assert len(sows) == 2
 
@@ -2064,7 +2064,7 @@ class TestUnknownEarTagSowsAreRealSows:
         app, owner, _ = farm
         st, body = _post(app, "/api/sow-events", {
             "sowId": 99999, "type": "MT",
-            "date": date.today().isoformat()}, owner)
+            "date": date.today().isoformat(), "confirm": True}, owner)
         assert st == 404
 
 
@@ -2084,12 +2084,12 @@ class TestIdentifyingAnUnknownSow:
         _post(app, "/api/sow-events", {
             "sowId": real, "type": "FW",
             "date": (today - timedelta(days=200)).isoformat(),
-            "detail": {"born_alive": 10}}, owner)
+            "detail": {"born_alive": 10}, "confirm": True}, owner)
         for back, boar in ((1, "B1"), (0, "B2")):
             _post(app, "/api/sow-events", {
                 "unknownTag": "0817", "type": "MT",
                 "date": (today - timedelta(days=back)).isoformat(),
-                "detail": {"boar_tag": boar}}, owner)
+                "detail": {"boar_tag": boar}, "confirm": True}, owner)
         unknown = next(s for s in app.handle_get("/api/sows", owner)[1]["sows"]
                        if s["isUnknown"])
         return real, unknown["id"]
@@ -2162,7 +2162,7 @@ class TestDataProblemsEndpoint:
         for code, when in (("FW", "2026-05-16"), ("WN", "2026-06-07"),
                            ("WN", "2026-07-05")):
             _post(app, "/api/sow-events",
-                  {"sowId": sow_id, "type": code, "date": when}, owner)
+                  {"sowId": sow_id, "type": code, "date": when, "confirm": True}, owner)
 
         st, body = app.handle_get("/api/data-problems", owner)
         assert st == 200
@@ -2176,7 +2176,7 @@ class TestDataProblemsEndpoint:
         for code, when in (("FW", "2026-01-05"), ("WN", "2026-01-27"),
                            ("FW", "2026-05-25"), ("WN", "2026-06-16")):
             _post(app, "/api/sow-events",
-                  {"sowId": sow_id, "type": code, "date": when}, owner)
+                  {"sowId": sow_id, "type": code, "date": when, "confirm": True}, owner)
 
         st, body = app.handle_get("/api/data-problems", owner)
         assert body["problems"] == []
@@ -2194,7 +2194,7 @@ class TestDataProblemsEndpoint:
         sow_id = _post(app, "/api/sows", {"earTag": "9999"}, b_owner)[1]["id"]
         for when in ("2026-06-07", "2026-07-05"):
             _post(app, "/api/sow-events",
-                  {"sowId": sow_id, "type": "WN", "date": when}, b_owner)
+                  {"sowId": sow_id, "type": "WN", "date": when, "confirm": True}, b_owner)
 
         st, body = app.handle_get("/api/data-problems", a_owner)
         assert body["problems"] == []
@@ -2212,10 +2212,10 @@ class TestFixingAnAbnormalRecord:
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, owner)[1]["id"]
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "FW", "date": "2026-03-01",
-               "detail": {"born_alive": 11}}, owner)
+               "detail": {"born_alive": 11}, "confirm": True}, owner)
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "WN", "date": "2026-05-30",
-               "detail": {"weaned": 10}}, owner)
+               "detail": {"weaned": 10}, "confirm": True}, owner)
         problems = app.handle_get("/api/data-problems", owner)[1]["problems"]
         return sow_id, problems
 
@@ -2254,7 +2254,7 @@ class TestFixingAnAbnormalRecord:
         sow_id = _post(app, "/api/sows", {"earTag": "1585"}, owner)[1]["id"]
         _post(app, "/api/sow-events",
               {"sowId": sow_id, "type": "FW", "date": "2026-03-01",
-               "detail": {"born_alive": 56}}, owner)
+               "detail": {"born_alive": 56}, "confirm": True}, owner)
         events = app.handle_get(f"/api/sows/{sow_id}", owner)[1]["events"]
         event_id = events[0]["id"]
 
@@ -2350,3 +2350,114 @@ class TestWeekStartsOnTheFarmsOwnDay:
         app, owner, _ = farm
         st, _ = _post(app, "/api/settings", {"settings": {"week_start_day": 9}}, owner)
         assert st == 400
+
+
+class TestRecordingGuard:
+    """記錄前的防線(使用者要求):懷孕中的不會被記離乳、沒配種的不會被
+    記分娩、同一天不會重複記。
+
+    **擋下來但不擋死** —— 帶 confirm 仍然記得進去。真正要接住的是打錯
+    耳號(使用者回報常常打錯);完全不給記的話,實務上會變成「先不記、
+    等老闆來」,反而遺失資料(憲法第十一條第 5 款)。
+    """
+
+    def _sow(self, app, owner, tag="1183"):
+        return _post(app, "/api/sows", {"earTag": tag}, owner)[1]["id"]
+
+    def _ev(self, app, owner, sow_id, code, when, **kw):
+        return _post(app, "/api/sow-events", {
+            "sowId": sow_id, "type": code, "date": when, "confirm": True, **kw}, owner)
+
+    def test_a_pregnant_sow_cannot_be_weaned(self, farm):
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        self._ev(app, owner, sow_id, "MT", "2026-05-01")
+
+        st, body = _post(app, "/api/sow-events", {
+            "sowId": sow_id, "type": "WN", "date": "2026-06-01"}, owner)
+        assert st == 409
+        assert body["needsConfirm"] is True
+        assert "還沒有分娩" in body["error"]
+
+    def test_a_sow_with_no_mating_cannot_farrow(self, farm):
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        st, body = _post(app, "/api/sow-events", {
+            "sowId": sow_id, "type": "FW", "date": "2026-06-01"}, owner)
+        assert st == 409
+        assert "沒有配種記錄" in body["error"]
+
+    def test_the_same_event_twice_on_one_day(self, farm):
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        self._ev(app, owner, sow_id, "MT", "2026-01-01")
+        self._ev(app, owner, sow_id, "FW", "2026-04-25")
+
+        st, body = _post(app, "/api/sow-events", {
+            "sowId": sow_id, "type": "FW", "date": "2026-04-25"}, owner)
+        assert st == 409
+        assert "已經記過" in body["error"]
+
+    def test_a_lactating_sow_is_not_mated(self, farm):
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        self._ev(app, owner, sow_id, "MT", "2026-01-01")
+        self._ev(app, owner, sow_id, "FW", "2026-04-25")
+
+        st, body = _post(app, "/api/sow-events", {
+            "sowId": sow_id, "type": "MT", "date": "2026-05-01"}, owner)
+        assert st == 409
+        assert "哺乳" in body["error"]
+
+    def test_confirming_records_it_anyway(self, farm):
+        """擋下來不是擋死 —— 使用者知道自己在做什麼時要記得進去。"""
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        st, _ = _post(app, "/api/sow-events", {
+            "sowId": sow_id, "type": "FW", "date": "2026-06-01",
+            "confirm": True}, owner)
+        assert st == 200
+
+    def test_a_normal_cycle_is_never_questioned(self, farm):
+        """配種 → 分娩 → 離乳 → 再配種,整輪都不該被問。"""
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        for code, when in (("MT", "2026-01-01"), ("FW", "2026-04-25"),
+                           ("WN", "2026-05-17"), ("MT", "2026-05-22")):
+            st, body = _post(app, "/api/sow-events", {
+                "sowId": sow_id, "type": code, "date": when}, owner)
+            assert st == 200, f"{code} {when} 被擋了:{body}"
+
+    def test_back_filling_is_judged_by_that_days_state(self, farm):
+        """**最重要的一條。** 使用者常補登,拿今天的狀態去判斷三個月前的
+        那筆會把正確的補登擋掉 —— 她今天懷孕中,不代表五月那天不能離乳。
+        """
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        self._ev(app, owner, sow_id, "MT", "2026-01-01")
+        self._ev(app, owner, sow_id, "FW", "2026-04-25")
+        self._ev(app, owner, sow_id, "MT", "2026-05-22")   # 她現在又懷孕了
+
+        st, body = _post(app, "/api/sow-events", {
+            "sowId": sow_id, "type": "WN", "date": "2026-05-17"}, owner)
+        assert st == 200, f"補登被誤擋:{body}"
+
+    def test_piglet_losses_may_repeat_on_one_day(self, farm):
+        """同一天死兩隻、死因相同,就是各記一筆(見 db.py 的 seq 欄位)。"""
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        self._ev(app, owner, sow_id, "MT", "2026-01-01")
+        self._ev(app, owner, sow_id, "FW", "2026-04-25")
+        for _ in range(2):
+            st, body = _post(app, "/api/sow-events", {
+                "sowId": sow_id, "type": "PL", "date": "2026-04-26",
+                "detail": {"count": 1, "reason": "母豬壓死"}}, owner)
+            assert st == 200, body
+
+    def test_the_message_names_the_sow(self, farm):
+        """打錯耳號才是真正要接住的 —— 訊息要讓使用者看得出記到誰身上。"""
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner, "2580")
+        st, body = _post(app, "/api/sow-events", {
+            "sowId": sow_id, "type": "FW", "date": "2026-06-01"}, owner)
+        assert body["earTag"] == "2580"
