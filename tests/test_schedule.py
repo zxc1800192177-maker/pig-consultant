@@ -1677,3 +1677,13 @@ class TestImplausibleNumbers:
                                   {"born_alive": LIMITS["max_litter"] + 1})],
                               self.TODAY)
         assert found and str(LIMITS["max_litter"]) in found[0].why
+
+
+def test_every_setting_has_chinese_text():
+    """設定頁是從 SETTING_RANGES 自動產生的,少了中文就會直接把程式代號
+    顯示給使用者看 —— 實際發生過:mating_series_days 與 min_cycle_days
+    在畫面上就是這兩串英文,是截圖時才發現的。
+    """
+    from core import labels
+    missing = [k for k in schedule.SETTING_RANGES if labels.setting_label(k) == k]
+    assert missing == [], f"這幾項沒有中文標籤:{missing}"

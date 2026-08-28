@@ -67,8 +67,15 @@ def _today() -> date:
         return datetime.now(timezone.utc).date()
 
 
-def _monday(day: date) -> date:
-    return day - timedelta(days=day.weekday())
+def _week_start(day: date, start_day: int) -> date:
+    """把 day 往回退到所屬那一週的第一天。
+
+    `start_day` 是 date.weekday() 的編號(0=週一 …… 6=週日),由牧場設定
+    決定 —— 這個場的班表是週四開始(使用者要求)。工作清單是批次導向的,
+    一週一批整批做同一件事;週界切在批次中間的話,同一批會被拆到兩週,
+    兩邊看起來都只做了一半。
+    """
+    return day - timedelta(days=(day.weekday() - start_day) % 7)
 
 
 def _iso(value):
@@ -1036,11 +1043,13 @@ class Application:
         if err:
             return err
 
-        start = _date(_query(path, "start")) or _monday(_today())
+        # 設定要先讀 —— 一週從星期幾開始是設定的一部分。
+        cfg = self._farm_settings(farm_id)
+        start = (_date(_query(path, "start"))
+                 or _week_start(_today(), cfg["week_start_day"]))
         end = start + timedelta(days=6)
         sows = self.store.list_sows(farm_id, "active")
         events = self.store.list_sow_events(farm_id)
-        cfg = self._farm_settings(farm_id)
 
         groups = schedule.build_week_tasks(sows, events, start, end, cfg)
 

@@ -2300,3 +2300,53 @@ class TestFixingAnAbnormalRecord:
                       {"eventId": problems[0]["eventId"],
                        "date": "2026-03-23"}, a_owner)
         assert st == 404
+
+
+class TestWeekStartsOnTheFarmsOwnDay:
+    """工作清單的一週從星期幾開始,由牧場設定決定(使用者要求週四)。
+
+    不只是顯示問題:工作清單是**批次導向**的,一週一批整批做同一件事。
+    週界切在批次中間的話,同一批會被拆到兩週,兩邊看起來都只做了一半。
+    """
+
+    def test_thursday_is_the_default(self):
+        """跟其他預設值一樣取自這一場的實際班表。"""
+        assert schedule.DEFAULTS["week_start_day"] == 3    # 0=週一
+
+    def test_every_day_of_the_week_lands_on_the_same_thursday(self):
+        from server import _week_start
+        monday = date(2026, 8, 24)
+        for offset in range(3):                            # 週一到週三
+            assert _week_start(monday + timedelta(days=offset), 3) == date(2026, 8, 20)
+        for offset in range(3, 7):                         # 週四到週日
+            assert _week_start(monday + timedelta(days=offset), 3) == date(2026, 8, 27)
+
+    def test_the_start_day_itself_is_its_own_week_start(self):
+        from server import _week_start
+        thursday = date(2026, 8, 27)
+        assert _week_start(thursday, 3) == thursday
+
+    def test_it_follows_the_setting_not_a_hardcoded_day(self):
+        """別的場的班表不一樣 —— 寫死等於只為這一場服務。"""
+        from server import _week_start
+        wednesday = date(2026, 8, 26)
+        assert _week_start(wednesday, 0) == date(2026, 8, 24)   # 週一起算
+        assert _week_start(wednesday, 6) == date(2026, 8, 23)   # 週日起算
+
+    def test_the_task_list_week_starts_on_thursday(self, farm):
+        app, owner, _ = farm
+        body = app.handle_get("/api/tasks", owner)[1]
+        start = date.fromisoformat(body["weekStart"])
+        assert start.weekday() == 3, f"{body['weekStart']} 不是週四"
+        assert date.fromisoformat(body["weekEnd"]) == start + timedelta(days=6)
+
+    def test_a_farm_can_change_it(self, farm):
+        app, owner, _ = farm
+        _post(app, "/api/settings", {"settings": {"week_start_day": 0}}, owner)
+        body = app.handle_get("/api/tasks", owner)[1]
+        assert date.fromisoformat(body["weekStart"]).weekday() == 0
+
+    def test_an_impossible_day_is_refused(self, farm):
+        app, owner, _ = farm
+        st, _ = _post(app, "/api/settings", {"settings": {"week_start_day": 9}}, owner)
+        assert st == 400
