@@ -1333,6 +1333,7 @@ document.addEventListener("click", (e) => {
     return $("dpFixForm").classList.add("is-hidden");
   }
   if (e.target.id === "dpFixSubmit") return submitFix();
+  if (e.target.id === "dpFixDelete") return deleteFixTarget();
 
   const row = e.target.closest(".sow-row");
   if (row) {
@@ -2507,7 +2508,12 @@ function openFixForm(row) {
     ${spec.fields.filter((f) => !f.shared && !f.perService)
        .map((f) => fieldMarkup(f, "_fix")).join("")}
     <p class="rec-err is-hidden" id="dpFixErr"></p>
-    <button type="button" class="btn-primary" id="dpFixSubmit">儲存修正</button>`;
+    <button type="button" class="btn-primary" id="dpFixSubmit">儲存修正</button>
+    <!-- 刪除跟儲存刻意不並排:兩者的誤觸代價差太多。整筆記錯了(例如
+         這筆根本是別頭的)才用刪的,改得動的就用上面的欄位改。 -->
+    <button type="button" class="btn-danger" id="dpFixDelete">刪除這筆記錄</button>
+    <p class="fld-h">這筆整個是多餘的才刪 —— 刪掉不能復原。記錯在別頭身上的話,
+       刪掉之後記得到正確那頭補記一次。</p>`;
 
   // 表單畫好之後才把現有的值填回去 —— fieldMarkup 不接受預設值。
   let current = {};
@@ -2537,6 +2543,40 @@ function fillRecordFields(spec, sfx, detail) {
       if (input) input.value = val;
     }
   }
+}
+
+/** 刪掉一筆記錄檢查列出來的記錄。
+ *
+ * 走的是既有的收回端點,不另開一條 —— 那裡已經有權限規則(員工只能收回
+ * 自己記的最新一筆)與移欄的連帶處理(把欄位退回上一筆)。另寫一份等於
+ * 讓同一件事有兩套規則,而且新的那套一定會漏掉連帶處理。
+ */
+async function deleteFixTarget() {
+  const row = [...document.querySelectorAll(".dp-row")]
+    .find((r) => Number(r.dataset.problem) === fixingEventId);
+  const who = row?.querySelector(".dp-t")?.textContent || "這頭母豬";
+  const what = row?.querySelector(".dp-w")?.textContent || "";
+
+  // 不可逆,所以照這個專案處理刪除的既有做法問一次(見 deleteAccount)。
+  if (!window.confirm(
+    `確定要刪掉這筆記錄嗎?
+
+${who}:${what}
+
+刪掉不能復原。`)) return;
+
+  const { ok, data } = await api(`/api/sow-events/${fixingEventId}`,
+                                 { method: "DELETE" });
+  if (!ok) {
+    const err = $("dpFixErr");
+    err.textContent = data.error || "刪不掉";
+    return err.classList.remove("is-hidden");
+  }
+
+  $("dpFixForm").classList.add("is-hidden");
+  showBanner("已刪除這筆記錄", "ok");
+  await Promise.all([reloadDataProblems(), reloadSows(), reloadRecent(),
+                     reloadTasks(), reloadAlerts()]);
 }
 
 async function submitFix() {
