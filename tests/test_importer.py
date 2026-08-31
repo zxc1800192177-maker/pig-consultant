@@ -8,6 +8,7 @@ CSV 是 Big5,而用錯編碼不會報錯,只會產生看起來像資料損壞的
 那個假象曾經被誤判成「5 筆欄位錯位」寫進規格(見 specs/v2-facts.md 第 8 條)。
 """
 
+import json
 from datetime import date
 
 import pytest
@@ -522,3 +523,189 @@ class TestSemenCollectionsAreImported:
 
         boar = store.find_boar_by_tag(farm_id, "D6")
         assert len(store.list_boar_events(farm_id, boar["id"])) == 1
+
+
+class TestBackupRestore:
+    """完整備份要放得回去。
+
+    匯出的備份原本讀不進匯入畫面 —— 使用者拿自己剛存下來的檔案想還原,
+    得到的是「452,266 行無法解析」。備份存得出來卻放不回去,等於沒有備份。
+
+    這一組測的核心只有一件事:**匯出 → 還原 → 再匯出,內容要一模一樣。**
+    只斷言筆數相同是不夠的,少一個 detail 欄位或把 excluded 弄丟,筆數
+    照樣對得上。
+    """
+
+    def _farm(self):
+        store = InMemoryStore()
+        return store, store.create_farm("測試場")
+
+    def _backup(self, **over):
+        data = {
+            "farmName": "測試場",
+            "exportedAt": "2026-08-31",
+            "sows": [
+                {"id": 1, "earTag": "2580", "breed": "LY", "parity": 3,
+                 "status": "active", "penId": 7, "sireTag": "B1", "damTag": "M9",
+                 "entryDate": "2024-03-01", "birthDate": "2023-08-10",
+                 "isUnknown": False},
+                # 已淘汰的豬,耳號帶著離群年份後綴
+                {"id": 2, "earTag": "1183-D115", "breed": "LY", "parity": 6,
+                 "status": "culled", "penId": None, "sireTag": "", "damTag": "",
+                 "entryDate": "2020-01-01", "birthDate": None, "isUnknown": False},
+            ],
+            "boars": [{"id": 9, "earTag": "B1", "breed": "D", "status": "active",
+                       "entryDate": "2023-01-05", "sireTag": "", "damTag": ""}],
+            "events": [
+                {"id": 10, "sowId": 1, "earTag": "2580", "type": "MT",
+                 "date": "2026-01-10", "excluded": False,
+                 "detail": {"boar_tag": "B1", "estrus_stability": "stable"}},
+                {"id": 11, "sowId": 1, "earTag": "2580", "type": "MV",
+                 "date": "2026-04-20", "excluded": False,
+                 "detail": {"pen_id": 7, "pen_name": "A-12", "zone": "farrowing"}},
+                {"id": 12, "sowId": 1, "earTag": "2580", "type": "FW",
+                 "date": "2026-05-04", "excluded": False,
+                 "detail": {"born_alive": 12, "stillborn": 1, "raised": 13,
+                            "assisted": True}},
+                {"id": 13, "sowId": 1, "earTag": "2580", "type": "WN",
+                 "date": "2026-05-25", "excluded": False,
+                 "detail": {"weaned": 11, "wean_score": 4, "hernia": True}},
+                {"id": 14, "sowId": 2, "earTag": "1183-D115", "type": "FW",
+                 "date": "2025-06-08", "excluded": True,
+                 "detail": {"born_alive": 56}},
+                {"id": 15, "sowId": 2, "earTag": "1183-D115", "type": "SAL",
+                 "date": "2026-02-01", "excluded": False,
+                 "detail": {"reason": "年齡太大"}},
+            ],
+            "boarEvents": [
+                {"id": 90, "boarId": 9, "earTag": "B1", "type": "SC",
+                 "date": "2026-02-02", "detail": {"volume": 250, "motility": 80}},
+            ],
+            "marketDeaths": [
+                {"id": 5, "date": "2026-03-03",
+                 "detail": {"reason": "熱緊迫", "weight_kg": 92.5}},
+            ],
+            "pens": [{"id": 7, "name": "A-12", "zone": "farrowing"},
+                     {"id": 8, "name": "B-03", "zone": "gestation"}],
+            "customTasks": [{"name": "產房消毒", "startDate": "2026-01-01",
+                             "repeat": "weekly"}],
+            "settings": {"gestation_days": 115},
+        }
+        data.update(over)
+        return json.dumps(data, ensure_ascii=False)
+
+    def test_backup_is_told_apart_from_a_pigchamp_file(self):
+        assert importer.looks_like_backup(self._backup())
+        assert not importer.looks_like_backup(MATE)
+        assert not importer.looks_like_backup("")
+
+    def test_a_file_that_is_not_a_backup_says_so(self):
+        """訊息要講得出是什麼問題 —— 「解析失敗」對使用者沒有用。"""
+        with pytest.raises(ValueError, match="讀得開"):
+            importer.parse_backup("{ 這不是 JSON")
+        with pytest.raises(ValueError, match="完整備份"):
+            importer.parse_backup('{"hello": 1}')
+
+    def test_everything_comes_back(self):
+        store, farm = self._farm()
+        stats = importer.restore_backup(store, farm,
+                                        importer.parse_backup(self._backup()))
+        assert stats["sows"] == 2
+        assert stats["events"] == 6
+        assert stats["boars"] == 1
+        assert stats["boarEvents"] == 1
+        assert stats["marketDeaths"] == 1
+        assert stats["pens"] == 2
+        assert stats["customTasks"] == 1
+
+    def test_details_survive_untouched(self):
+        """匯入那條路會清洗欄位;還原不可以 —— 備份存的已經是最終形態。"""
+        store, farm = self._farm()
+        importer.restore_backup(store, farm, importer.parse_backup(self._backup()))
+        wean = [e for e in store.list_sow_events(farm) if e["event_type"] == "WN"][0]
+        assert wean["detail"] == {"weaned": 11, "wean_score": 4, "hernia": True}
+
+    def test_the_year_suffix_is_not_added_twice(self):
+        """1183-D115 已經是離群後的耳號。走記錄事件那條路還原的話,系統看到
+        淘汰會再加一次,變成 1183-D115-D115,那頭豬就再也對不回原本的記錄。
+        """
+        store, farm = self._farm()
+        importer.restore_backup(store, farm, importer.parse_backup(self._backup()))
+        tags = {s["ear_tag"] for s in store.list_sows(farm)}
+        assert tags == {"2580", "1183-D115"}
+
+    def test_status_and_parity_come_from_the_backup(self):
+        store, farm = self._farm()
+        importer.restore_backup(store, farm, importer.parse_backup(self._backup()))
+        by_tag = {s["ear_tag"]: s for s in store.list_sows(farm)}
+        assert by_tag["1183-D115"]["status"] == "culled"
+        assert by_tag["1183-D115"]["parity"] == 6
+        assert by_tag["2580"]["parity"] == 3
+
+    def test_excluded_events_stay_excluded(self):
+        """那筆 56 隻的離群記錄當初被判為不納入統計。還原後又納進去的話,
+        使用者得再判斷一次,而且中間的月報數字會悄悄變掉。
+        """
+        store, farm = self._farm()
+        importer.restore_backup(store, farm, importer.parse_backup(self._backup()))
+        odd = [e for e in store.list_sow_events(farm)
+               if (e.get("detail") or {}).get("born_alive") == 56]
+        assert len(odd) == 1
+        assert odd[0]["excluded"] is True
+
+    def test_pen_ids_are_remapped_not_copied(self):
+        """備份裡的 pen_id 是舊資料庫的流水號,還原後一定是另一組。照抄的話
+        母豬會指向一個不存在的欄位,產房頁看起來就是空的。
+        """
+        store, farm = self._farm()
+        importer.restore_backup(store, farm, importer.parse_backup(self._backup()))
+        pens = {p["name"]: p["id"] for p in store.list_pens(farm)}
+        sow = [s for s in store.list_sows(farm) if s["ear_tag"] == "2580"][0]
+        assert sow["pen_id"] == pens["A-12"]
+        move = [e for e in store.list_sow_events(farm) if e["event_type"] == "MV"][0]
+        assert move["detail"]["pen_id"] == pens["A-12"]
+
+    def test_settings_and_custom_tasks_return(self):
+        """事件都在、參數卻回到預設值的話,還原出來的是另一座牧場。"""
+        store, farm = self._farm()
+        importer.restore_backup(store, farm, importer.parse_backup(self._backup()))
+        assert store.get_farm_settings(farm)["gestation_days"] == 115
+        assert [t["name"] for t in store.list_custom_tasks(farm)] == ["產房消毒"]
+
+    def test_restoring_twice_does_not_double_anything(self):
+        store, farm = self._farm()
+        text = self._backup()
+        importer.restore_backup(store, farm, importer.parse_backup(text))
+        before = len(store.list_sow_events(farm))
+        again = importer.restore_backup(store, farm, importer.parse_backup(text))
+        assert again["sows"] == 0, "耳號已經在場,不該再建一次"
+        assert len(store.list_sows(farm)) == 2
+        assert len(store.list_sow_events(farm)) == before
+        assert len(store.list_pens(farm)) == 2
+        assert len(store.list_custom_tasks(farm)) == 1
+
+    def test_unreadable_rows_are_skipped_and_counted(self):
+        """壞掉的個別欄位不該讓整份還原失敗 —— 剩下的三萬筆還是要回得來。"""
+        bad = json.loads(self._backup())
+        bad["events"].append({"id": 99, "sowId": 1, "type": "???",
+                              "date": "2026-01-01", "detail": {}})
+        bad["events"].append({"id": 98, "sowId": 1, "type": "MT",
+                              "date": "不是日期", "detail": {}})
+        bad["sows"].append({"id": 3, "earTag": "  "})
+        result = importer.parse_backup(json.dumps(bad, ensure_ascii=False))
+        assert len(result.events) == 6
+        assert len(result.sows) == 2
+        assert len(result.problems) == 3
+        assert importer.summarize_backup(result)["badLineCount"] == 3
+
+    def test_the_preview_says_what_will_come_back(self):
+        summary = importer.summarize_backup(importer.parse_backup(self._backup()))
+        assert summary["kind"] == "backup"
+        assert summary["farmName"] == "測試場"
+        assert summary["exportedAt"] == "2026-08-31"
+        assert summary["sows"] == 2 and summary["events"] == 6
+        assert summary["pens"] == 2 and summary["customTasks"] == 1
+        assert summary["hasSettings"] is True
+        assert summary["excludedCount"] == 1
+        assert summary["dateRange"] == ["2026-01-10", "2026-05-25"] or \
+               summary["dateRange"][0] == "2025-06-08"

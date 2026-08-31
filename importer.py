@@ -461,3 +461,314 @@ def _write_import(store, farm_id: int, result: ParseResult,
     return {"sows": len(tag_to_id), "events": written, "excluded": len(excluded),
             "boars": boars_added, "semenCollections": semen_written,
             "semenCollectionsSkipped": semen_skipped}
+
+
+# ── 完整備份的還原 ────────────────────────────────────────────────
+#
+# 匯出的「完整備份」是這個 app 自己的 JSON,不是 PigCHAMP 的匯出檔。兩者
+# 長得完全不一樣,所以 parse() 讀它會逐行失敗 —— 使用者拿自己剛備份出來的
+# 檔案想放回去,得到的是「452,266 行無法解析」。那等於把備份做成一扇單向
+# 門:存得出來,放不回去,而備份的用途正好就是放回去。
+#
+# 還原**不走 parse()**,因為資料的來源不同:PigCHAMP 的檔案要猜欄位、要
+# 驗證、要挑出可疑值;備份是這個系統自己寫出來的,每個欄位都已經是最終
+# 形態,照原樣放回去就是正確答案。硬塞進同一條路徑,等於在還原時重跑一次
+# 匯入的清洗邏輯,反而把原本好好的資料改掉。
+
+# 還原認得的事件類型。跟記錄時的白名單分開列:備份裡可能有這個版本的表單
+# 已經拿掉、但資料還在的舊事件,那些照樣要放得回去。
+KNOWN_RESTORE_EVENTS = frozenset(set(EVENT_CODES.values()) | {"MV", "MKD"})
+
+# 備份至少要有這兩個陣列才算數。少了它們就不是這個系統匯出的東西,
+# 與其猜著寫進去,不如講清楚。
+BACKUP_KEYS = ("sows", "events")
+
+
+def looks_like_backup(text: str) -> bool:
+    """這份內容是完整備份還是 PigCHAMP 匯出檔?
+
+    只看開頭一個字元,不解析整份 —— 8MB 的檔案光為了分辨格式就
+    json.loads 一次太浪費。PigCHAMP 的檔案每一行都是 `耳號|代碼|日期`,
+    不可能以 `{` 開頭。
+    """
+    return text.lstrip()[:1] == "{"
+
+
+class BackupResult(NamedTuple):
+    farm_name: str
+    exported_at: str
+    sows: List[dict]
+    boars: List[dict]
+    events: List[dict]
+    boar_events: List[dict]
+    market_deaths: List[dict]
+    pens: List[dict]
+    custom_tasks: List[dict]
+    settings: dict
+    problems: List[str]
+
+
+def _parse_iso(text) -> Optional[date]:
+    if isinstance(text, date):
+        return text
+    try:
+        return date.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_backup(text: str) -> BackupResult:
+    """讀一份完整備份。**不寫入任何東西。**
+
+    壞掉的個別欄位收進 problems 而不是拋例外 —— 使用者上傳什麼都不可信
+    (憲法第四條),就算它理論上是我們自己寫出來的格式。只有整份檔案根本
+    不是備份時才拋,那種情況繼續往下做沒有意義。
+    """
+    problems = []
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        raise ValueError("這不是一份讀得開的備份檔(%s)" % e)
+    if not isinstance(data, dict):
+        raise ValueError("這不是一份完整備份(最外層不是物件)")
+    missing = [k for k in BACKUP_KEYS if not isinstance(data.get(k), list)]
+    if missing:
+        raise ValueError("這不是這個系統匯出的完整備份(缺少 %s)"
+                         % "、".join(missing))
+
+    def rows(key):
+        value = data.get(key)
+        if not isinstance(value, list):
+            return []
+        return [r for r in value if isinstance(r, dict)]
+
+    sows = []
+    for s in rows("sows"):
+        if str(s.get("earTag") or "").strip():
+            sows.append(s)
+        else:
+            problems.append("有一頭母豬沒有耳號,略過")
+
+    known_ids = {s["id"] for s in sows if isinstance(s.get("id"), int)}
+    known_tags = {str(s["earTag"]).strip() for s in sows}
+    events = []
+    for e in rows("events"):
+        if e.get("type") not in KNOWN_RESTORE_EVENTS:
+            problems.append("不認得的事件類型 %r,略過" % (e.get("type"),))
+        elif _parse_iso(e.get("date")) is None:
+            problems.append("日期讀不出來(%r),略過" % (e.get("date"),))
+        elif (e.get("sowId") not in known_ids
+              and str(e.get("earTag") or "").strip() not in known_tags):
+            problems.append("有一筆事件對不到任何一頭母豬,略過")
+        else:
+            events.append(e)
+
+    settings = data.get("settings")
+    return BackupResult(
+        farm_name=str(data.get("farmName") or ""),
+        exported_at=str(data.get("exportedAt") or ""),
+        sows=sows,
+        boars=rows("boars"),
+        events=events,
+        boar_events=[e for e in rows("boarEvents")
+                     if _parse_iso(e.get("date")) is not None],
+        market_deaths=[d for d in rows("marketDeaths")
+                       if _parse_iso(d.get("date")) is not None],
+        pens=rows("pens"),
+        custom_tasks=rows("customTasks"),
+        settings=settings if isinstance(settings, dict) else {},
+        problems=problems,
+    )
+
+
+def summarize_backup(result: BackupResult) -> dict:
+    """預覽用。刻意跟 summarize() 回同一組鍵 —— 兩者要回答的是同一個問題
+    (按下去之後會進來什麼),匯入預覽的畫面因此不必為備份再寫一份。
+    """
+    dates = [d for d in (_parse_iso(e.get("date")) for e in result.events) if d]
+    return {
+        "kind": "backup",
+        "farmName": result.farm_name,
+        "exportedAt": result.exported_at,
+        "sows": len(result.sows),
+        "boars": len(result.boars),
+        "events": len(result.events),
+        "boarEvents": len(result.boar_events),
+        "marketDeaths": len(result.market_deaths),
+        "pens": len(result.pens),
+        "customTasks": len(result.custom_tasks),
+        "hasSettings": bool(result.settings),
+        "semenCollections": len([e for e in result.boar_events
+                                 if e.get("type") == "SC"]),
+        "semenCollectionsSkipped": 0,
+        "semenQualityRows": 0,
+        "oddBoarTags": [],
+        "byCode": dict(collections.Counter(e.get("type") for e in result.events)),
+        "dateRange": ([min(dates).isoformat(), max(dates).isoformat()]
+                      if dates else None),
+        # 備份裡的「可疑記錄」在當初匯入時就已經判斷過了,`excluded` 就是
+        # 那次的答案 —— 還原時再問一次,等於要使用者把做過的決定重做一遍。
+        "anomalies": [],
+        "excludedCount": sum(1 for e in result.events if e.get("excluded")),
+        "skipped": {},
+        "badLines": result.problems[:20],
+        "badLineCount": len(result.problems),
+    }
+
+
+def restore_backup(store, farm_id, result: BackupResult, recorded_by=None) -> dict:
+    """把備份放回一座牧場。
+
+    **照原樣寫回去,不重算。** 耳號帶著離群年份後綴(2580-D115)就照樣
+    存 —— 所以不能走「記錄一筆淘汰事件」那條路,那條路看到淘汰會再加一次
+    後綴,變成 2580-D115-D115。胎次與狀態也直接用備份裡的值,不從事件重
+    推:備份存的是當時系統算好的答案,重推只是多一個出錯的機會。
+
+    整段包在 store.batch() 裡,理由跟 import_into 一樣 —— 三萬筆事件各自
+    連一次資料庫的話,PostgresStore 上要跑幾十分鐘。
+    """
+    with store.batch() as store:
+        return _write_backup(store, farm_id, result, recorded_by)
+
+
+def _write_backup(store, farm_id, result: BackupResult, recorded_by=None) -> dict:
+    existing_sows = {s["ear_tag"]: s["id"] for s in store.list_sows(farm_id)}
+    existing_boars = {b["ear_tag"]: b["id"] for b in store.list_boars(farm_id)}
+
+    # 產房欄位要先建,母豬的 pen_id 才有東西可以指。備份裡的 id 是舊資料庫
+    # 的流水號,還原後一定是另一組,所以用「區域 + 編號」對應而不是 id。
+    pen_map = {(p["zone"], p["name"]): p["id"] for p in store.list_pens(farm_id)}
+    old_pen = {}
+    pens_added = 0
+    for p in result.pens:
+        name = str(p.get("name") or "").strip()
+        zone = p.get("zone") or "farrowing"
+        if not name:
+            continue
+        if (zone, name) not in pen_map:
+            pen_map[(zone, name)] = store.add_pen(farm_id, name, zone)
+            pens_added += 1
+        if isinstance(p.get("id"), int):
+            old_pen[p["id"]] = pen_map[(zone, name)]
+
+    sow_map = {}
+    sows_added = 0
+    for s in result.sows:
+        tag = str(s["earTag"]).strip()
+        sow_id = existing_sows.get(tag)
+        if sow_id is None:
+            sow_id = store.add_sow(
+                farm_id, tag,
+                entry_date=_parse_iso(s.get("entryDate")),
+                birth_date=_parse_iso(s.get("birthDate")),
+                breed=s.get("breed") or "",
+                sire_tag=s.get("sireTag") or "",
+                dam_tag=s.get("damTag") or "",
+                created_by=recorded_by,
+                is_unknown=bool(s.get("isUnknown")),
+            )
+            sows_added += 1
+        store.update_sow(farm_id, sow_id,
+                         parity=s.get("parity") or 0,
+                         status=s.get("status") or "active",
+                         pen_id=old_pen.get(s.get("penId")))
+        if isinstance(s.get("id"), int):
+            sow_map[s["id"]] = sow_id
+        sow_map[tag] = sow_id
+
+    boar_map = {}
+    boars_added = 0
+    for b in result.boars:
+        tag = str(b.get("earTag") or "").strip()
+        if not tag:
+            continue
+        boar_id = existing_boars.get(tag)
+        if boar_id is None:
+            boar_id = store.add_boar(
+                farm_id, tag, entry_date=_parse_iso(b.get("entryDate")),
+                breed=b.get("breed") or "", sire_tag=b.get("sireTag") or "",
+                dam_tag=b.get("damTag") or "", created_by=recorded_by)
+            boars_added += 1
+        if b.get("status") and b["status"] != "active":
+            store.update_boar(farm_id, boar_id, status=b["status"])
+        if isinstance(b.get("id"), int):
+            boar_map[b["id"]] = boar_id
+        boar_map[tag] = boar_id
+
+    # 同一頭、同一天、同樣內容的記錄用 seq 區分,跟匯入同一個做法 ——
+    # 同一天死兩隻仔豬是真的兩筆,不是重複輸入(見 db.py 的 seq 欄位)。
+    seen = collections.Counter()
+    written = excluded = 0
+    for e in result.events:
+        sow_id = sow_map.get(e.get("sowId"))
+        if sow_id is None:
+            sow_id = sow_map.get(str(e.get("earTag") or "").strip())
+        if sow_id is None:
+            continue
+        detail = e.get("detail") if isinstance(e.get("detail"), dict) else {}
+        if detail.get("pen_id") in old_pen:
+            detail = dict(detail, pen_id=old_pen[detail["pen_id"]])
+        when = _parse_iso(e["date"])
+        key = (sow_id, e["type"], when,
+               json.dumps(detail, sort_keys=True, ensure_ascii=False))
+        seq = seen[key]
+        seen[key] += 1
+        event_id = store.add_sow_event(farm_id, sow_id, e["type"], when, detail,
+                                       recorded_by=recorded_by, seq=seq)
+        if e.get("excluded"):
+            store.set_event_excluded(farm_id, event_id, True)
+            excluded += 1
+        written += 1
+
+    existing_boar_keys = {
+        (be["boar_id"], be["event_type"], be["event_date"],
+         json.dumps(be.get("detail") or {}, sort_keys=True, ensure_ascii=False))
+        for be in store.list_boar_events(farm_id)}
+    boar_written = 0
+    for e in result.boar_events:
+        boar_id = boar_map.get(e.get("boarId"))
+        if boar_id is None:
+            boar_id = boar_map.get(str(e.get("earTag") or "").strip())
+        if boar_id is None:
+            continue
+        detail = e.get("detail") if isinstance(e.get("detail"), dict) else {}
+        when = _parse_iso(e["date"])
+        key = (boar_id, e["type"], when,
+               json.dumps(detail, sort_keys=True, ensure_ascii=False))
+        if key in existing_boar_keys:
+            continue
+        store.add_boar_event(farm_id, boar_id, e["type"], when, detail,
+                             recorded_by=recorded_by)
+        existing_boar_keys.add(key)
+        boar_written += 1
+
+    deaths = 0
+    for d in result.market_deaths:
+        detail = d.get("detail") if isinstance(d.get("detail"), dict) else {}
+        store.add_market_death(
+            farm_id, _parse_iso(d["date"]),
+            reason=detail.get("reason") or d.get("reason") or "",
+            weight_kg=detail.get("weight_kg", d.get("weightKg")),
+            recorded_by=recorded_by)
+        deaths += 1
+
+    existing_tasks = {(t["name"], t["start_date"], t["repeat_rule"])
+                      for t in store.list_custom_tasks(farm_id)}
+    tasks_added = 0
+    for t in result.custom_tasks:
+        name = str(t.get("name") or "").strip()
+        start = _parse_iso(t.get("startDate"))
+        rule = t.get("repeat") or "once"
+        if not name or start is None or (name, start, rule) in existing_tasks:
+            continue
+        store.add_custom_task(farm_id, name, start, rule)
+        existing_tasks.add((name, start, rule))
+        tasks_added += 1
+
+    if result.settings:
+        store.set_farm_settings(farm_id, result.settings)
+
+    return {"sows": sows_added, "events": written, "excluded": excluded,
+            "boars": boars_added, "boarEvents": boar_written,
+            "marketDeaths": deaths, "pens": pens_added,
+            "customTasks": tasks_added, "settings": bool(result.settings)}

@@ -369,12 +369,14 @@
     <div class="card">
       <h2>匯入 PigCHAMP 資料</h2>
       <p class="hint">
-        上傳匯出檔,系統會先解析並列出偵測到的內容與可疑記錄,
+        上傳 PigCHAMP 匯出檔,或這個系統自己匯出的<b>完整備份</b>——
+        兩種都認得,系統會先解析並列出偵測到的內容,
         <b>你確認之後才寫入</b>。
       </p>
       <div class="scan-row" style="margin-top:14px">
         <button type="button" class="btn-soft" id="importPick">選擇檔案</button>
-        <input type="file" id="importFile" accept=".txt,.csv,text/plain" hidden>
+        <input type="file" id="importFile"
+               accept=".txt,.csv,.json,text/plain,application/json" hidden>
       </div>
       <div id="importResult"></div>
     </div>

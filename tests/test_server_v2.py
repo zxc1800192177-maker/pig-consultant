@@ -2599,3 +2599,91 @@ class TestExport:
         """檔名帶日期,才分得出手上這幾份是哪天匯的。"""
         app, owner, _ = farm
         assert app.handle_get("/api/export", owner)[1]["exportedAt"]
+
+
+class TestBackupGoesBackIn:
+    """匯出的完整備份要能從匯入的同一個入口放回去。
+
+    這是端到端的那條線:匯出 → 上傳 → 預覽 → 確認 → 再匯出,兩份要一樣。
+    importer 那邊測的是還原本身,這裡測的是「使用者真的走得到」。
+    """
+
+    def _seed(self, app, token):
+        sow_id = _post(app, "/api/sows",
+                       {"earTag": "2580", "breed": "LY"}, token)[1]["id"]
+        for code, when, detail in (
+            ("MT", "2026-01-10", {"boar_tag": "B1"}),
+            ("FW", "2026-05-04", {"born_alive": 12, "stillborn": 1}),
+            ("WN", "2026-05-25", {"weaned": 11, "wean_score": 4, "hernia": True}),
+        ):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": code, "date": when,
+                   "detail": detail, "confirm": True}, token)
+        return sow_id
+
+    def test_preview_recognises_a_backup(self, farm):
+        app, owner, _ = farm
+        self._seed(app, owner)
+        backup = app.handle_get("/api/export", owner)[1]
+
+        st, preview = _post(app, "/api/import/preview",
+                            {"content": json.dumps(backup, default=str)}, owner)
+        assert st == 200, preview
+        assert preview["kind"] == "backup"
+        assert preview["sows"] == 1 and preview["events"] == 3
+
+    def test_a_backup_restores_into_an_empty_farm(self, farm):
+        app, owner, _ = farm
+        self._seed(app, owner)
+        backup = app.handle_get("/api/export", owner)[1]
+        text = json.dumps(backup, default=str)
+
+        other = _owner(app, "bob")
+        st, done = _post(app, "/api/import", {"content": text}, other)
+        assert st == 200, done
+        assert done["kind"] == "backup"
+
+        restored = app.handle_get("/api/export", other)[1]
+        assert [s["earTag"] for s in restored["sows"]] == ["2580"]
+        assert [(e["type"], e["date"]) for e in restored["events"]] \
+            == [(e["type"], e["date"]) for e in backup["events"]]
+        assert [e["detail"] for e in restored["events"]] \
+            == [e["detail"] for e in backup["events"]]
+
+    def test_the_settings_come_back_too(self, farm):
+        """事件都在、生產參數卻回到預設值的話,推算出來的工作全部會偏掉。"""
+        app, owner, _ = farm
+        _post(app, "/api/settings", {"settings": {"gestation_days": 115}}, owner)
+        self._seed(app, owner)
+        text = json.dumps(app.handle_get("/api/export", owner)[1], default=str)
+
+        other = _owner(app, "carol")
+        _post(app, "/api/import", {"content": text}, other)
+        page = app.handle_get("/api/settings", other)[1]
+        assert page["settings"]["gestation_days"] == 115
+        # 只有他真的改過的那一項算「自訂」。備份把補完預設值的整份存進去
+        # 的話,這裡會冒出十幾項使用者從沒動過的設定。
+        assert page["custom"] == ["gestation_days"]
+
+    def test_a_pigchamp_file_still_works(self, farm):
+        """兩種格式共用一個入口,不能因為認得備份就讀不懂原本的匯出檔。"""
+        app, owner, _ = farm
+        st, preview = _post(app, "/api/import/preview",
+                            {"content": "1183|MT|20260203|D6"}, owner)
+        assert st == 200
+        assert preview.get("kind") != "backup"
+        assert preview["events"] == 1
+
+    def test_a_broken_json_says_what_is_wrong(self, farm):
+        app, owner, _ = farm
+        st, body = _post(app, "/api/import/preview", {"content": '{"nope": 1}'}, owner)
+        assert st == 400
+        assert "完整備份" in body["error"]
+
+    def test_worker_still_cannot_restore(self, farm):
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        st, body = _post(app, "/api/import",
+                         {"content": '{"sows": [], "events": []}'}, worker)
+        assert st == 403
+        assert body["reason"] == "owner_only"

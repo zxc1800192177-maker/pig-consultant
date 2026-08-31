@@ -1279,6 +1279,35 @@ async function previewImport(file) {
   const codes = Object.entries(data.byCode).sort((a, b) => b[1] - a[1])
     .map(([c, n]) => `${escapeHtml(eventName(c))} ${n}`).join(" ・ ");
 
+  // 完整備份走另一段畫面。它跟 PigCHAMP 匯出檔要回答的問題不同:那邊是
+  // 「這個陌生的檔案解析出什麼」,備份是「這座牧場會被還原成什麼樣子」
+  // —— 產房欄位、自訂工作、生產參數都會跟著回來,可疑記錄則不必再問一次
+  // (當初匯入時就判斷過了,答案存在 excluded 裡)。
+  if (data.kind === "backup") {
+    $("importResult").innerHTML = `
+      <div class="notice notice-info">
+        這是一份<b>完整備份</b>${data.exportedAt ? `,${escapeHtml(data.exportedAt)} 匯出` : ""}${
+          data.farmName ? `<br>原本的牧場:${escapeHtml(data.farmName)}` : ""}
+        <br>會還原 <b>${data.sows}</b> 頭母豬、<b>${data.boars}</b> 頭公豬、
+        <b>${data.events}</b> 筆事件
+        ${data.dateRange ? `<br>${data.dateRange[0]} ~ ${data.dateRange[1]}` : ""}
+        <br><span class="hint">${codes}</span>
+        ${data.boarEvents ? `<br><span class="hint">公豬記錄 ${data.boarEvents} 筆</span>` : ""}
+        ${data.marketDeaths ? `<br><span class="hint">肉豬死亡 ${data.marketDeaths} 筆</span>` : ""}
+        ${data.pens || data.customTasks || data.hasSettings ? `<br><span class="hint">${
+          [data.pens ? `產房欄位 ${data.pens} 個` : "",
+           data.customTasks ? `自訂工作 ${data.customTasks} 項` : "",
+           data.hasSettings ? "生產參數" : ""].filter(Boolean).join(" ・ ")}也會一起還原</span>` : ""}
+        ${data.excludedCount ? `<br><span class="hint">其中 ${data.excludedCount} 筆維持不納入統計</span>` : ""}
+        ${data.badLineCount ? `<br><span class="hint">${data.badLineCount} 筆讀不出來,會略過</span>` : ""}
+      </div>
+      <p class="hint" style="margin-top:12px">
+        已經在場的耳號不會重複建立,同一份備份還原兩次也不會變成兩倍資料。
+      </p>
+      <button class="submit" id="importConfirm">確認還原</button>`;
+    return;
+  }
+
   $("importResult").innerHTML = `
     <div class="notice notice-info">
       偵測到 <b>${data.sows}</b> 頭母豬、<b>${data.boars}</b> 頭公豬、
@@ -1332,15 +1361,21 @@ async function commitImport() {
       `<div class="notice notice-warn">${escapeHtml(data.error || "匯入失敗")}</div>`;
     return;
   }
-  $("importResult").innerHTML = `
-    <div class="notice notice-good">匯入完成:${data.sows} 頭母豬、${data.events} 筆事件${
-      data.semenCollections ? `、${data.semenCollections} 筆採精記錄` : ""}${
-      data.excluded ? `,其中 ${data.excluded} 筆不納入統計` : ""}。</div>`;
+  $("importResult").innerHTML = data.kind === "backup"
+    ? `<div class="notice notice-good">還原完成:${data.sows} 頭母豬、${
+        data.events} 筆事件${data.boarEvents ? `、${data.boarEvents} 筆公豬記錄` : ""}${
+        data.pens ? `、${data.pens} 個產房欄位` : ""}${
+        data.excluded ? `,其中 ${data.excluded} 筆維持不納入統計` : ""}。</div>`
+    : `<div class="notice notice-good">匯入完成:${data.sows} 頭母豬、${data.events} 筆事件${
+        data.semenCollections ? `、${data.semenCollections} 筆採精記錄` : ""}${
+        data.excluded ? `,其中 ${data.excluded} 筆不納入統計` : ""}。</div>`;
   importText = "";
   // 公豬清單也要重讀 —— 匯入會建立公豬身分(而且現在還會一併帶進
   // 採精記錄),不重讀的話公豬頁的清單跟紀錄頁的耳號選單會停在
   // 匯入前的樣子(第一次匯入時甚至是空的)。
-  await Promise.all([reloadSows(), reloadBoars(), reloadTasks(), reloadAlerts()]);
+  // 還原連產房欄位、自訂工作、生產參數都會回來,所以要重讀的比匯入更多。
+  await Promise.all([reloadSows(), reloadBoars(), reloadTasks(), reloadAlerts(),
+                     reloadRecent(), reloadSettings(), reloadCustomTaskSettings()]);
 }
 
 // ── 匯出 ──

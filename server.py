@@ -1220,6 +1220,20 @@ class Application:
             "events": events,
             "boarEvents": boar_events,
             "marketDeaths": deaths,
+            # 產房欄位、自訂工作、生產參數也是牧場的資料,不是程式設定。
+            # 少了它們,拿備份還原出來的牧場會是一座沒有欄位編號、沒有
+            # 例行工作、參數全回預設值的空殼 —— 事件都在,但這個場怎麼
+            # 運作的資訊沒了。母豬的 penId 也會指向一個不存在的欄位。
+            "pens": [{"id": p["id"], "name": p["name"], "zone": p["zone"]}
+                     for p in self.store.list_pens(farm_id)],
+            "customTasks": [{"name": t["name"], "startDate": _iso(t["start_date"]),
+                             "repeat": t["repeat_rule"]}
+                            for t in self.store.list_custom_tasks(farm_id)],
+            # **只帶這個牧場改過的項目**,不是補完預設值的那一份。
+            # 整份存進備份的話,還原時會把「今天的預設值」寫成這座牧場的
+            # 自訂設定 —— 日後量到更好的預設值就再也套不到它身上,而使用
+            # 者從來沒有改過那幾項(見 _put_settings 的說明)。
+            "settings": self.store.get_farm_settings(farm_id),
         }
 
     def _data_problems(self, token) -> Tuple[int, dict]:
@@ -1341,6 +1355,15 @@ class Application:
         if not isinstance(raw, str) or not raw.strip():
             return 400, {"error": "請選擇要匯入的檔案"}
 
+        # 完整備份跟 PigCHAMP 匯出檔走不同的路。同一個上傳入口分辨兩種
+        # 格式,而不是要使用者自己記得按哪一顆 —— 他手上就是一個檔案,
+        # 「這是什麼格式」是系統該自己看出來的事。
+        if importer.looks_like_backup(raw):
+            try:
+                return 200, importer.summarize_backup(importer.parse_backup(raw))
+            except ValueError as e:
+                return 400, {"error": str(e)}
+
         result = importer.parse(raw, today=_today())
         return 200, importer.summarize(result)
 
@@ -1355,6 +1378,15 @@ class Application:
         raw = payload.get("content")
         if not isinstance(raw, str) or not raw.strip():
             return 400, {"error": "請選擇要匯入的檔案"}
+
+        if importer.looks_like_backup(raw):
+            try:
+                backup = importer.parse_backup(raw)
+            except ValueError as e:
+                return 400, {"error": str(e)}
+            stats = importer.restore_backup(self.store, farm_id, backup,
+                                            recorded_by=user.id)
+            return 200, {**stats, "kind": "backup"}
 
         exclude = payload.get("excludeLines")
         exclude = [n for n in exclude if isinstance(n, int)] if isinstance(exclude, list) else []
