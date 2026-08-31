@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pig-consultant",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set DEV_MEMORY_DB=1 && python server.py"],
+      "port": 8000
+    }
+  ]
+}
