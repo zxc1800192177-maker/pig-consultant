@@ -377,6 +377,29 @@ class TestPwaAssets:
             "app.js 定義了 init() 卻沒有呼叫,整個前端不會啟動"
         )
 
+    def test_account_state_is_applied_in_one_place(self):
+        """登入狀態變了之後要做的事,只能有一份程式碼。
+
+        init() 與 refreshAccount() 原本各寫了一份幾乎相同的收尾(切換卡片
+        的顯示、重讀每一區)。兩份就會走鐘:init() 那份漏掉了三張卡的顯示
+        切換,所以重新整理頁面之後「救援碼」與「刪除帳號」兩張卡直接不見,
+        要登出再登入一次才回得來 —— 沒有錯誤訊息,console 全乾淨。
+
+        這裡盯的是「切換卡片顯示」這個動作只出現一次。它出現兩次,就代表
+        又有人把收尾複製了一份。
+        """
+        js = (WEB_DIR / "app.js").read_text("utf-8")
+        hits = len(re.findall(r'\$\("deleteAccountCard"\)', js))
+        assert hits == 1, (
+            f"deleteAccountCard 的顯示切換出現 {hits} 次;"
+            "登入後的收尾只能有一份(見 applyAccount)"
+        )
+        assert "async function applyAccount()" in js
+        # init() 不可以自己再組一份重讀清單 —— 那正是漏掉一項就外洩上一個
+        # 使用者資料的那條路徑。
+        init_body = re.search(r"async function init[(][)][\s\S]*?\n}", js)
+        assert init_body and "applyAccount()" in init_body.group(0)
+
     def test_no_references_to_removed_v1_elements(self):
         """app.js 不可再碰 v1 已刪掉的元素。
 

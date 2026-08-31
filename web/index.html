@@ -379,6 +379,23 @@
       <div id="importResult"></div>
     </div>
 
+    <!-- 只有牧場主看得到,由 JS 控制(整場的資料一次落地是經營層面的事) -->
+    <div class="card is-hidden" id="exportCard">
+      <h2>匯出資料</h2>
+      <p class="hint">
+        母豬、公豬與所有記錄一次帶走。CSV 可以直接用 Excel 開,
+        <b>完整備份</b>則是原封不動的一份,留著以防萬一。
+      </p>
+      <div class="export-btns">
+        <button type="button" class="btn-soft" data-export="events">事件明細</button>
+        <button type="button" class="btn-soft" data-export="sows">母豬名單</button>
+        <button type="button" class="btn-soft" data-export="boars">公豬名單</button>
+        <button type="button" class="btn-soft" data-export="boarEvents">公豬事件</button>
+        <button type="button" class="btn-soft" data-export="backup">完整備份</button>
+      </div>
+      <div id="exportResult"></div>
+    </div>
+
     <div class="card is-hidden" id="customSetCard">
       <div class="card-head">
         <div>

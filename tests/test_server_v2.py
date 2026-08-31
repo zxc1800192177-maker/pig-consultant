@@ -2461,3 +2461,141 @@ class TestRecordingGuard:
         st, body = _post(app, "/api/sow-events", {
             "sowId": sow_id, "type": "FW", "date": "2026-06-01"}, owner)
         assert body["earTag"] == "2580"
+
+
+class TestExport:
+    """匯出:把整個牧場的資料原樣交出來。
+
+    這裡的每一條測的都是同一件事的不同面向 —— **不可以掉東西**。匯出檔
+    少一筆或少一個欄位,使用者拿到的是一份看起來完整、其實缺角的資料,
+    而他沒有任何辦法發現。
+    """
+
+    def _sow(self, app, token, tag="2580"):
+        return _post(app, "/api/sows", {"earTag": tag}, token)[1]["id"]
+
+    def _ev(self, app, token, sow_id, code, when, detail=None):
+        return _post(app, "/api/sow-events", {
+            "sowId": sow_id, "type": code, "date": when,
+            "detail": detail or {}, "confirm": True}, token)
+
+    def test_worker_cannot_export(self, farm):
+        """整場的資料一次落地是經營層面的事,比照月報與匯入。"""
+        app, owner, farm_id = farm
+        worker = _worker(app, farm_id)
+        status, body = app.handle_get("/api/export", worker)
+        assert status == 403
+        assert body["reason"] == "owner_only"
+
+    def test_logged_out_gets_nothing(self):
+        app = _app()
+        assert app.handle_get("/api/export", None)[0] == 401
+
+    def test_every_event_comes_out(self, farm):
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        self._ev(app, owner, sow_id, "MT", "2026-01-10")
+        self._ev(app, owner, sow_id, "FW", "2026-05-04",
+                 {"born_alive": 12, "stillborn": 1})
+        self._ev(app, owner, sow_id, "WN", "2026-05-25",
+                 {"weaned": 11, "wean_score": 4})
+
+        body = app.handle_get("/api/export", owner)[1]
+        assert len(body["events"]) == 3
+        assert [e["type"] for e in body["events"]] == ["MT", "FW", "WN"]
+
+    def test_detail_is_handed_over_whole(self, farm):
+        """聚合過的數字沒有用 —— 使用者要的是自己記進去的那些欄位。"""
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        self._ev(app, owner, sow_id, "MT", "2026-01-10")
+        self._ev(app, owner, sow_id, "FW", "2026-05-04",
+                 {"born_alive": 12, "stillborn": 1, "raised": 13, "assisted": True})
+
+        farrow = [e for e in app.handle_get("/api/export", owner)[1]["events"]
+                  if e["type"] == "FW"][0]
+        assert farrow["detail"] == {"born_alive": 12, "stillborn": 1,
+                                    "raised": 13, "assisted": True}
+
+    def test_events_carry_the_ear_tag(self, farm):
+        """這個檔案會被存下來、隔幾年才打開 —— 到時候內部編號沒有人看得懂。"""
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner, "2580")
+        self._ev(app, owner, sow_id, "MT", "2026-01-10")
+        assert app.handle_get("/api/export", owner)[1]["events"][0]["earTag"] == "2580"
+
+    def test_excluded_events_are_still_there(self, farm):
+        """不納入統計不等於刪掉。少了它,使用者的原始記錄就真的不見了。"""
+        app, owner, farm_id = farm
+        sow_id = self._sow(app, owner)
+        event_id = self._ev(app, owner, sow_id, "FW", "2026-05-04",
+                            {"born_alive": 56})[1]["id"]
+        app.store.set_event_excluded(farm_id, event_id, True)
+
+        events = app.handle_get("/api/export", owner)[1]["events"]
+        assert len(events) == 1
+        assert events[0]["excluded"] is True
+
+    def test_exited_sows_are_included(self, farm):
+        """已淘汰的母豬是歷史的一部分,匯出只給在場的等於砍掉過去。"""
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner, "2580")
+        self._ev(app, owner, sow_id, "SAL", "2026-06-01", {"reason": "年齡太大"})
+
+        tags = [s["earTag"] for s in app.handle_get("/api/export", owner)[1]["sows"]]
+        assert len(tags) == 1
+        assert tags[0].startswith("2580")     # 離群會加上民國年後綴
+
+    def test_boars_and_semen_records_come_too(self, farm):
+        app, owner, _ = farm
+        boar_id = _post(app, "/api/boars", {"earTag": "B1"}, owner)[1]["id"]
+        _post(app, "/api/boar-events", {
+            "boarId": boar_id, "type": "SC", "date": "2026-02-02",
+            "detail": {"volume": 250}}, owner)
+
+        body = app.handle_get("/api/export", owner)[1]
+        assert [b["earTag"] for b in body["boars"]] == ["B1"]
+        assert body["boarEvents"][0]["detail"]["volume"] == 250
+        assert body["boarEvents"][0]["earTag"] == "B1"
+
+    def test_market_deaths_look_like_events(self, farm):
+        """肉豬沒有耳號,但仍然是一筆記錄 —— 補上 MKD 就能跟其他事件排在
+        同一張表裡,使用者要的是「這個月死了什麼」,不是三張要自己對的表。
+        """
+        app, owner, _ = farm
+        _post(app, "/api/market-deaths",
+              {"date": "2026-03-03", "reason": "熱緊迫", "weightKg": 92.5}, owner)
+
+        death = app.handle_get("/api/export", owner)[1]["marketDeaths"][0]
+        assert death["type"] == "MKD"
+        assert death["earTag"] == ""
+        assert death["detail"]["reason"] == "熱緊迫"
+
+    def test_another_farm_sees_none_of_it(self, farm):
+        """跨牧場隔離,比照其他每一個端點(憲法第十一條)。"""
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner, "2580")
+        self._ev(app, owner, sow_id, "MT", "2026-01-10")
+
+        other = _owner(app, "bob")
+        body = app.handle_get("/api/export", other)[1]
+        assert body["sows"] == []
+        assert body["events"] == []
+
+    def test_the_response_serializes(self, farm):
+        """日期是 date 物件、肉豬重量是 Decimal —— 兩種 json 都不認得。
+        序列化發生在 Handler 那一層,回 dict 就斷言的測試看不到它。
+        """
+        app, owner, _ = farm
+        sow_id = self._sow(app, owner)
+        self._ev(app, owner, sow_id, "MT", "2026-01-10")
+        _post(app, "/api/market-deaths",
+              {"date": "2026-03-03", "reason": "熱緊迫", "weightKg": 92.5}, owner)
+
+        body = app.handle_get("/api/export", owner)[1]
+        assert json.loads(to_json_bytes(body))["events"][0]["date"] == "2026-01-10"
+
+    def test_it_says_when_it_was_made(self, farm):
+        """檔名帶日期,才分得出手上這幾份是哪天匯的。"""
+        app, owner, _ = farm
+        assert app.handle_get("/api/export", owner)[1]["exportedAt"]

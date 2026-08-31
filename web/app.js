@@ -22,6 +22,9 @@ import {
   hasOtherOption, OTHER_REASON, recordedRow, supportsMultiService, supportsMultiSow,
   targetsBoar, targetsEither, targetsNothing, usesPerSowRows,
 } from "./lib/record.js";
+import {
+  backupJson, boarCsv, boarEventCsv, eventCsv, exportFileName, exportSummary, sowCsv,
+} from "./lib/export.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -87,22 +90,39 @@ let loginRequired = false;
 const LOGGED_OUT = { loggedIn: false, username: null, isGuest: false,
                      role: "owner", isOwner: true };
 
-async function refreshAccount() {
-  const { ok, data } = await api("/api/auth/me");
-  account = ok && data.loggedIn ? data : LOGGED_OUT;
+/** `account` 換了之後要做的每一件事。
+ *
+ * **只有這一份。** init() 與 refreshAccount() 原本各寫一份幾乎一樣的
+ * 程式碼,結果 init() 那份漏掉了下面三張卡的顯示切換 —— 重新整理頁面
+ * 之後,「救援碼」「刪除帳號」兩張卡就不見了,要登出再登入一次才會
+ * 回來,而且沒有任何錯誤提示。同樣的重複也讓「重讀哪些區塊」有兩份
+ * 清單,漏掉一項就是換帳號後那一區留著上一個使用者的資料。
+ */
+async function applyAccount() {
   renderAuthBar();
   applyLoginGate();
   // 沒登入就沒有帳號可刪/可產生救援碼,整張卡收起來而不是留一個
   // 按了會失敗的按鈕。
   $("deleteAccountCard")?.classList.toggle("is-hidden", !account.loggedIn);
   $("recoverySetCard")?.classList.toggle("is-hidden", !account.loggedIn);
+  // 整場的資料一次落地是經營層面的事,跟月報、值得檢視同一類 ——
+  // 員工記得了資料,但不能整包帶走(已確認的設計決定 #17)。
+  // 後端也擋(_export 的 _need_owner),這裡只是不要留一顆按了會失敗的鈕。
+  $("exportCard")?.classList.toggle("is-hidden",
+                                    !account.loggedIn || !account.isOwner);
   // 登入/登出後全部重讀。少列一項的話,換帳號後那一區會留著上一個
   // 使用者的資料 —— 跨牧場的資料外洩就是這樣發生的。
   await Promise.all([
     reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
-    reloadBoars(), reloadRecent(), reloadReview(), reloadDataProblems(), reloadMonthReport(), reloadSettings(),
-    reloadCustomTaskSettings(),
+    reloadBoars(), reloadRecent(), reloadReview(), reloadDataProblems(),
+    reloadMonthReport(), reloadSettings(), reloadCustomTaskSettings(),
   ]);
+}
+
+async function refreshAccount() {
+  const { ok, data } = await api("/api/auth/me");
+  account = ok && data.loggedIn ? data : LOGGED_OUT;
+  await applyAccount();
 }
 
 // 未登入時把功能畫面換成登入引導。
@@ -654,14 +674,11 @@ async function init() {
   }
 
   if (accountsAvailable) {
+    // 登入狀態上面已經跟 health/metrics 一起問過了(那是為了避免畫面
+    // 先顯示完整功能再被登入引導蓋掉的閃動),所以這裡不再問一次,
+    // 直接沿用 —— 其餘的處理跟 refreshAccount() 共用同一份。
     account = me.ok && me.data.loggedIn ? me.data : LOGGED_OUT;
-    renderAuthBar();
-    applyLoginGate();
-    await Promise.all([
-      reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
-      reloadBoars(), reloadRecent(), reloadReview(), reloadDataProblems(), reloadMonthReport(), reloadSettings(),
-    reloadCustomTaskSettings(),
-    ]);
+    await applyAccount();
   }
 }
 
@@ -1083,6 +1100,11 @@ let allSows = [];
 const SOW_LIST_LIMIT = 10;
 
 async function reloadSows() {
+  // 資料動過了,上一份匯出的內容就過期了。這裡是最保險的位置 ——
+  // 每一條會改到記錄的路徑(記錄、收回、修正、刪除、匯入、換帳號)
+  // 最後都會重讀母豬。少清一次的話,使用者記完一筆再按匯出,拿到的
+  // 是不含那筆的舊檔,而他不會發現。
+  exportData = null;
   if (!$("sowList")) return;
   // 未登入時要**清空**,不能只是提早 return —— 提早 return 會把上一個
   // 帳號的母豬留在 allSows 與畫面上(reloadBoars 一直是清空的,這裡
@@ -1321,6 +1343,65 @@ async function commitImport() {
   await Promise.all([reloadSows(), reloadBoars(), reloadTasks(), reloadAlerts()]);
 }
 
+// ── 匯出 ──
+
+const EXPORT_BUILDERS = {
+  events: eventCsv, sows: sowCsv, boars: boarCsv,
+  boarEvents: boarEventCsv, backup: backupJson,
+};
+
+/** 把一段文字交給瀏覽器下載。
+ *
+ * text/csv 而不是 application/octet-stream:手機上前者會讓「用其他 App
+ * 開啟」認得它是表格,後者只會存成一個打不開的檔案。charset 要寫出來 ——
+ * 檔案開頭雖然有 BOM,但有些下載工具只看標頭。
+ */
+function downloadText(filename, text, mime) {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // 立刻 revoke 會讓部分瀏覽器來不及開始下載,拿到一個空檔案。
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+// 整場資料抓一次就夠。五顆按鈕各按一次卻各抓一次全場事件,對免費方案
+// 那台 512MB 的機器是很實在的浪費 —— 那是它之前被 OOM 殺掉的原因。
+let exportData = null;
+
+async function runExport(kind) {
+  const build = EXPORT_BUILDERS[kind];
+  if (!build) return;
+  const box = $("exportResult");
+  const btns = [...document.querySelectorAll("[data-export]")];
+
+  if (!exportData) {
+    box.innerHTML = '<p class="hint">整理中…</p>';
+    btns.forEach((b) => { b.disabled = true; });
+    const { ok, data } = await api("/api/export");
+    btns.forEach((b) => { b.disabled = false; });
+    if (!ok) {
+      box.innerHTML =
+        `<div class="notice notice-warn">${escapeHtml(data.error || "匯出失敗")}</div>`;
+      return;
+    }
+    exportData = data;
+  }
+
+  const name = exportFileName(kind, exportData.exportedAt);
+  downloadText(name, build(exportData),
+               kind === "backup" ? "application/json;charset=utf-8"
+                                 : "text/csv;charset=utf-8");
+  box.innerHTML = `
+    <div class="notice notice-good">
+      已下載 <b>${escapeHtml(name)}</b>
+      <br><span class="hint">${escapeHtml(exportSummary(exportData))}</span>
+    </div>`;
+}
+
 // ── v2 事件接線 ──
 //
 // 一律用事件委派:上面幾個 render 都是整段 innerHTML 重畫,直接綁在元素上
@@ -1406,6 +1487,10 @@ document.addEventListener("click", (e) => {
 });
 
 $("sowSearch")?.addEventListener("input", renderAnimalList);
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-export]");
+  if (btn) runExport(btn.dataset.export);
+});
 $("importPick")?.addEventListener("click", () => $("importFile")?.click());
 $("importFile")?.addEventListener("change", (e) => {
   const file = e.target.files?.[0];

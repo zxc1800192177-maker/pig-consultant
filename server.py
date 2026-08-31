@@ -475,6 +475,8 @@ class Application:
             return self._review(token)
         if route == "/api/data-problems":
             return self._data_problems(token)
+        if route == "/api/export":
+            return self._export(token)
         if route == "/api/monthly-report":
             return self._monthly_report(token, path)
         if route == "/api/settings":
@@ -1162,6 +1164,62 @@ class Application:
         return 200, {
             "settings": schedule.settings_with_defaults(cleaned),
             "custom": sorted(cleaned.keys()),
+        }
+
+    def _export(self, token) -> Tuple[int, dict]:
+        """把整個牧場的資料原樣交出來,一次全部。
+
+        這是「拿得回自己的資料」——不是報表。所以不聚合、不四捨五入、
+        不挑欄位:事件的 detail 整包送出,連 excluded 與 seq 都在。
+        牧場主拿去 Excel 自己算,或當成備份留著,都不會發現少了東西。
+
+        **不分頁、不設上限。** 匯出設了上限就是一份殘缺的備份,而殘缺
+        的備份比沒有備份更危險 —— 出事時才發現少了一截。查全場事件
+        本來就是記錄檢查與月報每次都在做的事,這裡沒有多花什麼。
+
+        只有牧場主能匯出:整場的資料一次落地,那是經營層面的東西
+        (比照月報與匯入,已確認的設計決定 #17)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        sows = self.store.list_sows(farm_id, None)
+        boars = self.store.list_boars(farm_id, None)
+        sow_tag = {s["id"]: s["ear_tag"] for s in sows}
+        boar_tag = {b["id"]: b["ear_tag"] for b in boars}
+
+        # 事件帶上耳號一起送。前端本來也能自己拿 id 對,但這份檔案會被
+        # 存下來、隔幾年才打開 —— 到時候一串內部編號沒有人看得懂,而
+        # 耳號是牧場自己的語言。
+        events = [
+            {**self._event_payload(e), "earTag": sow_tag.get(e["sow_id"], "")}
+            for e in self.store.list_sow_events(farm_id)
+        ]
+        boar_events = [
+            {**self._boar_event_payload(e), "earTag": boar_tag.get(e["boar_id"], "")}
+            for e in self.store.list_boar_events(farm_id)
+        ]
+        # 肉豬死亡沒有耳號(牠們不是這個系統追蹤身分的對象),但形狀跟
+        # 其他事件一致,補上 MKD 這個類型就能跟母豬事件排在同一張表裡 ——
+        # 使用者要的是「這個月死了什麼」,不是三張要自己對起來的表。
+        deaths = [
+            {**self._market_death_payload(d), "type": "MKD", "earTag": ""}
+            for d in self.store.list_market_deaths(farm_id)
+        ]
+
+        farm = self.store.get_farm(farm_id) or {}
+        return 200, {
+            "farmName": farm.get("name") or "",
+            "exportedAt": _iso(_today()),
+            "sows": [self._sow_payload(s) for s in sows],
+            "boars": [self._boar_payload(b) for b in boars],
+            "events": events,
+            "boarEvents": boar_events,
+            "marketDeaths": deaths,
         }
 
     def _data_problems(self, token) -> Tuple[int, dict]:

@@ -8,6 +8,9 @@ export const EVENT_NAMES = {
   MT: "配種", PD: "驗孕", FW: "分娩", WN: "離乳", PL: "仔豬損失",
   GA: "進場", SAL: "淘汰", DTH: "死亡", AB: "流產",
   FON: "寄養移入", FOF: "寄養移出", MV: "移欄", SC: "採精",
+  // 肉豬死亡不掛在任何一頭母豬身上,所以不會出現在母豬卡的時間軸裡 ——
+  // 但匯出的事件表要把牠們跟其他記錄排在一起,那裡需要一個名字。
+  MKD: "肉豬死亡",
 };
 
 export function eventName(code) {

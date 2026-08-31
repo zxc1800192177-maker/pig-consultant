@@ -564,3 +564,18 @@ body { padding-bottom: 96px; }
 }
 .submit:disabled { opacity: .5; cursor: not-allowed; }
 .notice-good { background: var(--good-bg); color: var(--good); }
+
+/* ── 匯出 ── */
+/* 五顆按鈕在 375px 上排成兩欄。單欄會把整張卡拉得很長,一排五顆則每顆
+   窄到看不清字 —— 一行兩顆時「事件明細」四個字剛好放得下。
+   最小高度 44 沿用 .dp-acts 的理由:手指點得到的下限。 */
+.export-btns {
+  display: grid; grid-template-columns: repeat(2, 1fr);
+  gap: 8px; margin-top: 14px;
+}
+.export-btns .btn-soft { min-height: 44px; font-size: 13.5px; }
+/* 完整備份是唯一「拿了就不必再拿別的」的一份,獨佔一整列跟上面四份
+   分開 —— 它們是給人看的表格,這一份是給程式讀的備份,用途不同。 */
+.export-btns .btn-soft[data-export="backup"] { grid-column: 1 / -1; }
+/* 只在真的有訊息時才留空隙,空的時候不要在卡片底下多一段留白。 */
+#exportResult .notice { margin-top: 14px; }
