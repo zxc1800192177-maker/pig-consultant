@@ -1,7 +1,15 @@
-# 這個專案原本刻意不用任何第三方套件(純標準庫)。
-# 唯一的例外是資料庫驅動 —— 帳號系統需要它,而 Python 標準庫沒有
-# Postgres 驅動。除此之外仍然不用框架、不用 ORM,SQL 直接寫在 db.py。
+# 這個專案原本刻意不用任何第三方套件(純標準庫),現在有兩個例外。
 #
+# psycopg:帳號系統需要它,而 Python 標準庫沒有 Postgres 驅動。
 # 沒安裝也不會壞:db.py 對 import 失敗做了處理,沒設 DATABASE_URL 時
 # 帳號功能整個關閉,其餘功能照常運作。
 psycopg[binary]>=3.1
+
+# reportlab:生產性能趨勢分析報告要直接產生 PDF 檔案,不透過瀏覽器列印
+# 對話框(使用者要求 —— 按一顆鈕就要拿到檔案,不是被丟進一個還要自己
+# 操作的系統對話框)。純 Python 排版引擎,不像 weasyprint 需要另外裝
+# cairo/pango 這些系統層級的相依,Render 的容器裝得起來。
+#
+# 沒安裝也不會壞:pdf_report.py 對 import 失敗做了處理,那條路徑關閉,
+# 其餘功能(含 PDF 之外的 CSV 匯出)照常運作 —— 跟 psycopg 同一個原則。
+reportlab>=4.0

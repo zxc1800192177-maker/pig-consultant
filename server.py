@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 import importer
+import pdf_report
 import schedule
 import trend
 from auth import (
@@ -1346,6 +1347,44 @@ class Application:
             "basis": labels.month_report_basis(),
         }
 
+    def _trend_spans(self, farm_id, path):
+        """把 `grain`/`start`/`end` 查詢參數解析成一組期間,JSON 版與 PDF
+        版的趨勢報告端點共用同一份 —— 兩邊都要接受同樣的期別、同樣的
+        預設範圍、同樣的期數上限,分開各寫一份的話,兩條路遲早會為了同一
+        個查詢字串算出不一樣的期間,而使用者完全沒有辦法知道發生了這件事。
+
+        回傳 `(grain, spans, cfg, None)`,錯誤時回傳
+        `(None, None, None, (status, body))`。
+        """
+        grain = _query(path, "grain") or trend.MONTH
+        if grain not in trend.GRAINS:
+            return None, None, None, (400, {"error": f"不認得的期別:{grain}"})
+
+        cfg = self._farm_settings(farm_id)
+        end = _date(_query(path, "end")) or _today()
+        start_raw = _query(path, "start")
+        start = _date(start_raw) if start_raw else None
+        if start_raw and start is None:
+            return None, None, None, (400, {"error": "開始日期格式錯誤,請用 YYYY-MM-DD"})
+        if start is None:
+            start = trend.default_start(end, grain, trend.DEFAULT_PERIODS[grain])
+        if start > end:
+            return None, None, None, (400, {"error": "開始日期不能晚於結束日期"})
+
+        spans = trend.periods(start, end, grain, cfg)
+        # 沒指定 start 時是我們自己往回抓寬算出來的,只留最後幾期 ——
+        # default_start() 刻意抓得比需要的還早,好讓 periods() 切出來的
+        # 期界一定夠數量,多出來的交給這裡捨去。
+        if not start_raw:
+            spans = spans[-trend.DEFAULT_PERIODS[grain]:]
+        if not spans:
+            return None, None, None, (400, {"error": "這個範圍沒有涵蓋任何期間"})
+        if len(spans) > config.MAX_TREND_PERIODS:
+            return None, None, None, (400, {
+                "error": f"期間太多(最多 {config.MAX_TREND_PERIODS} 期),"
+                        "請縮小範圍或改用較粗的期別"})
+        return grain, spans, cfg, None
+
     def _trend_report(self, token, path) -> Tuple[int, dict]:
         """生產性能趨勢報告:同一組指標切成多期並列,附增減。
 
@@ -1360,32 +1399,9 @@ class Application:
         if deny:
             return deny
 
-        grain = _query(path, "grain") or trend.MONTH
-        if grain not in trend.GRAINS:
-            return 400, {"error": f"不認得的期別:{grain}"}
-
-        cfg = self._farm_settings(farm_id)
-        end = _date(_query(path, "end")) or _today()
-        start_raw = _query(path, "start")
-        start = _date(start_raw) if start_raw else None
-        if start_raw and start is None:
-            return 400, {"error": "開始日期格式錯誤,請用 YYYY-MM-DD"}
-        if start is None:
-            start = trend.default_start(end, grain, trend.DEFAULT_PERIODS[grain])
-        if start > end:
-            return 400, {"error": "開始日期不能晚於結束日期"}
-
-        spans = trend.periods(start, end, grain, cfg)
-        # 沒指定 start 時是我們自己往回抓寬算出來的,只留最後幾期 ——
-        # default_start() 刻意抓得比需要的還早,好讓 periods() 切出來的
-        # 期界一定夠數量,多出來的交給這裡捨去。
-        if not start_raw:
-            spans = spans[-trend.DEFAULT_PERIODS[grain]:]
-        if not spans:
-            return 400, {"error": "這個範圍沒有涵蓋任何期間"}
-        if len(spans) > config.MAX_TREND_PERIODS:
-            return 400, {"error": f"期間太多(最多 {config.MAX_TREND_PERIODS} 期),"
-                                  "請縮小範圍或改用較粗的期別"}
+        grain, spans, cfg, err = self._trend_spans(farm_id, path)
+        if err:
+            return err
 
         sows = self.store.list_sows(farm_id, None)
         events = self.store.list_sow_events(farm_id)
@@ -1397,13 +1413,53 @@ class Application:
         farm = self.store.get_farm(farm_id) or {}
         return 200, {
             "grain": grain,
-            "start": _iso(start), "end": _iso(end),
+            "start": _iso(spans[0].start), "end": _iso(spans[-1].end),
             "farmName": farm.get("name") or "",
             "periods": [{"key": p["key"], "label": p["label"],
                         "start": _iso(p["start"]), "end": _iso(p["end"])}
                        for p in report["periods"]],
             "sections": report["sections"],
         }
+
+    def trend_report_pdf(self, token, path):
+        """生產性能趨勢報告的 PDF 版本。回傳 `(status, bytes_or_dict,
+        content_type)` —— 跟其餘端點的 `(status, dict)` 不同形狀,呼叫端
+        (Handler.do_GET)要認得 content_type 是 "application/pdf" 時走
+        二進位輸出那條路,不是塞進 JSON 序列化。
+
+        印的是**畫面上正在看的這段範圍**,不是另外拉一個更寬的範圍 ——
+        使用者按下去的當下預期是「這份報告存成 PDF」,不是「順便換一份
+        更完整的資料」;真要更完整的範圍,前端本來就有下載完整版 CSV。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err[0], err[1], None
+        deny = self._need_owner(user)
+        if deny:
+            return deny[0], deny[1], None
+
+        if not pdf_report.available():
+            # reportlab 是選用套件(見 requirements.txt),沒裝的部署環境
+            # 這條路直接關閉 —— 跟 db.py 對 psycopg 缺席時的處理同一個
+            # 原則:能力不存在就講清楚,不要假裝可以做到。
+            return 503, {"error": "伺服器還沒裝好 PDF 匯出功能"}, None
+
+        grain, spans, cfg, trend_err = self._trend_spans(farm_id, path)
+        if trend_err:
+            return trend_err[0], trend_err[1], None
+
+        sows = self.store.list_sows(farm_id, None)
+        events = self.store.list_sow_events(farm_id)
+        report = trend.trend_report(sows, events, spans, cfg)
+        report["periods"] = [
+            {"key": p["key"], "label": p["label"],
+             "start": _iso(p["start"]), "end": _iso(p["end"])}
+            for p in report["periods"]
+        ]
+
+        farm = self.store.get_farm(farm_id) or {}
+        pdf_bytes = pdf_report.build_pdf(report, farm.get("name") or "", _today())
+        return 200, pdf_bytes, "application/pdf"
 
     def _import_preview(self, payload, token) -> Tuple[int, dict]:
         farm_id, user, err = self._need_farm(token)
@@ -2386,6 +2442,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_pdf(self, status: int, body, content_type: Optional[str]) -> None:
+        """趨勢報告的 PDF 端點專用。`content_type` 不是 "application/pdf"
+        時代表這是一筆錯誤(未登入、非 owner、參數錯誤、reportlab 沒裝) ——
+        那種情形 `body` 仍然是一般的錯誤 dict,照樣走 _send() 序列化成
+        JSON,不能因為這條路徑平常回二進位,就連錯誤訊息都跟著看不懂。
+        """
+        if content_type != "application/pdf":
+            self._send(status, body)
+            return
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        # 檔名交給前端的 <a download> 決定 —— 這裡隨便給一個,大多數
+        # 瀏覽器仍然會用它,只是不影響任何功能。
+        self.send_header("Content-Disposition",
+                         'attachment; filename="trend-report.pdf"')
+        # 跟 API 回應同一個理由(見 _send 的說明):牧場資料不能被瀏覽器
+        # 的磁碟快取用網址當鍵存下來,換帳號登入時才不會端出別人的資料。
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     # 這次回應是不是靜態檔。只有靜態檔要加 Cache-Control —— API 與 SSE
     # 各自送自己的標頭,重複送同一個標頭反而是壞事。
     _serving_static = False
@@ -2418,6 +2496,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
+        # PDF 是二進位內容,不能走 _send() 那條假設回應永遠是 JSON dict
+        # 的路 —— 跟 do_POST 對 /api/advise-chat 走 SSE 是同一個理由,
+        # 特定路徑的傳輸格式不一樣,就在這裡分流,不硬塞進共用的形狀。
+        if self.path.startswith("/api/trend-report/pdf"):
+            self._send_pdf(*APP.trend_report_pdf(self._session_token(), self.path))
+            return
         if self.path.startswith("/api/"):
             self._send(*APP.handle_get(self.path, self._session_token()))
             return

@@ -14,10 +14,7 @@ import {
   changeTone,
   trendCsv,
   trendCsvFileName,
-  trendPrintChange,
-  trendPrintReport,
-  trendPrintSection,
-  trendPrintValue,
+  trendPdfFileName,
   trendReportGrid,
   trendSectionTable,
   trendValue,
@@ -143,69 +140,25 @@ describe("trendReportGrid", () => {
   });
 });
 
-describe("列印/PDF", () => {
-  // 這組測的核心是同一件事貫穿三個函式:列印離開了這個 app 的樣式表
-  // (使用者存好的 PDF 幾年後打開,不會帶著這個網站的 CSS),所以顏色跟
-  // 「沒有記錄」都不能靠 class 名稱間接指定,要直接是看得到的行內樣式
-  // 或文字,不依賴任何外部定義。
+describe("trendPdfFileName", () => {
+  // PDF 現在是伺服器直接產生的檔案(見 pdf_report.py),不再是瀏覽器
+  // 列印對話框那條路 —— 這裡只剩檔名要不要對,版面內容的測試搬到
+  // tests/test_pdf_report.py 那邊,跟著真正產生 PDF 的程式碼一起測。
 
-  it("trendPrintValue 沒有記錄印 —,顏色是行內樣式不是 class", () => {
-    assert.match(trendPrintValue(null, 1, "隻"), /style="color:#999"/);
-    assert.match(trendPrintValue(null, 1, "隻"), />—</);
-    assert.doesNotMatch(trendPrintValue(null, 1, "隻"), /class=/);
+  it("期別轉成中文,帶著起訖日期", () => {
+    assert.equal(trendPdfFileName("month", "2025-09-01", "2026-08-31"),
+      "豬豬顧問-生產趨勢月報-2025-09-01~2026-08-31.pdf");
   });
 
-  it("trendPrintValue 有數字就格式化,不帶多餘的 <span class=\"u\">", () => {
-    assert.equal(trendPrintValue(12.345, 1, "隻"), "12.3隻");
+  it("認不得的期別就用原始字串,不讓檔名整個消失", () => {
+    assert.match(trendPdfFileName("fortnight", "2025-01-01", "2025-02-01"),
+      /fortnight/);
   });
 
-  it("trendPrintChange 的顏色是印在紙上也看得出來的行內樣式", () => {
-    const good = trendPrintChange({ delta: 1.2, pct: 10.9, improved: true }, "隻", 1);
-    const bad = trendPrintChange({ delta: 2.4, pct: 34.3, improved: false }, "%", 1);
-    assert.match(good, /style="color:#1a7f37/);
-    assert.match(bad, /style="color:#c0392b/);
-    assert.doesNotMatch(good, /class=/);
-  });
-
-  it("trendPrintChange 沒有 change 印 —,不是空白或丟例外", () => {
-    assert.match(trendPrintChange(null, "隻", 1), /—/);
-  });
-
-  it("trendPrintSection 標題列跟畫面版一樣是指標 + 每期 + 變化", () => {
-    const html = trendPrintSection(REPORT.sections[0], PERIODS);
-    assert.match(html, /<th>指標<\/th>/);
-    assert.match(html, /<th>2025 年<\/th>/);
-    assert.match(html, /<th>變化<\/th>/);
-    assert.match(html, /窩均活仔數/);
-  });
-
-  it("trendPrintReport 抬頭帶牧場名稱、期間範圍與產生時間", () => {
-    const html = trendPrintReport(REPORT, { farmName: "合億畜牧場", generatedAt: "2026-09-03" });
-    assert.match(html, /豬豬顧問 生產性能趨勢分析報告/);
-    assert.match(html, /合億畜牧場/);
-    assert.match(html, /2025 年 ~ 2026 年/);
-    assert.match(html, /共 2 期/);
-    assert.match(html, /產生於 2026-09-03/);
-  });
-
-  it("trendPrintReport 不放目標值欄 —— 全國常模只服務生產健檢,不服務這份報告", () => {
-    // 這份報告是牧場跟自己的歷史比,不跟全國常模比(已確認的設計決定
-    // #3)。跟畫面版同一份表頭,不多一欄。
-    const html = trendPrintReport(REPORT, {});
-    const headerRow = html.match(/<thead>.*?<\/thead>/s)[0];
-    assert.doesNotMatch(headerRow, /目標值/);
-  });
-
-  it("trendPrintReport 沒有任何區段時講清楚是沒有記錄", () => {
-    const html = trendPrintReport({ periods: PERIODS, sections: [] }, {});
-    assert.match(html, /沒有記錄/);
-  });
-
-  it("trendPrintReport 沒有牧場名稱或產生時間也不會印出多餘的分隔符號", () => {
-    const html = trendPrintReport(REPORT, {});
-    const metaLine = html.match(/<p class="pmeta">(.*?)<\/p>/)[1];
-    assert.ok(!metaLine.startsWith(" ・"));
-    assert.doesNotMatch(metaLine, /・\s*・/);
+  it("跟 CSV 版共用同一份期別中文標籤", () => {
+    const csv = trendCsvFileName("year", "2024-01-01", "2026-12-31");
+    const pdf = trendPdfFileName("year", "2024-01-01", "2026-12-31");
+    assert.equal(csv.replace(".csv", ""), pdf.replace(".pdf", ""));
   });
 });
 

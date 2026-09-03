@@ -2800,3 +2800,95 @@ class TestBackupGoesBackIn:
                          {"content": '{"sows": [], "events": []}'}, worker)
         assert st == 403
         assert body["reason"] == "owner_only"
+
+
+class TestTrendReportPdfEndpoint:
+    """生產性能趨勢報告的 PDF 版本。跟 JSON 版共用範圍解析(_trend_spans),
+    這裡只測 PDF 這條路徑特有的部分:回應形狀、權限、實際內容。
+    """
+
+    def test_requires_login(self):
+        app = _app()
+        status, body, content_type = app.trend_report_pdf(None, "/api/trend-report/pdf")
+        assert status == 401
+        assert content_type is None
+
+    def test_worker_cannot_see_it(self, farm):
+        app, _, farm_id = farm
+        worker = _worker(app, farm_id)
+        status, body, content_type = app.trend_report_pdf(
+            worker, "/api/trend-report/pdf")
+        assert status == 403
+        assert content_type is None
+        assert body["reason"] == "owner_only"
+
+    def test_returns_a_real_pdf(self, farm):
+        app, token, _ = farm
+        status, body, content_type = app.trend_report_pdf(
+            token, "/api/trend-report/pdf?grain=month&start=2026-01-01&end=2026-01-31")
+        assert status == 200
+        assert content_type == "application/pdf"
+        assert isinstance(body, bytes)
+        assert body[:4] == b"%PDF"
+
+    def test_bad_grain_is_an_error_dict_not_a_broken_pdf(self, farm):
+        """錯誤情形不能因為這條路徑平常回二進位,就連錯誤訊息都跟著
+        變成看不懂的格式 —— 前端要能照樣讀出 error 文字。
+        """
+        app, token, _ = farm
+        status, body, content_type = app.trend_report_pdf(
+            token, "/api/trend-report/pdf?grain=fortnight")
+        assert status == 400
+        assert content_type is None
+        assert "期別" in body["error"]
+
+    def test_pdf_carries_the_farms_own_data(self, farm):
+        """不是隨便一份佔位 PDF —— 裡面真的是這個牧場記錄出來的數字。"""
+        import io
+        from pypdf import PdfReader
+
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "2580"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "FW", "date": "2026-05-04",
+               "detail": {"born_alive": 12, "stillborn": 1}, "confirm": True}, token)
+
+        status, body, content_type = app.trend_report_pdf(
+            token, "/api/trend-report/pdf?grain=month&start=2026-05-01&end=2026-05-31")
+        assert status == 200
+        text = PdfReader(io.BytesIO(body)).pages[0].extract_text()
+        assert "farmer 的牧場" in text
+        assert "分娩" in text
+        assert "12" in text   # 活仔數
+
+    def test_farms_are_isolated(self, farm):
+        app, token, farm_id = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "2580"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "FW", "date": "2026-05-04",
+               "detail": {"born_alive": 12}, "confirm": True}, token)
+
+        # 刻意不叫 "other-farmer" —— 那個字串本身就包含 "farmer",
+        # 拿 "farmer 的牧場 not in text" 判斷隔離會是一個看起來過關、
+        # 實際上什麼都沒測到的假陽性。
+        other_token = _owner(app, "carol")
+        status, body, content_type = app.trend_report_pdf(
+            other_token, "/api/trend-report/pdf?grain=month&start=2026-05-01&end=2026-05-31")
+        assert status == 200
+        import io
+        from pypdf import PdfReader
+        text = "".join(p.extract_text() for p in PdfReader(io.BytesIO(body)).pages)
+        assert "farmer 的牧場" not in text
+        assert "carol 的牧場" in text
+
+    def test_unavailable_reportlab_is_reported_not_silently_broken(self, farm, monkeypatch):
+        """reportlab 是選用套件(見 requirements.txt)。沒裝的部署環境,
+        這條路要講清楚原因,不能讓使用者拿到一個打不開的檔案。
+        """
+        app, token, _ = farm
+        monkeypatch.setattr("pdf_report.available", lambda: False)
+        status, body, content_type = app.trend_report_pdf(
+            token, "/api/trend-report/pdf")
+        assert status == 503
+        assert content_type is None
+        assert "PDF" in body["error"]

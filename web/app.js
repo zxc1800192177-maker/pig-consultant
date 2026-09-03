@@ -26,7 +26,7 @@ import {
   backupJson, boarCsv, boarEventCsv, eventCsv, exportFileName, exportSummary, sowCsv,
 } from "./lib/export.js";
 import {
-  trendCsv, trendCsvFileName, trendPrintReport, trendReportGrid, widestStart,
+  trendCsv, trendCsvFileName, trendPdfFileName, trendReportGrid, widestStart,
 } from "./lib/trendreport.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1392,14 +1392,12 @@ const EXPORT_BUILDERS = {
   boarEvents: boarEventCsv, backup: backupJson,
 };
 
-/** 把一段文字交給瀏覽器下載。
- *
- * text/csv 而不是 application/octet-stream:手機上前者會讓「用其他 App
- * 開啟」認得它是表格,後者只會存成一個打不開的檔案。charset 要寫出來 ——
- * 檔案開頭雖然有 BOM,但有些下載工具只看標頭。
+/** 把一個 Blob 交給瀏覽器下載。CSV、PDF 兩種匯出共用同一段 ——
+ * 差別只在誰把內容包成 Blob,「建一個連結、點它、收拾乾淨」這件事
+ * 只該有一份寫法。
  */
-function downloadText(filename, text, mime) {
-  const url = URL.createObjectURL(new Blob([text], { type: mime }));
+function downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
@@ -1408,6 +1406,16 @@ function downloadText(filename, text, mime) {
   a.remove();
   // 立刻 revoke 會讓部分瀏覽器來不及開始下載,拿到一個空檔案。
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+/** 把一段文字交給瀏覽器下載。
+ *
+ * text/csv 而不是 application/octet-stream:手機上前者會讓「用其他 App
+ * 開啟」認得它是表格,後者只會存成一個打不開的檔案。charset 要寫出來 ——
+ * 檔案開頭雖然有 BOM,但有些下載工具只看標頭。
+ */
+function downloadText(filename, text, mime) {
+  downloadBlob(filename, new Blob([text], { type: mime }));
 }
 
 // 整場資料抓一次就夠。五顆按鈕各按一次卻各抓一次全場事件,對免費方案
@@ -1547,7 +1555,7 @@ document.addEventListener("click", (e) => {
     return reloadTrend();
   }
   if (e.target.id === "trendDownload") return downloadTrendCsv();
-  if (e.target.id === "trendPrint") return printTrendReport();
+  if (e.target.id === "trendPrint") return downloadTrendPdf();
 });
 
 $("sowSearch")?.addEventListener("input", renderAnimalList);
@@ -2908,22 +2916,39 @@ async function reloadTrend() {
   }
 }
 
-/** 把目前畫面上的趨勢報告排成一份可以列印/存 PDF 的版面,叫出瀏覽器的
- * 列印對話框 —— 選「另存為 PDF」就是使用者要的檔案,不必額外裝套件。
+/** 產生一份真正的 PDF 檔案(伺服器端排版,見 pdf_report.py),直接下載
+ * —— 不透過瀏覽器的列印對話框(使用者要求:按一顆鈕就要拿到檔案,
+ * 不是被丟進一個還要自己操作「另存為 PDF」的系統對話框)。
  *
- * 這個 app 刻意除了資料庫驅動之外不用任何第三方套件(見 requirements.txt
- * 的說明);後端生 PDF 得加一個排版函式庫,對一個「偶爾印一次報表」的
- * 功能不划算,而瀏覽器原生就有列印轉 PDF,不必為此多背一個相依套件。
+ * 印的是**畫面上正在看的這段範圍**,不是另外拉一個更寬的範圍 ——
+ * 按下去的當下預期是「這份報告存成 PDF」,不是「順便換一份更完整的
+ * 資料」;真要更完整的範圍,旁邊就有下載完整版 CSV。
  */
-function printTrendReport() {
+async function downloadTrendPdf() {
   if (!lastTrendReport) {
     return showBanner("報告還在載入,請稍後再試", "warn");
   }
-  $("trendPrintArea").innerHTML = trendPrintReport(lastTrendReport, {
-    farmName: lastTrendReport.farmName,
-    generatedAt: todayIso(),
-  });
-  window.print();
+  const btn = $("trendPrint");
+  const periods = lastTrendReport.periods || [];
+  if (!periods.length) {
+    return showBanner("這段期間沒有資料,無法產生報告", "warn");
+  }
+  const start = periods[0].start;
+  const end = periods[periods.length - 1].end;
+
+  btn.disabled = true;
+  btn.textContent = "產生中…";
+  const res = await fetch(
+    `/api/trend-report/pdf?grain=${trendGrain}&start=${start}&end=${end}`);
+  btn.disabled = false;
+  btn.textContent = "產生報告(PDF)";
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    return showBanner(data.error || "PDF 產生失敗", "warn");
+  }
+  const blob = await res.blob();
+  downloadBlob(trendPdfFileName(trendGrain, start, end), blob);
 }
 
 async function downloadTrendCsv() {
