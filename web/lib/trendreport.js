@@ -82,6 +82,79 @@ export function trendReportGrid(report) {
   return report.sections.map((s) => trendSectionTable(s, report.periods)).join("");
 }
 
+// ── 列印/PDF ──
+//
+// 跟畫面上的表格是同一份資料,但**不能沿用同一段 HTML**:畫面用的
+// .v-none / .trend-chg.tone-* 顏色綁在這個 app 自己的深色主題 CSS 變數
+// 上,而列印是「離開這個 app 的脈絡,變成一張紙或一份 PDF」——
+// 使用者存好的 PDF 幾年後打開,不會有這個網站的樣式表跟著。顏色因此
+// 用行內樣式直接寫死,不依賴任何外部定義。
+
+const PRINT_TONE_COLOR = { good: "#1a7f37", critical: "#c0392b", neutral: "#666" };
+
+/** 列印用的一格數值,跟 trendValue 同樣的規則(沒有記錄印 —,不是 0),
+ * 只是顏色用行內樣式。
+ */
+export function trendPrintValue(value, digits, unit) {
+  if (value === null || value === undefined) {
+    return '<span style="color:#999">—</span>';
+  }
+  return `${value.toFixed(digits)}${escapeHtml(unit)}`;
+}
+
+/** 列印用的變化欄。文字組裝直接複用 changeText —— 那段邏輯(箭頭跟數字
+ * 正負、正號、百分比)只該有一份,不能因為換了輸出目標就重寫一次。
+ */
+export function trendPrintChange(change, unit, digits) {
+  if (!change) return '<span style="color:#999">—</span>';
+  const color = PRINT_TONE_COLOR[changeTone(change)];
+  return `<span style="color:${color};font-weight:600">${escapeHtml(changeText(change, unit, digits))}</span>`;
+}
+
+/** 一個區段的列印表格。 */
+export function trendPrintSection(section, periods) {
+  const header = periods.map((p) => `<th>${escapeHtml(p.label)}</th>`).join("");
+  const rows = section.rows.map((r) => {
+    const cells = r.values
+      .map((v) => `<td>${trendPrintValue(v, r.digits, r.unit)}</td>`)
+      .join("");
+    return `<tr><td class="pm">${escapeHtml(r.label)}</td>${cells}` +
+           `<td>${trendPrintChange(r.change, r.unit, r.digits)}</td></tr>`;
+  }).join("");
+
+  return `
+    <h3>${escapeHtml(section.label)}</h3>
+    <table class="ptable">
+      <thead><tr><th>指標</th>${header}<th>變化</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+/** 整份可列印的報告(含抬頭)。
+ *
+ * 抬頭資訊比照使用者原本從 PigCHAMP 印出來的那份 —— 牧場名稱、期間、
+ * 產生時間,好讓這張紙離開螢幕之後還看得出是誰的資料、算到什麼時候。
+ * 不放「目標值」欄:全國常模這個 app 只服務生產健檢的場級對比
+ * (已確認的設計決定 #3),這份報告是牧場跟自己歷史比,不跟全國比。
+ */
+export function trendPrintReport(report, meta = {}) {
+  const periods = report.periods || [];
+  const range = periods.length
+    ? `${periods[0].label} ~ ${periods[periods.length - 1].label}(共 ${periods.length} 期)`
+    : "沒有資料";
+  const metaLine = [meta.farmName, range, meta.generatedAt ? `產生於 ${meta.generatedAt}` : ""]
+    .filter(Boolean).map(escapeHtml).join(" ・ ");
+
+  const body = report.sections && report.sections.length
+    ? report.sections.map((s) => trendPrintSection(s, periods)).join("")
+    : "<p>這段期間沒有記錄,算不出任何指標。</p>";
+
+  return `
+    <h1>豬豬顧問 生產性能趨勢分析報告</h1>
+    <p class="pmeta">${metaLine}</p>
+    ${body}`;
+}
+
 /** 完整版下載用的 CSV。一列一個指標,一欄一個期間 —— 跟畫面上的表格
  * 同一個形狀,只是把好幾個區段接成一張,拿去 Excel 自己畫圖或再篩選。
  *

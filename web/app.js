@@ -26,7 +26,7 @@ import {
   backupJson, boarCsv, boarEventCsv, eventCsv, exportFileName, exportSummary, sowCsv,
 } from "./lib/export.js";
 import {
-  trendCsv, trendCsvFileName, trendReportGrid, widestStart,
+  trendCsv, trendCsvFileName, trendPrintReport, trendReportGrid, widestStart,
 } from "./lib/trendreport.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1547,6 +1547,7 @@ document.addEventListener("click", (e) => {
     return reloadTrend();
   }
   if (e.target.id === "trendDownload") return downloadTrendCsv();
+  if (e.target.id === "trendPrint") return printTrendReport();
 });
 
 $("sowSearch")?.addEventListener("input", renderAnimalList);
@@ -2865,6 +2866,12 @@ let trendRange = null;
 // 的數字,而點擊的當下明明是「月」被反白選中,兩者對不上。
 let trendRequestSeq = 0;
 
+// 「產生報告(PDF)」印的是**畫面上正在看的這份**,不會另外再問一次伺服器
+// —— 使用者按下去的當下預期是「所見即所印」,重新查一次的話,萬一資料在
+// 這中間被別人改了(同一牧場另一個帳號正在記錄),紙本內容會跟螢幕上看到
+// 的兜不起來,而使用者根本沒有機會發現這件事發生過。
+let lastTrendReport = null;
+
 async function reloadTrend() {
   const box = $("trendGrid");
   if (!box || !account.loggedIn) return;
@@ -2885,6 +2892,7 @@ async function reloadTrend() {
   }
 
   box.innerHTML = trendReportGrid(data);
+  lastTrendReport = data;
 
   // 日期輸入框跟著畫面上實際顯示的範圍走,使用者才知道現在看的是哪一段
   // ——不然「套用範圍」按過一次之後,輸入框會一直停在打進去的原始字,
@@ -2898,6 +2906,24 @@ async function reloadTrend() {
   } else {
     $("trendRangeNote").textContent = "這段期間沒有資料";
   }
+}
+
+/** 把目前畫面上的趨勢報告排成一份可以列印/存 PDF 的版面,叫出瀏覽器的
+ * 列印對話框 —— 選「另存為 PDF」就是使用者要的檔案,不必額外裝套件。
+ *
+ * 這個 app 刻意除了資料庫驅動之外不用任何第三方套件(見 requirements.txt
+ * 的說明);後端生 PDF 得加一個排版函式庫,對一個「偶爾印一次報表」的
+ * 功能不划算,而瀏覽器原生就有列印轉 PDF,不必為此多背一個相依套件。
+ */
+function printTrendReport() {
+  if (!lastTrendReport) {
+    return showBanner("報告還在載入,請稍後再試", "warn");
+  }
+  $("trendPrintArea").innerHTML = trendPrintReport(lastTrendReport, {
+    farmName: lastTrendReport.farmName,
+    generatedAt: todayIso(),
+  });
+  window.print();
 }
 
 async function downloadTrendCsv() {

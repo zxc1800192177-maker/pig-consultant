@@ -1227,6 +1227,13 @@ class TestTrendReportEndpoint:
         assert len(body["periods"]) == 12
         assert body["periods"][-1]["end"] == "2026-08-17"
 
+    def test_carries_the_farm_name(self, farm):
+        """列印/PDF 那份報告要看得出是哪個場的資料 —— 印出來就離開了 app
+        本身的脈絡,光看數字認不出是誰的牧場。"""
+        app, token, _ = farm
+        body = app.handle_get("/api/trend-report", token)[1]
+        assert body["farmName"] == "farmer 的牧場"
+
     def test_an_unknown_grain_is_rejected(self, farm):
         app, token, _ = farm
         assert app.handle_get("/api/trend-report?grain=fortnight", token)[0] == 400

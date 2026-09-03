@@ -1391,9 +1391,14 @@ class Application:
         events = self.store.list_sow_events(farm_id)
         report = trend.trend_report(sows, events, spans, cfg)
 
+        # 牧場名稱只用在畫面上「列印/PDF」那份報告的抬頭 —— 印出來離開了
+        # app 本身的脈絡,總要看得出是哪個場的資料。查一次牧場資料表,
+        # 跟事件、母豬那幾次查詢比起來成本可以忽略。
+        farm = self.store.get_farm(farm_id) or {}
         return 200, {
             "grain": grain,
             "start": _iso(start), "end": _iso(end),
+            "farmName": farm.get("name") or "",
             "periods": [{"key": p["key"], "label": p["label"],
                         "start": _iso(p["start"]), "end": _iso(p["end"])}
                        for p in report["periods"]],

@@ -343,9 +343,13 @@
       </div>
       <p class="hint" id="trendRangeNote" style="margin-top:10px"></p>
       <div id="trendGrid" style="margin-top:14px"></div>
-      <button type="button" class="btn-soft" id="trendDownload" style="margin-top:14px">
-        下載完整版(CSV)
-      </button>
+      <div class="ctask-add-row" style="margin-top:14px">
+        <!-- 產生報告印的是畫面上正在看的這段範圍,不是下載完整版那個
+             拉到極寬的歷史 —— 紙本或 PDF 一次塞一百多期根本印不下,
+             「所見即所印」才是使用者按下去時的預期。 -->
+        <button type="button" class="btn-soft" id="trendPrint">產生報告(PDF)</button>
+        <button type="button" class="btn-soft" id="trendDownload">下載完整版(CSV)</button>
+      </div>
     </div>
 
     <div class="card">
@@ -541,6 +545,11 @@
     <p>本工具僅供參考,非執業獸醫處方。實際確診與用藥請諮詢當地執業獸醫師。</p>
   </footer>
 </div>
+
+<!-- 「產生報告(PDF)」的內容畫在這裡,平常不顯示。列印時整個 .page
+     被藏起來,只剩這個區塊 —— 見 v2.css 的 @media print。放在 .page
+     外面,才不會被 .page 自己的 visibility 規則連帶蓋住。 -->
+<div id="trendPrintArea"></div>
 
 <script type="module" src="app.js"></script>
 </body>
