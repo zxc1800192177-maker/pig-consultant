@@ -25,6 +25,9 @@ import {
 import {
   backupJson, boarCsv, boarEventCsv, eventCsv, exportFileName, exportSummary, sowCsv,
 } from "./lib/export.js";
+import {
+  trendCsv, trendCsvFileName, trendReportGrid, widestStart,
+} from "./lib/trendreport.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -110,12 +113,16 @@ async function applyAccount() {
   // 後端也擋(_export 的 _need_owner),這裡只是不要留一顆按了會失敗的鈕。
   $("exportCard")?.classList.toggle("is-hidden",
                                     !account.loggedIn || !account.isOwner);
+  // 生產性能趨勢分析跟月報同一條規則:員工看得到工作與紀錄,但這類
+  // 經營層面的報表只有牧場主看得到(已確認的設計決定 #17)。
+  $("trendCard")?.classList.toggle("is-hidden",
+                                   !account.loggedIn || !account.isOwner);
   // 登入/登出後全部重讀。少列一項的話,換帳號後那一區會留著上一個
   // 使用者的資料 —— 跨牧場的資料外洩就是這樣發生的。
   await Promise.all([
     reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
     reloadBoars(), reloadRecent(), reloadReview(), reloadDataProblems(),
-    reloadMonthReport(), reloadSettings(), reloadCustomTaskSettings(),
+    reloadMonthReport(), reloadTrend(), reloadSettings(), reloadCustomTaskSettings(),
   ]);
 }
 
@@ -1519,6 +1526,27 @@ document.addEventListener("click", (e) => {
     closeMonthPicker();
     return reloadMonthReport();
   }
+
+  const grainBtn = e.target.closest("[data-trend-grain]");
+  if (grainBtn) {
+    trendGrain = grainBtn.dataset.trendGrain;
+    document.querySelectorAll("[data-trend-grain]")
+      .forEach((b) => b.classList.toggle("is-active", b === grainBtn));
+    return reloadTrend();
+  }
+  if (e.target.id === "trendApply") {
+    const start = $("trendStart").value;
+    const end = $("trendEnd").value;
+    if (!start || !end) return showBanner("請選擇開始與結束日期", "warn");
+    if (start > end) return showBanner("開始日期不能晚於結束日期", "warn");
+    trendRange = { start, end };
+    return reloadTrend();
+  }
+  if (e.target.id === "trendReset") {
+    trendRange = null;
+    return reloadTrend();
+  }
+  if (e.target.id === "trendDownload") return downloadTrendCsv();
 });
 
 $("sowSearch")?.addEventListener("input", renderAnimalList);
@@ -2820,6 +2848,77 @@ function closeMonthPicker() {
   $("mrPicker")?.classList.add("is-hidden");
 }
 
+// ── 生產性能趨勢分析 ──
+//
+// 跟月報不是同一個問題:月報看「這個月怎樣」,這裡看「跟上一期、去年比,
+// 哪裡在變好變壞」,所以輸出一定是多個期間並列,不是單一數字。
+
+let trendGrain = "month";
+// null 代表用伺服器算的預設範圍(最近幾期);一旦使用者按過「套用範圍」
+// 才固定成明確的 {start, end},之後切期別也沿用同一段日期視窗。
+let trendRange = null;
+
+// 切換期別、套用範圍都會重新打這支 API,而且都是使用者連續快速點的動作
+// (週/月/季/年四顆按鈕就在旁邊)。**先送出的請求不保證先回來** —— 算月報
+// 要重算 12 期、算年報只算 5 期,計算量不同,慢的那個真的可能後到。
+// 沒有這個序號的話,使用者連按「年」再按「月」,畫面最後卻定格在「年」
+// 的數字,而點擊的當下明明是「月」被反白選中,兩者對不上。
+let trendRequestSeq = 0;
+
+async function reloadTrend() {
+  const box = $("trendGrid");
+  if (!box || !account.loggedIn) return;
+
+  const seq = ++trendRequestSeq;
+  let qs = `grain=${trendGrain}`;
+  if (trendRange) qs += `&start=${trendRange.start}&end=${trendRange.end}`;
+
+  const { ok, data, status } = await api(`/api/trend-report?${qs}`);
+  if (seq !== trendRequestSeq) return;   // 使用者已經切到別的期別,這份回應過期了
+
+  if (!ok) {
+    // 員工看不到這份報告(跟月報同一條規則),整張卡收起來而不是留一個
+    // 錯誤訊息。
+    $("trendCard")?.classList.toggle("is-hidden", status === 403);
+    if (status !== 403) showBanner(data.error || "趨勢報告載入失敗", "warn");
+    return;
+  }
+
+  box.innerHTML = trendReportGrid(data);
+
+  // 日期輸入框跟著畫面上實際顯示的範圍走,使用者才知道現在看的是哪一段
+  // ——不然「套用範圍」按過一次之後,輸入框會一直停在打進去的原始字,
+  // 跟畫面因為期界對齊(週的起點是禮拜四之類)而實際算出來的範圍對不上。
+  const periods = data.periods || [];
+  if (periods.length) {
+    $("trendStart").value = periods[0].start;
+    $("trendEnd").value = periods[periods.length - 1].end;
+    $("trendRangeNote").textContent =
+      `${periods[0].label} ~ ${periods[periods.length - 1].label} ・ 共 ${periods.length} 期`;
+  } else {
+    $("trendRangeNote").textContent = "這段期間沒有資料";
+  }
+}
+
+async function downloadTrendCsv() {
+  const btn = $("trendDownload");
+  const end = trendRange?.end || $("trendEnd").value || todayIso();
+  const start = widestStart(end, trendGrain);
+
+  btn.disabled = true;
+  btn.textContent = "整理中…";
+  const { ok, data } = await api(
+    `/api/trend-report?grain=${trendGrain}&start=${start}&end=${end}`);
+  btn.disabled = false;
+  btn.textContent = "下載完整版(CSV)";
+
+  if (!ok) return showBanner(data.error || "下載失敗", "warn");
+  const periods = data.periods || [];
+  const name = trendCsvFileName(trendGrain,
+    periods[0]?.start || start, periods[periods.length - 1]?.end || end);
+  downloadText(name, trendCsv(data), "text/csv;charset=utf-8");
+}
+
 // ── 設定 ──
 
 async function reloadSettings() {
@@ -2848,9 +2947,11 @@ async function saveSettings() {
   if (!ok) return showBanner(data.error || "設定沒有存起來", "warn");
 
   showBanner("設定已儲存", "ok");
-  // 參數變了,推算出來的東西全部要重算
+  // 參數變了,推算出來的東西全部要重算 —— 趨勢報告用到的懷孕天數、
+  // 配種批次天數、週界起始日全部來自這裡,不重讀就會拿舊參數算出新資料。
   await Promise.all([
-    reloadSettings(), reloadTasks(), reloadAlerts(), reloadReview(), reloadDataProblems(), reloadMonthReport(),
+    reloadSettings(), reloadTasks(), reloadAlerts(), reloadReview(),
+    reloadDataProblems(), reloadMonthReport(), reloadTrend(),
   ]);
 }
 

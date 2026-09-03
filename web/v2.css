@@ -285,6 +285,11 @@ body { padding-bottom: 96px; }
 /* 發情穩定度的三個符號按鈕。字級加大,不然 ✓ △ ✗ 縮在 14px 裡不容易
    一眼辨認,巡欄時瞄一眼要能馬上點對。 */
 .seg.tri .seg-b { min-width: 60px; font-size: 20px; }
+/* 期別的四顆按鈕(週/月/季/年)。64px 的下限是給兩三顆按鈕用的,四顆
+   在 375px 的卡片裡放不下 —— 第四顆會被擠到下一行、自己拉滿一整列
+   (screenshot 抓到過)。這裡放掉下限,靠 flex-basis:0 讓四顆平分寬度,
+   永遠排在同一行。 */
+.seg.grain .seg-b { min-width: 0; flex: 1 1 0; padding: 10px 6px; font-size: 13.5px; }
 
 .chips { display: flex; gap: 8px; flex-wrap: wrap; }
 /* 觸控目標至少 44px。豬舍裡是戴著手套單手操作,34px 的按鈕按不準,
@@ -579,3 +584,26 @@ body { padding-bottom: 96px; }
 .export-btns .btn-soft[data-export="backup"] { grid-column: 1 / -1; }
 /* 只在真的有訊息時才留空隙,空的時候不要在卡片底下多一段留白。 */
 #exportResult .notice { margin-top: 14px; }
+
+/* ── 生產趨勢分析 ── */
+/* 沒有記錄的儲存格。跟 .stat .v-none 分開放一份 —— 那個只在生產月報的
+   卡片格式裡有效,趨勢表格是一般的 <table>,選擇器套不到。 */
+.v-none { color: var(--ink-faint); font-weight: 400; }
+
+/* 指標名稱那一欄要固定在最左邊 —— 表格往右捲到第八、九期時,看得懂
+   哪一列在講哪個指標比看得懂哪一期的數字更重要,捲走了就等於白算。
+   背景色要跟卡片本身一樣,捲動時才不會透出後面的儲存格。 */
+#trendGrid .table-scroll table { min-width: 640px; }
+#trendGrid th:first-child, #trendGrid td.trend-metric {
+  position: sticky; left: 0; background: var(--surface);
+  white-space: nowrap; z-index: 1;
+}
+.trend-metric { font-weight: 600; }
+
+/* 變化的箭頭/百分比。輕量的文字色塊而不是滿版的 .grade-pill ——
+   一整欄都是這個,做成大顆的圓角藥丸只會讓表格更難掃過去。 */
+.trend-chg { font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+
+/* 期別按鈕、日期範圍、套用/重設分成三行,而不是硬塞進一行 ——
+   375px 的手機放不下「週月季年」四顆加兩個日期輸入框加兩顆按鈕。 */
+#trendCard .ctask-add-row input[type="date"] { min-width: 0; }

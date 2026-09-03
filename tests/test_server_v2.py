@@ -1208,6 +1208,112 @@ class TestMonthlyReportEndpoint:
             assert same_month_farrowing["n"] == 0
 
 
+class TestTrendReportEndpoint:
+    """生產性能趨勢報告:同一組指標切成多期並列。owner 專屬,比照月報。"""
+
+    def test_requires_login(self):
+        app = _app()
+        assert app.handle_get("/api/trend-report")[0] == 401
+
+    def test_worker_cannot_see_it(self, farm):
+        app, _, farm_id = farm
+        assert app.handle_get("/api/trend-report", _worker(app, farm_id))[0] == 403
+
+    def test_defaults_to_twelve_months(self, farm, monkeypatch):
+        app, token, _ = farm
+        monkeypatch.setattr("server._today", lambda: date(2026, 8, 17))
+        body = app.handle_get("/api/trend-report", token)[1]
+        assert body["grain"] == "month"
+        assert len(body["periods"]) == 12
+        assert body["periods"][-1]["end"] == "2026-08-17"
+
+    def test_an_unknown_grain_is_rejected(self, farm):
+        app, token, _ = farm
+        assert app.handle_get("/api/trend-report?grain=fortnight", token)[0] == 400
+
+    def test_start_after_end_is_rejected(self, farm):
+        app, token, _ = farm
+        status, body = app.handle_get(
+            "/api/trend-report?start=2026-08-01&end=2026-01-01", token)
+        assert status == 400
+        assert "開始" in body["error"]
+
+    def test_bad_start_format_is_rejected(self, farm):
+        app, token, _ = farm
+        assert app.handle_get(
+            "/api/trend-report?start=garbage&end=2026-08-01", token)[0] == 400
+
+    def test_explicit_range_is_not_trimmed_to_the_default_count(self, farm):
+        """有明確指定 start 的話,期數就是那個範圍算出來的,不套用預設的
+        12 期上限 —— 使用者可能就是想看更長或更短的一段。
+        """
+        app, token, _ = farm
+        body = app.handle_get(
+            "/api/trend-report?grain=month&start=2026-01-01&end=2026-03-31", token)[1]
+        assert [p["label"] for p in body["periods"]] == ["2026/01", "2026/02", "2026/03"]
+
+    def test_too_many_periods_is_rejected(self, farm):
+        app, token, _ = farm
+        status, body = app.handle_get(
+            "/api/trend-report?grain=week&start=2020-01-01&end=2026-08-31", token)
+        assert status == 400
+        assert "期間太多" in body["error"]
+
+    def test_farms_are_isolated(self, farm):
+        app, token, farm_id = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": "2026-04-19", "confirm": True}, token)
+
+        other_token = _owner(app, "other-farmer")
+        body = app.handle_get(
+            "/api/trend-report?grain=month&start=2026-04-01&end=2026-04-30",
+            other_token)[1]
+        assert body["sections"] == []
+
+    def test_labels_and_direction_come_through(self, farm):
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "2580"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "FW", "date": "2026-05-04",
+               "detail": {"born_alive": 12, "stillborn": 1}, "confirm": True}, token)
+
+        body = app.handle_get(
+            "/api/trend-report?grain=month&start=2026-05-01&end=2026-05-31", token)[1]
+        section = next(s for s in body["sections"] if s["key"] == "farrowing")
+        row = next(r for r in section["rows"] if r["key"] == "alive_per_litter")
+        assert row["label"] == "窩均活仔數"
+        assert row["unit"] == "隻"
+        assert row["better"] == "high"
+        assert row["values"] == [12.0]
+
+    def test_a_metric_with_no_records_anywhere_does_not_appear(self, farm):
+        """整排都沒有資料的指標不該出現在回應裡 —— 印一列空格會讓人以為
+        自己漏記了。"""
+        app, token, _ = farm
+        body = app.handle_get(
+            "/api/trend-report?grain=month&start=2026-05-01&end=2026-05-31", token)[1]
+        assert body["sections"] == []
+
+    def test_change_between_first_and_last_period(self, farm):
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "2580"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "FW", "date": "2026-01-10",
+               "detail": {"born_alive": 10}, "confirm": True}, token)
+        sow_id2 = _post(app, "/api/sows", {"earTag": "2581"}, token)[1]["id"]
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id2, "type": "FW", "date": "2026-02-10",
+               "detail": {"born_alive": 12}, "confirm": True}, token)
+
+        body = app.handle_get(
+            "/api/trend-report?grain=month&start=2026-01-01&end=2026-02-28", token)[1]
+        section = next(s for s in body["sections"] if s["key"] == "farrowing")
+        row = next(r for r in section["rows"] if r["key"] == "alive_per_litter")
+        assert row["change"]["delta"] == 2.0
+        assert row["change"]["improved"] is True
+
+
 class TestRecordPage:
     """紀錄頁需要的東西:公豬清單、最近記錄、離乳評分。"""
 

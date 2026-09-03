@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 import config
 import importer
 import schedule
+import trend
 from auth import (
     Auth, AuthError, InvalidCredentials, NotGuest, UsernameTaken, ValidationError,
     apply_startup_reset,
@@ -479,6 +480,8 @@ class Application:
             return self._export(token)
         if route == "/api/monthly-report":
             return self._monthly_report(token, path)
+        if route == "/api/trend-report":
+            return self._trend_report(token, path)
         if route == "/api/settings":
             return self._get_settings(token)
         if route == "/api/boars":
@@ -1341,6 +1344,60 @@ class Application:
                 for key, m in report["metrics"].items()
             ],
             "basis": labels.month_report_basis(),
+        }
+
+    def _trend_report(self, token, path) -> Tuple[int, dict]:
+        """生產性能趨勢報告:同一組指標切成多期並列,附增減。
+
+        跟月報的差別不是指標多寡,是問題不同 —— 月報回答「這個月做得
+        怎樣」,這裡回答「跟上一期比、跟去年比,哪裡在變好變壞」。
+        owner 專屬,比照月報與匯出(規格第 17 條)。
+        """
+        farm_id, user, err = self._need_farm(token)
+        if err:
+            return err
+        deny = self._need_owner(user)
+        if deny:
+            return deny
+
+        grain = _query(path, "grain") or trend.MONTH
+        if grain not in trend.GRAINS:
+            return 400, {"error": f"不認得的期別:{grain}"}
+
+        cfg = self._farm_settings(farm_id)
+        end = _date(_query(path, "end")) or _today()
+        start_raw = _query(path, "start")
+        start = _date(start_raw) if start_raw else None
+        if start_raw and start is None:
+            return 400, {"error": "開始日期格式錯誤,請用 YYYY-MM-DD"}
+        if start is None:
+            start = trend.default_start(end, grain, trend.DEFAULT_PERIODS[grain])
+        if start > end:
+            return 400, {"error": "開始日期不能晚於結束日期"}
+
+        spans = trend.periods(start, end, grain, cfg)
+        # 沒指定 start 時是我們自己往回抓寬算出來的,只留最後幾期 ——
+        # default_start() 刻意抓得比需要的還早,好讓 periods() 切出來的
+        # 期界一定夠數量,多出來的交給這裡捨去。
+        if not start_raw:
+            spans = spans[-trend.DEFAULT_PERIODS[grain]:]
+        if not spans:
+            return 400, {"error": "這個範圍沒有涵蓋任何期間"}
+        if len(spans) > config.MAX_TREND_PERIODS:
+            return 400, {"error": f"期間太多(最多 {config.MAX_TREND_PERIODS} 期),"
+                                  "請縮小範圍或改用較粗的期別"}
+
+        sows = self.store.list_sows(farm_id, None)
+        events = self.store.list_sow_events(farm_id)
+        report = trend.trend_report(sows, events, spans, cfg)
+
+        return 200, {
+            "grain": grain,
+            "start": _iso(start), "end": _iso(end),
+            "periods": [{"key": p["key"], "label": p["label"],
+                        "start": _iso(p["start"]), "end": _iso(p["end"])}
+                       for p in report["periods"]],
+            "sections": report["sections"],
         }
 
     def _import_preview(self, payload, token) -> Tuple[int, dict]:

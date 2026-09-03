@@ -317,6 +317,37 @@
       <p class="src" id="mrBasis"></p>
     </div>
 
+    <!-- 生產性能趨勢分析:同一組指標切成多期並列,附增減 —— 跟月報
+         不同的問題(月報看「這個月怎樣」,這裡看「跟上一期、去年比,
+         哪裡在變好變壞」)。 -->
+    <div class="card" id="trendCard">
+      <div class="card-head">
+        <div>
+          <h2>生產性能趨勢分析</h2>
+          <p class="hint">同一組指標切成多期並列,看得出走向而不只是單期數字</p>
+        </div>
+      </div>
+      <div class="seg grain" id="trendGrainToggle">
+        <button type="button" class="seg-b" data-trend-grain="week">週</button>
+        <button type="button" class="seg-b is-active" data-trend-grain="month">月</button>
+        <button type="button" class="seg-b" data-trend-grain="quarter">季</button>
+        <button type="button" class="seg-b" data-trend-grain="year">年</button>
+      </div>
+      <div class="ctask-add-row" style="margin-top:12px">
+        <input type="date" id="trendStart">
+        <input type="date" id="trendEnd">
+      </div>
+      <div class="ctask-add-row" style="margin-top:10px">
+        <button type="button" class="btn-soft" id="trendApply">套用範圍</button>
+        <button type="button" class="btn-ghost" id="trendReset">預設範圍</button>
+      </div>
+      <p class="hint" id="trendRangeNote" style="margin-top:10px"></p>
+      <div id="trendGrid" style="margin-top:14px"></div>
+      <button type="button" class="btn-soft" id="trendDownload" style="margin-top:14px">
+        下載完整版(CSV)
+      </button>
+    </div>
+
     <div class="card">
       <div class="card-head">
         <div>
