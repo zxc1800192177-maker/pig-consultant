@@ -269,14 +269,21 @@
         </div>
         <span class="cnt" id="reviewCount"></span>
       </div>
-      <!-- 但書由後端提供(core/labels.review_caveat),前端不自己維護一份措辭。
-           這段不可以拿掉:少了它,這份名單讀起來就是淘汰建議。 -->
-      <p class="rv-caveat" id="reviewCaveat"></p>
-      <div id="reviewList"></div>
+      <button type="button" class="lazy-open" data-lazy="reviewCard">載入值得檢視</button>
+      <div class="lazy-body is-hidden" id="reviewBody">
+        <!-- 但書由後端提供(core/labels.review_caveat),前端不自己維護一份措辭。
+             這段不可以拿掉:少了它,這份名單讀起來就是淘汰建議。 -->
+        <p class="rv-caveat" id="reviewCaveat"></p>
+        <div id="reviewList"></div>
+      </div>
     </div>
 
     <!-- 記錄偵錯。跟「值得檢視」是兩件事:那份講母豬表現(關於豬),
-         這份講記錄自相矛盾(關於資料)。整張卡在沒問題時不顯示。 -->
+         這份講記錄自相矛盾(關於資料)。
+
+         這張卡以前在沒問題時整個不顯示。改成按鈕載入之後不能再這樣 ——
+         沒有按鈕就沒得按。載入後沒問題會明講「沒有發現問題」,其實比
+         原本好:整張卡消失時,「都正常」跟「這個功能不存在」長得一樣。 -->
     <div class="card is-hidden" id="dataProblemCard">
       <div class="card-head">
         <div>
@@ -285,9 +292,12 @@
         </div>
         <span class="cnt" id="dataProblemCount"></span>
       </div>
-      <div id="dataProblemList"></div>
-      <!-- 修正表單:按了某一列的「修正這筆」才展開 -->
-      <div class="card is-hidden" id="dpFixForm" style="margin-top:12px"></div>
+      <button type="button" class="lazy-open" data-lazy="dataProblemCard">檢查記錄</button>
+      <div class="lazy-body is-hidden" id="dataProblemBody">
+        <div id="dataProblemList"></div>
+        <!-- 修正表單:按了某一列的「修正這筆」才展開 -->
+        <div class="card is-hidden" id="dpFixForm" style="margin-top:12px"></div>
+      </div>
     </div>
 
     <div class="card" id="monthReportCard">
@@ -297,6 +307,8 @@
           <p class="hint">依記錄事件即時計算,即使記錄事後補登也一定是最新的</p>
         </div>
       </div>
+      <button type="button" class="lazy-open" data-lazy="monthReportCard">載入生產月報</button>
+      <div class="lazy-body is-hidden" id="monthReportBody">
       <div class="weekbar">
         <span id="mrPrev">‹</span>
         <button type="button" id="mrLabel" class="mr-label-btn">載入中…</button>
@@ -315,6 +327,7 @@
       <p class="hint" id="mrHerdSize"></p>
       <div class="perf" id="mrGrid"></div>
       <p class="src" id="mrBasis"></p>
+      </div>
     </div>
 
     <!-- 生產性能趨勢分析:同一組指標切成多期並列,附增減 —— 跟月報
@@ -327,6 +340,8 @@
           <p class="hint">同一組指標切成多期並列,看得出走向而不只是單期數字</p>
         </div>
       </div>
+      <button type="button" class="lazy-open" data-lazy="trendCard">載入趨勢分析</button>
+      <div class="lazy-body is-hidden" id="trendBody">
       <div class="seg grain" id="trendGrainToggle">
         <button type="button" class="seg-b" data-trend-grain="week">週</button>
         <button type="button" class="seg-b is-active" data-trend-grain="month">月</button>
@@ -349,6 +364,7 @@
              「所見即所印」才是使用者按下去時的預期。 -->
         <button type="button" class="btn-soft" id="trendPrint">產生報告(PDF)</button>
         <button type="button" class="btn-soft" id="trendDownload">下載完整版(CSV)</button>
+      </div>
       </div>
     </div>
 

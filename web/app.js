@@ -93,6 +93,119 @@ let loginRequired = false;
 const LOGGED_OUT = { loggedIn: false, username: null, isGuest: false,
                      role: "owner", isOwner: true };
 
+// ── 分析頁的四張卡:按了才載入 ────────────────────────────────
+//
+// 這四份都要掃過整場的事件才算得出來,而且開一次 app 不見得會看。
+// 以本場真實資料(1,563 頭母豬、33,025 筆事件)實測,開頁時載入的十一
+// 個端點合計 1.32 秒,這四張就佔了 1.09 秒 —— 其中趨勢分析一張就 0.83
+// 秒。使用者要看的通常是工作清單與提醒,卻每次都要先等這四份算完。
+//
+// 所以改成一張卡一顆大按鈕,按了才去要資料(使用者要求)。
+const LAZY_CARDS = {
+  reviewCard: { body: "reviewBody", label: "載入值得檢視", load: () => reloadReview() },
+  dataProblemCard: { body: "dataProblemBody", label: "檢查記錄", load: () => reloadDataProblems() },
+  monthReportCard: { body: "monthReportBody", label: "載入生產月報", load: () => reloadMonthReport() },
+  trendCard: { body: "trendBody", label: "載入趨勢分析", load: () => reloadTrend() },
+};
+
+// 哪幾張已經載過。**換帳號時一定要清掉**(見 resetLazyCards)。
+const lazyLoaded = new Set();
+
+// 每張卡還沒被填過資料時的原始樣子,重置時整份還原。
+//
+// 逐個元素清空看起來更精準,實際上更脆弱:趨勢卡裡有兩個 <input type=
+// "date">,清 textContent 清不掉它們的 value,上一個牧場選的日期範圍會
+// 留在畫面上。整份還原沒有這種漏網之魚,而且新增欄位時不必回來補。
+// 前提是這幾張卡裡沒有直接綁定的事件監聽(全部走委派),還原後才不會
+// 有按鈕失效 —— 這件事在改之前查過。
+const lazyPristine = new Map();
+
+// 載過但被收起來的。跟「沒載過」是兩回事:收起來只是不看,資料還在,
+// 再展開不必重新算一次 —— 那正是這整套改動的用意。
+const lazyCollapsed = new Set();
+
+function isLazyLoaded(cardId) {
+  return lazyLoaded.has(cardId);
+}
+
+/** 同一顆按鈕的三種狀態:還沒載入 →「載入X」;載好展開中 →「收起來」;
+ * 收起來了 →「展開」。
+ *
+ * 三種都用同一顆、放在同一個位置,使用者不必記哪張卡的控制項在哪裡。
+ * 「載入」那一態長得最醒目(虛線外框、強調色),因為那時候整張卡就只有
+ * 它可以按;載好之後換成安靜的樣子,主角應該是數字不是按鈕。
+ */
+function paintLazyButton(cardId) {
+  const spec = LAZY_CARDS[cardId];
+  const btn = document.querySelector(`[data-lazy="${cardId}"]`);
+  if (!spec || !btn) return;
+  const loaded = lazyLoaded.has(cardId);
+  const collapsed = lazyCollapsed.has(cardId);
+  btn.disabled = false;
+  btn.textContent = !loaded ? spec.label : (collapsed ? "展開" : "收起來");
+  btn.classList.toggle("is-loaded", loaded);
+  $(spec.body)?.classList.toggle("is-hidden", !loaded || collapsed);
+}
+
+/** 按下那顆按鈕。沒載過就去載,載過就切換收合。
+ *
+ * 載入時先標成已載入再呼叫 load() —— 那些 reload 函式自己會擋掉「卡還沒
+ * 載入」的情況(這樣存完設定要重算時,沒開過的卡不會被偷偷叫起來),
+ * 順序反了就會被自己的守衛擋住而什麼都不做。
+ */
+async function toggleLazyCard(cardId) {
+  const spec = LAZY_CARDS[cardId];
+  const btn = document.querySelector(`[data-lazy="${cardId}"]`);
+  if (!spec || !btn) return;
+
+  if (lazyLoaded.has(cardId)) {
+    // 已經載過:純粹開合,不重新要資料。
+    if (lazyCollapsed.has(cardId)) lazyCollapsed.delete(cardId);
+    else lazyCollapsed.add(cardId);
+    return paintLazyButton(cardId);
+  }
+
+  btn.disabled = true;
+  btn.textContent = "載入中…";
+  lazyLoaded.add(cardId);
+  try {
+    await spec.load();
+  } catch (e) {
+    // 載不起來就退回可以再按一次的狀態,不要留一顆卡在「載入中…」的死鈕。
+    lazyLoaded.delete(cardId);
+    paintLazyButton(cardId);
+    return;
+  }
+  lazyCollapsed.delete(cardId);
+  paintLazyButton(cardId);
+}
+
+/** 全部收回未載入的狀態,並且**把內容清空**。
+ *
+ * 清空這件事不是為了整齊,是資料隔離:原本每次換帳號都重讀一遍所有區塊,
+ * 靠的就是「新資料蓋掉舊資料」。改成按了才載入之後,不清空的話上一個
+ * 使用者的名單會原封不動留在畫面上,而新使用者不按按鈕就永遠不會被蓋掉
+ * —— 那正是跨牧場資料外洩的樣子。
+ */
+function resetLazyCards() {
+  lazyLoaded.clear();
+  lazyCollapsed.clear();
+  for (const [cardId, spec] of Object.entries(LAZY_CARDS)) {
+    const body = $(spec.body);
+    if (body) {
+      if (!lazyPristine.has(cardId)) lazyPristine.set(cardId, body.innerHTML);
+      body.innerHTML = lazyPristine.get(cardId);
+    }
+    paintLazyButton(cardId);
+  }
+  // 兩個計數徽章在 card-head 裡,不在收合的範圍內 —— 不清的話會留著
+  // 上一個牧場的「46 頭」掛在標題旁邊。
+  const review = $("reviewCount");
+  if (review) review.textContent = "";
+  const problems = $("dataProblemCount");
+  if (problems) problems.textContent = "";
+}
+
 /** `account` 換了之後要做的每一件事。
  *
  * **只有這一份。** init() 與 refreshAccount() 原本各寫一份幾乎一樣的
@@ -113,16 +226,25 @@ async function applyAccount() {
   // 後端也擋(_export 的 _need_owner),這裡只是不要留一顆按了會失敗的鈕。
   $("exportCard")?.classList.toggle("is-hidden",
                                     !account.loggedIn || !account.isOwner);
-  // 生產性能趨勢分析跟月報同一條規則:員工看得到工作與紀錄,但這類
-  // 經營層面的報表只有牧場主看得到(已確認的設計決定 #17)。
-  $("trendCard")?.classList.toggle("is-hidden",
-                                   !account.loggedIn || !account.isOwner);
+  // 分析頁那四張都是經營層面的東西,員工看得到工作與紀錄但看不到這些
+  // (已確認的設計決定 #17)。
+  //
+  // 以前其中三張是靠「送出請求、收到 403、再把卡收起來」才消失的。改成
+  // 按了才載入之後那條路沒了 —— 不送請求就不會有 403,員工會看到四顆
+  // 按不動的按鈕。改成直接看 isOwner,不必先去撞一次牆。後端該擋的照樣
+  // 擋(各端點的 _need_owner),這裡只是不要留按了會失敗的鈕。
+  const ownerOnly = !account.loggedIn || !account.isOwner;
+  for (const id of ["reviewCard", "dataProblemCard", "monthReportCard", "trendCard"]) {
+    $(id)?.classList.toggle("is-hidden", ownerOnly);
+  }
   // 登入/登出後全部重讀。少列一項的話,換帳號後那一區會留著上一個
   // 使用者的資料 —— 跨牧場的資料外洩就是這樣發生的。
+  // 分析頁那四張(值得檢視/記錄檢查/月報/趨勢)刻意不在這裡 ——
+  // 它們改成按了才載入,這裡只把它們收回未載入的狀態並清空內容。
+  resetLazyCards();
   await Promise.all([
     reloadHistory(), reloadTasks(), reloadAlerts(), reloadSows(),
-    reloadBoars(), reloadRecent(), reloadReview(), reloadDataProblems(),
-    reloadMonthReport(), reloadTrend(), reloadSettings(), reloadCustomTaskSettings(),
+    reloadBoars(), reloadRecent(), reloadSettings(), reloadCustomTaskSettings(),
   ]);
 }
 
@@ -1556,6 +1678,10 @@ document.addEventListener("click", (e) => {
   }
   if (e.target.id === "trendDownload") return downloadTrendCsv();
   if (e.target.id === "trendPrint") return downloadTrendPdf();
+
+  // 分析頁四張卡的「載入 / 收起來 / 展開」大按鈕
+  const lazy = e.target.closest?.("[data-lazy]");
+  if (lazy) return toggleLazyCard(lazy.dataset.lazy);
 });
 
 $("sowSearch")?.addEventListener("input", renderAnimalList);
@@ -2621,6 +2747,9 @@ async function undoRecord(eventId, kind, animalId) {
 // ── 值得檢視 ──
 
 async function reloadReview() {
+  // 沒按過那顆大按鈕就不去要資料。存完設定之後這裡也會被叫到一次
+  // (參數變了要重算),沒有這道守衛的話「按了才載入」就形同虛設。
+  if (!isLazyLoaded("reviewCard")) return;
   const box = $("reviewList");
   if (!box || !account.loggedIn) return;
 
@@ -2643,6 +2772,7 @@ async function reloadReview() {
  * 再看,真的出問題那天也一樣會被略過。
  */
 async function reloadDataProblems() {
+  if (!isLazyLoaded("dataProblemCard")) return;
   const box = $("dataProblemList");
   const card = $("dataProblemCard");
   if (!box || !card || !account.loggedIn) return;
@@ -2654,9 +2784,14 @@ async function reloadDataProblems() {
     return;
   }
 
-  card.classList.toggle("is-hidden", data.problems.length === 0);
   if (!data.problems.length) {
-    box.innerHTML = "";           // 修好之後不要把舊的那幾列留在 DOM 裡
+    // 以前這裡是把整張卡收起來。改成按了才載入之後不能再那樣做:使用者
+    // 剛按下「檢查記錄」,卡片卻整個消失,看起來像按壞了。明講「沒有
+    // 發現問題」才回答得了他按下去時問的那個問題。
+    $("dataProblemCount").textContent = "";
+    // data.total 是「找到幾筆問題」而不是「檢查了幾筆記錄」,不要拿它
+    // 湊句子 —— 沒問題時它是 0,會印出「0 筆記錄看起來都合理」。
+    box.innerHTML = '<p class="hint">沒有發現問題,記錄看起來都合理。</p>';
     $("dpFixForm")?.classList.add("is-hidden");
     return;
   }
@@ -2811,6 +2946,7 @@ async function submitFix() {
 let monthReportMonth = null;
 
 async function reloadMonthReport() {
+  if (!isLazyLoaded("monthReportCard")) return;
   const box = $("mrGrid");
   if (!box || !account.loggedIn) return;
 
@@ -2881,6 +3017,7 @@ let trendRequestSeq = 0;
 let lastTrendReport = null;
 
 async function reloadTrend() {
+  if (!isLazyLoaded("trendCard")) return;
   const box = $("trendGrid");
   if (!box || !account.loggedIn) return;
 

@@ -633,3 +633,30 @@ body { padding-bottom: 96px; }
 /* 期別按鈕、日期範圍、套用/重設分成三行,而不是硬塞進一行 ——
    375px 的手機放不下「週月季年」四顆加兩個日期輸入框加兩顆按鈕。 */
 #trendCard .ctask-add-row input[type="date"] { min-width: 0; }
+
+/* ── 分析頁:按了才載入的大按鈕 ──
+   這四張卡都要掃過整場的事件才算得出來,合計佔了開頁時間的八成以上,
+   而使用者多數時候開 app 是要看工作與提醒。改成一張卡一顆大按鈕。
+
+   做成整列滿版、56px 高,而不是沿用 .btn-soft:它是這張卡在載入前
+   **唯一**能按的東西,不是一排並列選項中的一個。使用者是站在豬舍裡
+   單手拿手機,跟 .etag 用 56×40 是同一個理由。 */
+.lazy-open {
+  display: block; width: 100%; min-height: 56px; margin-top: 12px;
+  padding: 15px 18px;
+  border: 1px dashed var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--accent);
+  font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.lazy-open:active:not(:disabled) { transform: scale(.99); }
+/* 載入中時明顯變淡 —— 這幾份要算個一秒上下,按下去沒有反應的話
+   使用者會再按一次。 */
+.lazy-open:disabled { color: var(--ink-faint); border-style: solid; cursor: default; }
+
+/* 載好之後同一顆變成「收起來 / 展開」。改成安靜的樣子:這時候整張卡的
+   主角是數字,不是按鈕。位置與寬度不變 —— 使用者不必重新找它在哪裡。 */
+.lazy-open.is-loaded {
+  min-height: 44px; padding: 10px 18px;
+  border-style: solid; background: none; color: var(--ink-soft);
+  font-size: 13.5px; font-weight: 500;
+}

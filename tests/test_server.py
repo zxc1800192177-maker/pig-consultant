@@ -327,6 +327,71 @@ class TestRecordFieldSuffixBug:
         assert ".map(perSowRowMarkup)" not in js
 
 
+class TestLazyAnalysisCards:
+    """分析頁那四張卡改成「按了才載入」(值得檢視/記錄檢查/月報/趨勢)。
+
+    以本場真實資料實測,它們合計佔了開頁時間的八成以上,而開 app 多半
+    是要看工作與提醒。
+
+    這裡鎖住的是**資料隔離**,不是效能。原本「換帳號就重讀所有區塊」本身
+    就是清除機制 —— 新資料蓋掉舊資料。改成懶載入之後那個機制沒了:上一個
+    牧場的名單會留在畫面上,而新使用者不按按鈕就永遠不會被蓋掉。所以
+    applyAccount() 必須呼叫 resetLazyCards(),而 resetLazyCards() 必須真的
+    把內容還原成空的。少了任何一半就是跨牧場資料外洩(憲法第十一條)。
+    """
+
+    NEXT_FN = chr(10) + "async function "
+    FN_END = chr(10) + "}"
+
+    def _app_js(self):
+        return (WEB_DIR / "app.js").read_text("utf-8")
+
+    def _apply_account_body(self):
+        js = self._app_js()
+        return js.split("async function applyAccount()")[1].split(self.NEXT_FN)[0]
+
+    def test_account_change_resets_the_lazy_cards(self):
+        assert "resetLazyCards()" in self._apply_account_body(), (
+            "applyAccount() 沒有重置懶載入的卡片,換帳號後上一個牧場的"
+            "名單會留在畫面上"
+        )
+
+    def test_the_reset_actually_clears_the_content(self):
+        """只把區塊收合起來不算清除 —— 內容還在 DOM 裡,再展開就看得到。"""
+        js = self._app_js()
+        body = js.split("function resetLazyCards()")[1].split(self.FN_END)[0]
+        assert "innerHTML" in body, "resetLazyCards() 沒有把內容還原"
+        assert "lazyLoaded.clear()" in body, "resetLazyCards() 沒有清掉已載入的標記"
+        # 收合狀態沒清的話,換帳號後那張卡會頂著上一個人留下的「收起來」
+        # 狀態重新載入 —— 資料是新的,但畫面上看起來像空的。
+        assert "lazyCollapsed.clear()" in body, "resetLazyCards() 沒有清掉收合狀態"
+
+    def test_collapsing_a_loaded_card_does_not_refetch(self):
+        """收起來只是不看,資料還在 —— 再展開重抓一次的話,這整套「按了
+        才載入」等於白做。切換收合的那條路上不可以有 load()。"""
+        js = self._app_js()
+        body = js.split("async function toggleLazyCard(")[1].split(self.FN_END)[0]
+        collapse = body.split("if (lazyLoaded.has(cardId)) {")[1].split("}")[0]
+        assert "load()" not in collapse, "切換收合時又去要了一次資料"
+
+    def test_the_heavy_reloads_are_not_in_the_eager_chain(self):
+        """在開頁的 Promise.all 裡就等於沒有懶載入。"""
+        chain = self._apply_account_body().split("await Promise.all([")[1].split("]);")[0]
+        for fn in ("reloadReview", "reloadDataProblems", "reloadMonthReport", "reloadTrend"):
+            assert fn not in chain, f"{fn} 還留在開頁就跑的清單裡"
+
+    def test_each_heavy_reload_refuses_to_run_before_its_card_is_opened(self):
+        """存完設定之後這四個都會被叫到一次(參數變了要重算)。沒有守衛
+        的話,那一次就把四張卡全部載了回來。"""
+        js = self._app_js()
+        for fn, card in (("reloadReview", "reviewCard"),
+                         ("reloadDataProblems", "dataProblemCard"),
+                         ("reloadMonthReport", "monthReportCard"),
+                         ("reloadTrend", "trendCard")):
+            body = js.split(f"async function {fn}()")[1].split(self.FN_END)[0]
+            assert f'isLazyLoaded("{card}")' in body, f"{fn} 少了懶載入守衛"
+
+
 class TestPwaAssets:
     """manifest / service worker 的檔案沒有動態產生,不會被一般測試碰到,
     改版時很容易漏改而沒人發現(圖示改名、家目錄挪動)。這裡鎖住兩件事:
