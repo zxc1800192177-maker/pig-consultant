@@ -1614,7 +1614,15 @@ async function openRecordForm(code) {
     ${usesPerSowRows(code)
       ? spec.fields.filter((f) => f.shared).map((f) => fieldMarkup(f)).join("")
         + perSowRowsField(spec)
-      : spec.fields.filter((f) => !f.perService).map(fieldMarkup).join("")}
+      // **一定要包一層箭頭函式。** Array.map 會傳三個參數
+      // (元素, 索引, 陣列),把 fieldMarkup 直接當成回呼交給 map 的話,
+      // 第二個參數 `sfx` 收到的是**索引**,欄位就被畫成
+      // data-field="positive0"、
+      // id="f_estrus_stability0";而讀值的 readRecordFields() 用的是
+      // 不帶後綴的名字,找不到就當成沒填。實際後果:驗孕選了「沒懷孕」
+      // 仍然跳「請填寫結果」記不進去,配種的發情穩定度則是選了也**靜靜
+      // 存不進去**(它不是必填,連錯誤訊息都不會出現)。
+      : spec.fields.filter((f) => !f.perService).map((f) => fieldMarkup(f)).join("")}
     <p class="rec-err is-hidden" id="recErr"></p>
     <button type="button" class="btn-primary" id="recSubmit">記錄</button>`;
 

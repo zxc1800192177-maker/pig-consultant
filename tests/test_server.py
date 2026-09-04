@@ -296,6 +296,37 @@ class TestAuthBarVisibilityBug:
         assert "display:" in rule.replace(" ", "")
 
 
+class TestRecordFieldSuffixBug:
+    """實際回報過的 bug:驗孕一次選好幾頭母豬、按了「沒懷孕」,送出時
+    仍然跳「請填寫結果」,記不進去。
+
+    根因是 `spec.fields.…map(fieldMarkup)` 這種寫法。Array.map 會傳
+    三個參數(元素, 索引, 陣列),所以 fieldMarkup(field, sfx) 的 `sfx`
+    收到的是**索引** —— 欄位被畫成 data-field="positive0",而讀值的
+    readRecordFields() 找的是不帶後綴的 "positive",找不到就當成沒填。
+
+    受害的不只驗孕。配種的「發情穩定度」同樣被畫成
+    id="f_estrus_stability0",但它不是必填欄位,所以連錯誤訊息都不會
+    出現 —— 使用者選了,資料**靜靜地存不進去**。要不是驗孕那邊會擋下來
+    報錯,這個靜默的資料遺失不知道還要多久才會被發現。
+
+    修法是包一層箭頭函式。這裡鎖住修法本身,不讓它被無意中改回去。
+    """
+
+    def test_field_markup_is_never_passed_straight_to_map(self):
+        js = (WEB_DIR / "app.js").read_text("utf-8")
+        assert ".map(fieldMarkup)" not in js, (
+            "fieldMarkup 直接當 map 的回呼會把陣列索引當成欄位後綴,"
+            "畫出來的欄位名字跟 readRecordFields() 讀的對不起來"
+        )
+
+    def test_per_sow_row_markup_is_never_passed_straight_to_map(self):
+        """同一個陷阱的另一半:一頭一列的列標記也吃第二個參數(列號),
+        被餵成索引的話每一列的後綴會跟實際列號脫鉤。"""
+        js = (WEB_DIR / "app.js").read_text("utf-8")
+        assert ".map(perSowRowMarkup)" not in js
+
+
 class TestPwaAssets:
     """manifest / service worker 的檔案沒有動態產生,不會被一般測試碰到,
     改版時很容易漏改而沒人發現(圖示改名、家目錄挪動)。這裡鎖住兩件事:
