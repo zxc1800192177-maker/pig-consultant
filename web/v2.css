@@ -598,11 +598,37 @@ body { padding-bottom: 96px; }
   position: sticky; left: 0; background: var(--surface);
   white-space: nowrap; z-index: 1;
 }
+
+/* .table-scroll 共用的 `margin: 0 -4px; padding: 0 4px` 是讓表格往卡片
+   邊緣出血的慣用手法,但那 4px 左內距仍在可捲動範圍內,而 sticky 是黏在
+   內容框(不含內距)的左緣 —— 捲到右邊時會從指標欄左側露出一條縫,透出
+   後面欄位的半個字(用 elementFromPoint 量到縫裡站的是 td.trend-v)。
+   左側改成不出血就沒有縫,右側維持原樣。
+   (試過用同色 box-shadow 補,在 border-collapse: collapse 的表格上蓋不住。)
+   加了「總計/平均」兩欄之後一定要捲到最右邊才看得到,這條縫因此從偶爾
+   才遇到變成每次都遇到,值得處理。 */
+#trendGrid .table-scroll { margin-left: 0; padding-left: 0; }
 .trend-metric { font-weight: 600; }
 
 /* 變化的箭頭/百分比。輕量的文字色塊而不是滿版的 .grade-pill ——
    一整欄都是這個,做成大顆的圓角藥丸只會讓表格更難掃過去。 */
 .trend-chg { font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+
+/* 逐格對照全國常模的顏色。只染文字不填底色 —— 55 個指標乘上 12 期,
+   填色塊會整片糊掉,數字反而看不見(母豬卡的 .t-good 那種填滿徽章
+   一頁只有七個,場合不同)。 */
+.trend-good { color: var(--good); font-weight: 700; }
+.trend-poor { color: var(--critical); font-weight: 700; }
+
+/* 總計/平均兩欄。底色跟期間欄不同、而且左邊有一條分隔線 —— 捲到最右邊
+   時要一眼分得出哪幾欄是期間、哪幾欄是整段的彙總,兩者不能混著讀。 */
+/* 不換行:欄位窄的時候「1865筆」會被折成「1865」加下一行的「筆」,
+   數字跟單位拆開讀起來像兩件事。寧可讓表格再寬一點(本來就要橫捲)。 */
+#trendGrid .trend-sum { background: var(--surface-2); white-space: nowrap; }
+#trendGrid .trend-sum-first { border-left: 2px solid var(--border); }
+
+/* 顏色的圖例。圖例裡的色票要跟表格內同一組顏色,不另外寫死色碼。 */
+.trend-legend { margin-top: 10px; line-height: 1.7; }
 
 /* 期別按鈕、日期範圍、套用/重設分成三行,而不是硬塞進一行 ——
    375px 的手機放不下「週月季年」四顆加兩個日期輸入框加兩顆按鈕。 */

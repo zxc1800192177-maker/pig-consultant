@@ -1234,6 +1234,17 @@ class TestTrendReportEndpoint:
         body = app.handle_get("/api/trend-report", token)[1]
         assert body["farmName"] == "farmer 的牧場"
 
+    def test_carries_the_summary_and_norm_flags(self, farm):
+        """**這條擋的是一個真實發生過的漏接。** 這個端點是逐欄挑著回,
+        不是把 trend_report() 整包送出去(periods 裡的 date 要先轉字串),
+        所以 trend.py 新增的欄位漏挑了,前端會安靜地少畫兩欄 —— 畫面上
+        看起來只是「總計/平均沒出現」,不會有任何錯誤訊息。
+        """
+        app, token, _ = farm
+        body = app.handle_get("/api/trend-report", token)[1]
+        assert body["hasSummary"] is True
+        assert body["normSource"]["year"] > 0
+
     def test_an_unknown_grain_is_rejected(self, farm):
         app, token, _ = farm
         assert app.handle_get("/api/trend-report?grain=fortnight", token)[0] == 400

@@ -44,32 +44,76 @@ export function changeText(change, unit, digits) {
   return `${arrow} ${delta}${pct}`;
 }
 
+/** 一格數字對照全國常模的級距 class。
+ *
+ * 只有全國前 25%(good)與後 25%(poor)上色,中間 50% 留白 —— 這份
+ * 報告有 55 個指標乘上最多 12 期,每一格都有顏色等於沒有重點。
+ *
+ * 用獨立的 .trend-good/.trend-poor 而不是母豬卡那組 .t-good/.t-poor:
+ * 那是填滿底色的徽章,適合一頁只有七個的場合;整張表格填滿色塊會蓋掉
+ * 數字本身。這裡只染文字顏色,跟 PigCHAMP 原版一樣。
+ */
+export function tierClass(tier) {
+  if (tier === "good") return " trend-good";
+  if (tier === "poor") return " trend-poor";
+  return "";
+}
+
 /** 一個區段(配種/分娩/仔豬死亡/離乳/在養與異動)畫成一張表。
  *
  * 每個區段各自成表而不是全部塞進一張大表 —— 55 個指標排在一起,使用者
  * 找不到「配種」跟「分娩」的分界在哪裡,表格再寬也沒有用。
+ *
+ * `hasSummary` 為假時整個不畫「總計/平均」兩欄 —— 期間不連續時後端算
+ * 不出整段的比率(見 trend._summary),畫兩欄破折號只是佔位。
  */
-export function trendSectionTable(section, periods) {
+export function trendSectionTable(section, periods, hasSummary = false) {
   const header = periods.map((p) => `<th>${escapeHtml(p.label)}</th>`).join("");
+  const summaryHead = hasSummary
+    ? '<th class="trend-sum trend-sum-first">總計</th><th class="trend-sum">平均</th>'
+    : "";
   const rows = section.rows.map((r) => {
+    const tiers = r.tiers || [];
     const cells = r.values
-      .map((v) => `<td>${trendValue(v, r.digits, r.unit)}</td>`)
+      .map((v, i) => `<td class="trend-v${tierClass(tiers[i])}">`
+                     + `${trendValue(v, r.digits, r.unit)}</td>`)
       .join("");
+    const summary = hasSummary
+      ? `<td class="trend-sum trend-sum-first">`
+        + `${trendValue(r.total, r.digits, r.unit)}</td>`
+        + `<td class="trend-sum${tierClass(r.avgTier)}">`
+        + `${trendValue(r.avg, r.digits, r.unit)}</td>`
+      : "";
     const tone = changeTone(r.change);
     const change = r.change
       ? `<span class="trend-chg tone-${tone}">${changeText(r.change, r.unit, r.digits)}</span>`
       : '<span class="v-none">—</span>';
-    return `<tr><td class="trend-metric">${escapeHtml(r.label)}</td>${cells}<td>${change}</td></tr>`;
+    return `<tr><td class="trend-metric">${escapeHtml(r.label)}</td>${cells}`
+           + `${summary}<td>${change}</td></tr>`;
   }).join("");
 
   return `
     <div class="section-label">${escapeHtml(section.label)}</div>
     <div class="table-scroll">
       <table>
-        <thead><tr><th>指標</th>${header}<th>變化</th></tr></thead>
+        <thead><tr><th>指標</th>${header}${summaryHead}<th>變化</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
+}
+
+/** 顏色的圖例。**沒有圖例的顏色等於沒有意義** —— 使用者看到一格是紅的,
+ * 得知道那是在跟誰比、比的是哪一年的資料,才有辦法決定要不要當一回事。
+ */
+export function trendLegend(source) {
+  if (!source) return "";
+  const who = `${escapeHtml(String(source.year))} 年${escapeHtml(source.name || "")}`;
+  const farms = source.farms ? `(全國 ${source.farms} 場)` : "";
+  return `<p class="hint trend-legend">
+    <span class="trend-good">綠色</span>=全國前 25%、
+    <span class="trend-poor">紅色</span>=全國後 25%,中間 50% 不上色。
+    基準為 ${who}${farms};沒有對應常模的指標不上色。
+  </p>`;
 }
 
 /** 整份報告。沒有任何區段代表這段期間一筆記錄都沒有 —— 印一堆空表格
@@ -79,7 +123,10 @@ export function trendReportGrid(report) {
   if (!report.sections || !report.sections.length) {
     return '<p class="hint">這段期間沒有記錄,算不出任何指標。</p>';
   }
-  return report.sections.map((s) => trendSectionTable(s, report.periods)).join("");
+  const tables = report.sections
+    .map((s) => trendSectionTable(s, report.periods, report.hasSummary))
+    .join("");
+  return tables + trendLegend(report.normSource);
 }
 
 /** 完整版下載用的 CSV。一列一個指標,一欄一個期間 —— 跟畫面上的表格
@@ -89,15 +136,19 @@ export function trendReportGrid(report) {
  * 「這個系統匯出的表格要怎麼變成合法 CSV」,答案只該有一份。
  */
 export function trendCsv(report) {
+  const num = (v, digits) => (v === null || v === undefined
+    ? "" : Number(v.toFixed(digits)));
+  const summaryHead = report.hasSummary ? ["總計", "平均"] : [];
   const headers = ["區段", "指標", "單位",
-                   ...report.periods.map((p) => p.label), "變化(絕對值)", "變化(%)"];
+                   ...report.periods.map((p) => p.label),
+                   ...summaryHead, "變化(絕對值)", "變化(%)"];
   const rows = [];
   for (const section of report.sections || []) {
     for (const r of section.rows) {
       rows.push([
         section.label, r.label, r.unit,
-        ...r.values.map((v) => (v === null || v === undefined
-          ? "" : Number(v.toFixed(r.digits)))),
+        ...r.values.map((v) => num(v, r.digits)),
+        ...(report.hasSummary ? [num(r.total, r.digits), num(r.avg, r.digits)] : []),
         r.change ? Number(r.change.delta.toFixed(r.digits)) : "",
         r.change && r.change.pct !== null && r.change.pct !== undefined
           ? Number(r.change.pct.toFixed(1)) : "",

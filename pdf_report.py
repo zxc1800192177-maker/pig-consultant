@@ -86,22 +86,53 @@ def _value_text(v, digits: int, unit: str) -> str:
     return "—" if v is None else f"{v:.{digits}f}{unit}"
 
 
-def _section_table(section: dict, periods: list, body_style) -> Table:
-    header = ["指標"] + [p["label"] for p in periods] + ["變化"]
+def _tier_color(tier: Optional[str]):
+    """一格數字對照全國常模的顏色。中間 50%(mid)與比不出來的(None)
+    都不上色 —— 55 個指標乘上 12 期,每格都有顏色等於沒有重點。
+    """
+    if tier == "good":
+        return GOOD
+    if tier == "poor":
+        return CRITICAL
+    return None
+
+
+def _section_table(section: dict, periods: list, body_style,
+                   has_summary: bool = False) -> Table:
+    summary_head = ["總計", "平均"] if has_summary else []
+    header = ["指標"] + [p["label"] for p in periods] + summary_head + ["變化"]
     rows = [header]
     change_colors = []
-    for r in section["rows"]:
+    tier_cells = []          # (欄, 列, 顏色),逐格對照常模的紅綠
+    for row_i, r in enumerate(section["rows"], start=1):
         cells = [Paragraph(r["label"], body_style)]
         cells += [_value_text(v, r["digits"], r["unit"]) for v in r["values"]]
+        for col_i, tier in enumerate(r.get("tiers") or [], start=1):
+            color = _tier_color(tier)
+            if color is not None:
+                tier_cells.append((col_i, row_i, color))
+        if has_summary:
+            cells.append(_value_text(r.get("total"), r["digits"], r["unit"]))
+            cells.append(_value_text(r.get("avg"), r["digits"], r["unit"]))
+            avg_color = _tier_color(r.get("avgTier"))
+            if avg_color is not None:
+                tier_cells.append((len(periods) + 2, row_i, avg_color))
         text, color = _change_text(r.get("change"), r["unit"], r["digits"])
         cells.append(text)
         change_colors.append(color)
         rows.append(cells)
 
+    # 欄寬不能平均分。「▼ -1.1隻 (+13%)」比任何一期的「10.0隻」長一倍
+    # 以上,平均分下去變化欄會直接疊到隔壁欄的數字上(加了總計/平均兩欄
+    # 之後實際發生過)。所以變化欄與彙總欄各給固定寬度,期間欄分剩下的。
+    label_w = 38 * mm
+    change_w = 27 * mm
+    summary_w = 14 * mm
+    fixed = label_w + change_w + summary_w * len(summary_head)
     n_periods = len(periods)
-    label_w = 42 * mm
-    other_w = (257 * mm - label_w) / (n_periods + 1) if n_periods else 100 * mm
-    col_widths = [label_w] + [other_w] * (n_periods + 1)
+    period_w = (257 * mm - fixed) / n_periods if n_periods else 100 * mm
+    col_widths = ([label_w] + [period_w] * n_periods
+                  + [summary_w] * len(summary_head) + [change_w])
 
     t = Table(rows, colWidths=col_widths, repeatRows=1)
     style = [
@@ -118,11 +149,34 @@ def _section_table(section: dict, periods: list, body_style) -> Table:
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
     ]
+    if has_summary:
+        # 彙總兩欄要跟期間欄分得開 —— 印在紙上沒辦法捲動比對,兩者混在
+        # 一起讀會把「整段的平均」當成「某一期的值」。
+        first = len(periods) + 1
+        style.append(("BACKGROUND", (first, 0), (first + 1, -1),
+                      colors.HexColor("#f4f1ee")))
+        style.append(("BACKGROUND", (first, 0), (first + 1, 0), HEADER_BG))
+        style.append(("LINEBEFORE", (first, 0), (first, -1), 1.2, GRID))
+    for col_i, row_i, color in tier_cells:
+        style.append(("TEXTCOLOR", (col_i, row_i), (col_i, row_i), color))
+        style.append(("FONT", (col_i, row_i), (col_i, row_i), FONT_BOLD, 6.6))
     for i, color in enumerate(change_colors, start=1):
         style.append(("TEXTCOLOR", (-1, i), (-1, i), color))
         style.append(("FONT", (-1, i), (-1, i), FONT, 6.6))
     t.setStyle(TableStyle(style))
     return t
+
+
+def _legend_text(source: Optional[dict]) -> str:
+    """顏色的圖例。紙本比畫面更需要 —— 印出來拿給獸醫或飼料廠看的時候,
+    看的人沒辦法把滑鼠移上去問這個紅色是什麼意思。
+    """
+    if not source:
+        return ""
+    farms = f"(全國 {source['farms']} 場)" if source.get("farms") else ""
+    return (f"綠色 = 全國前 25%,紅色 = 全國後 25%,中間 50% 不上色。"
+            f"基準為 {source.get('year')} 年{source.get('name', '')}{farms};"
+            f"沒有對應常模的指標不上色。")
 
 
 def build_pdf(report: dict, farm_name: str, generated_at: date) -> bytes:
@@ -170,13 +224,20 @@ def build_pdf(report: dict, farm_name: str, generated_at: date) -> bytes:
     ]
 
     sections = report.get("sections") or []
+    has_summary = bool(report.get("hasSummary"))
+    legend = _legend_text(report.get("normSource"))
     if not sections:
         story.append(Paragraph("這段期間沒有記錄,算不出任何指標。", body_style))
     for i, section in enumerate(sections):
         if i:
             story.append(PageBreak())
         story.append(Paragraph(section["label"], h_style))
-        story.append(_section_table(section, periods, body_style))
+        story.append(_section_table(section, periods, body_style, has_summary))
+        # 圖例每一頁都印一次,不是只印在最後一頁 —— 區段之間有 PageBreak,
+        # 使用者常常只抽其中一頁出來看或傳給別人。
+        if legend:
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(legend, meta_style))
 
     doc.build(story)
     return buf.getvalue()

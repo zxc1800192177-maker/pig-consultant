@@ -1419,6 +1419,12 @@ class Application:
                         "start": _iso(p["start"]), "end": _iso(p["end"])}
                        for p in report["periods"]],
             "sections": report["sections"],
+            # 「總計/平均」兩欄與常模配色的依據。這裡是逐欄挑著回,不是
+            # 整包 report 直接送出去 —— periods 裡的 date 物件要先轉字串。
+            # 挑漏了的話前端會安靜地少畫兩欄(實際發生過),新增欄位時
+            # 要記得補在這裡。
+            "hasSummary": report["hasSummary"],
+            "normSource": report["normSource"],
         }
 
     def trend_report_pdf(self, token, path):

@@ -118,8 +118,12 @@ class TestConceptionRate:
         assert got["conception_rate"] == [0.0]
 
     def test_being_served_again_means_the_first_one_failed(self):
-        """配種後隔 21 天又配種 = 重發情 = 第一次是陰性(使用者說明)。"""
-        got = self._one_heat([ev(1, "MT", d("2026-03-27"))])
+        """配種後隔 21 天又配種 = 重發情 = 第一次是陰性(使用者說明)。
+
+        重發情那一次刻意放到下個月:它自己也是一次可判定的發情,留在三月
+        的話這條測試會同時量到兩次發情的結果,測不出「第一次是陰性」。
+        """
+        got = self._one_heat([ev(1, "MT", d("2026-04-01"))])
         assert got["conception_rate"] == [0.0]
 
     def test_an_abortion_still_counts_as_conceived(self):
@@ -132,6 +136,32 @@ class TestConceptionRate:
         events = [ev(1, "MT", d("2026-03-30"))]
         spans = trend.periods(d("2026-03-01"), d("2026-03-31"), "month")
         got = values([sow(1)], events, spans)
+        assert got.get("conception_rate", [None]) == [None]
+        assert got.get("judged_heats", [None]) == [None]
+
+    def test_no_bad_news_counts_as_conceived_before_she_farrows(self):
+        """**這是一個修過的真實 bug。**
+
+        分娩是受胎的正面證據,但它要等 114 天才出現;重發情、驗孕陰性這些
+        負面證據 21–45 天就看得到。所以「只有分娩才算受胎」的話,最近三、
+        四個月判得出來的全是失敗的 —— 實測讓 2026/05 的受胎率變成 4.2%,
+        而同期歷史水準是七成多。
+
+        依使用者說明的規則,過了反證該出現的期間還是沒有反證,就是受胎。
+        """
+        events = [ev(1, "MT", d("2026-03-05")), ev(2, "MT", d("2026-06-30"))]
+        spans = trend.periods(d("2026-03-01"), d("2026-03-31"), "month")
+        got = values([sow(1), sow(2)], events, spans)
+        assert got["conception_rate"] == [100.0]
+        assert got["judged_heats"] == [1]
+
+    def test_she_who_left_before_the_answer_showed_is_not_counted(self):
+        """還沒看得出結果就被淘汰的,算受胎會虛報成績、算陰性會冤枉她。"""
+        events = [ev(1, "MT", d("2026-03-05")),
+                  ev(1, trend.CULL, d("2026-03-20"), reason="肢蹄"),
+                  ev(2, "MT", d("2026-06-30"))]
+        spans = trend.periods(d("2026-03-01"), d("2026-03-31"), "month")
+        got = values([sow(1), sow(2)], events, spans)
         assert got.get("conception_rate", [None]) == [None]
         assert got.get("judged_heats", [None]) == [None]
 
@@ -278,3 +308,129 @@ class TestComparingArbitraryPeriods:
                  trend.Period("b", "今年", d("2026-01-01"), d("2026-08-31"))]
         got = values([sow(1)], events, spans)
         assert got["alive_per_litter"] == [10.0, 12.0]
+
+
+def rows(sows, events, spans, settings=None):
+    """把報告攤平成 {指標: 整列},要看 total/avg/tiers 時用這個。"""
+    rep = trend.trend_report(sows, events, spans, settings)
+    return {r["key"]: r for s in rep["sections"] for r in s["rows"]}
+
+
+def months(*keys):
+    """給幾個 "YYYY-MM",切成對應的整月期間。"""
+    out = []
+    for key in keys:
+        start = d(key + "-01")
+        out.append(trend.Period(key, key, start,
+                                trend._add_month(start, 1) - timedelta(days=1)))
+    return out
+
+
+class TestSummaryColumns:
+    """右側的「總計 / 平均」兩欄(對照 PigCHAMP 原版報告的同兩欄)。"""
+
+    def test_counts_add_up_to_the_total_shown(self):
+        """總計必須等於畫面上那幾欄相加 —— 牧場主會自己加一遍。"""
+        events = [ev(1, "FW", d("2026-01-05"), born_alive=10),
+                  ev(2, "FW", d("2026-01-20"), born_alive=11),
+                  ev(3, "FW", d("2026-02-10"), born_alive=12)]
+        got = rows([sow(1), sow(2), sow(3)], events, months("2026-01", "2026-02"))
+        assert got["litters"]["values"] == [2, 1]
+        assert got["litters"]["total"] == 3
+        assert got["litters"]["avg"] == 1.5          # 3 ÷ 2 期
+
+    def test_a_rate_is_pooled_not_averaged(self):
+        """比率的平均要把整段當一期重算,不是把各期的比率平均。
+
+        一月 2 窩、二月 1 窩,活仔 10+11 與 30。各期窩均是 10.5 與 30,
+        算術平均 20.25;但整段其實是 51÷3 = 17.0。窩數差很多的時候,
+        算術平均等於讓那 1 窩跟 2 窩一樣重。
+        """
+        events = [ev(1, "FW", d("2026-01-05"), born_alive=10),
+                  ev(2, "FW", d("2026-01-20"), born_alive=11),
+                  ev(3, "FW", d("2026-02-10"), born_alive=30)]
+        got = rows([sow(1), sow(2), sow(3)], events, months("2026-01", "2026-02"))
+        assert got["alive_per_litter"]["values"] == [10.5, 30.0]
+        assert got["alive_per_litter"]["avg"] == 17.0
+        assert got["alive_per_litter"]["total"] is None   # 比率相加沒有意義
+
+    def test_distinct_counts_are_not_summed(self):
+        """同一頭公豬跨兩期用,總計是 1 頭不是 2 頭。"""
+        events = [ev(1, "MT", d("2026-01-05"), boar_tag="B1"),
+                  ev(2, "MT", d("2026-02-05"), boar_tag="B1")]
+        got = rows([sow(1), sow(2)], events, months("2026-01", "2026-02"))
+        assert got["boars_used"]["values"] == [1, 1]
+        assert got["boars_used"]["total"] == 1
+        assert got["boars_used"]["avg"] == 1.0
+
+    def test_a_stock_level_gets_no_total(self):
+        """期末在養是某一天的存量,各期相加是個沒有意義的數字。"""
+        events = [ev(1, "FW", d("2026-01-05"), born_alive=10)]
+        got = rows([sow(1), sow(2)], events, months("2026-01", "2026-02"))
+        assert got["ending_herd"]["total"] is None
+        assert got["ending_herd"]["avg"] is not None
+
+    def test_non_contiguous_periods_get_no_summary(self):
+        """2023 跟 2025 並排比較時,「整段重算」會把沒被選到的 2024 也算
+        進去 —— 那不是使用者要的任何一個數字,所以整個不給。"""
+        events = [ev(1, "FW", d("2024-05-04"), born_alive=10),
+                  ev(1, "FW", d("2026-05-04"), born_alive=12)]
+        spans = [trend.Period("a", "2024", d("2024-01-01"), d("2024-12-31")),
+                 trend.Period("b", "今年", d("2026-01-01"), d("2026-08-31"))]
+        rep = trend.trend_report([sow(1)], events, spans)
+        assert rep["hasSummary"] is False
+        row = {r["key"]: r for s in rep["sections"] for r in s["rows"]}["litters"]
+        assert row["total"] is None and row["avg"] is None
+
+    def test_contiguous_periods_do_get_a_summary(self):
+        events = [ev(1, "FW", d("2026-01-05"), born_alive=10)]
+        rep = trend.trend_report([sow(1)], events, months("2026-01", "2026-02"))
+        assert rep["hasSummary"] is True
+
+
+class TestNationalNormTiers:
+    """逐格對照全國常模的紅綠級距。"""
+
+    def test_a_bad_value_is_marked_poor(self):
+        """離乳前死亡率 30% 落在全國最差一段(第 90 百分位是 24.38%)。"""
+        assert trend._tier(30.0, trend._norm("preweaning_mortality")) == "poor"
+
+    def test_a_good_value_is_marked_good(self):
+        """8% 優於全國前 10%(8.77%)。"""
+        assert trend._tier(8.0, trend._norm("preweaning_mortality")) == "good"
+
+    def test_the_middle_half_is_left_uncoloured(self):
+        """全國中間 50% 不上色 —— 55 個指標滿頁紅綠等於沒有重點。"""
+        assert trend._tier(17.0, trend._norm("preweaning_mortality")) == "mid"
+
+    def test_direction_is_taken_from_the_metric_not_guessed(self):
+        """越高越好的指標,高值才是 good。"""
+        assert trend._tier(26.0, trend._norm("psy")) == "good"
+        assert trend._tier(17.0, trend._norm("psy")) == "poor"
+
+    def test_no_norm_means_no_colour_not_a_middle_grade(self):
+        """比不出來跟「比得出來但普通」在畫面上必須是兩種樣子。"""
+        assert trend._norm("services") is None
+        assert trend._tier(123.0, trend._norm("services")) is None
+
+    def test_missing_value_is_never_coloured(self):
+        assert trend._tier(None, trend._norm("psy")) is None
+
+    def test_every_mapped_metric_agrees_with_the_norm_on_direction(self):
+        """**這條是護欄。** 本系統說「越低越好」而常模說「越高越好」的
+        指標如果被加進 NORM_KEYS,整排顏色會反過來 —— 而且反得很安靜,
+        畫面上看起來一切正常。日後有人加對照時,這裡要先炸。
+        """
+        for metric_key, norm_key in trend.NORM_KEYS.items():
+            metric = trend.METRICS[metric_key]
+            assert metric.better is not None, (
+                f"{metric_key} 本身沒有好壞方向,不該對照常模上色")
+            norm = trend._norm(metric_key)
+            assert norm["higherBetter"] == (metric.better == trend.HIGH), (
+                f"{metric_key} 與常模 {norm_key} 的好壞方向相反")
+
+    def test_the_norm_source_is_reported(self):
+        """畫面上要講清楚顏色的依據是哪一年、幾場的常模。"""
+        rep = trend.trend_report([sow(1)], [], months("2026-01"))
+        assert rep["normSource"]["year"] == 2025
+        assert rep["normSource"]["farms"] > 0

@@ -14,10 +14,12 @@ import {
   changeTone,
   trendCsv,
   trendCsvFileName,
+  trendLegend,
   trendPdfFileName,
   trendReportGrid,
   trendSectionTable,
   trendValue,
+  tierClass,
   widestStart,
 } from "../../web/lib/trendreport.js";
 
@@ -218,5 +220,101 @@ describe("widestStart", () => {
     const weekDays = (new Date("2026-08-31") - new Date(week)) / 86400000;
     const yearDays = (new Date("2026-08-31") - new Date(year)) / 86400000;
     assert.ok(yearDays > weekDays * 10);
+  });
+});
+
+// 帶著「總計/平均」與全國常模級距的報告。後端算好之後前端只負責畫,
+// 所以這裡的 tiers 是直接給定的,不重新判級(判級是 trend.py 的事)。
+const SUMMARY_REPORT = {
+  periods: PERIODS,
+  hasSummary: true,
+  normSource: { name: "豬隻生產指標年報", year: 2025, farms: 110 },
+  sections: [
+    {
+      key: "weaning", label: "離乳",
+      rows: [
+        { key: "preweaning_mortality", label: "離乳前死亡率", unit: "%",
+          digits: 1, better: "low", values: [23.6, 8.1],
+          change: { delta: -15.5, pct: -65.7, improved: true },
+          total: null, avg: 16.2,
+          norm: { key: "preweaning_mortality", higherBetter: false },
+          tiers: ["poor", "good"], avgTier: "mid" },
+        { key: "piglets_weaned", label: "離乳仔豬數", unit: "隻", digits: 0,
+          better: null, values: [900, 850], change: null,
+          total: 1750, avg: 875,
+          norm: null, tiers: [null, null], avgTier: null },
+      ],
+    },
+  ],
+};
+
+describe("總計 / 平均兩欄", () => {
+  it("hasSummary 為真時多出兩欄,標題在最右邊", () => {
+    const html = trendSectionTable(SUMMARY_REPORT.sections[0], PERIODS, true);
+    assert.match(html, /<th class="trend-sum trend-sum-first">總計<\/th>/);
+    assert.match(html, /<th class="trend-sum">平均<\/th>/);
+  });
+
+  it("hasSummary 為假時完全不畫,不是畫兩欄破折號", () => {
+    const html = trendSectionTable(SUMMARY_REPORT.sections[0], PERIODS, false);
+    assert.ok(!html.includes("總計"));
+    assert.ok(!html.includes("平均"));
+  });
+
+  it("比率沒有總計,印 — 而不是 0", () => {
+    const html = trendSectionTable(SUMMARY_REPORT.sections[0], PERIODS, true);
+    const row = html.split("<tr>").find((r) => r.includes("離乳前死亡率"));
+    assert.match(row, /trend-sum trend-sum-first"><span class="v-none">—<\/span>/);
+  });
+
+  it("數量的總計照常印出來", () => {
+    const html = trendSectionTable(SUMMARY_REPORT.sections[0], PERIODS, true);
+    const row = html.split("<tr>").find((r) => r.includes("離乳仔豬數"));
+    assert.match(row, /1750<span class="u">隻<\/span>/);
+  });
+
+  it("CSV 也跟著多兩欄,位置跟畫面一致", () => {
+    const rows = parseCsv(trendCsv(SUMMARY_REPORT));
+    assert.deepEqual(rows[0], ["區段", "指標", "單位", "2025 年", "2026 年",
+      "總計", "平均", "變化(絕對值)", "變化(%)"]);
+    const weaned = rows.find((r) => r[1] === "離乳仔豬數");
+    assert.equal(weaned[5], "1750");
+    assert.equal(weaned[6], "875");
+  });
+});
+
+describe("全國常模的逐格配色", () => {
+  it("好的那格是綠的、差的那格是紅的", () => {
+    const html = trendSectionTable(SUMMARY_REPORT.sections[0], PERIODS, true);
+    const row = html.split("<tr>").find((r) => r.includes("離乳前死亡率"));
+    assert.match(row, /trend-v trend-poor">23\.6/);
+    assert.match(row, /trend-v trend-good">8\.1/);
+  });
+
+  it("中間 50% 不上色 —— 滿頁紅綠等於沒有重點", () => {
+    assert.equal(tierClass("mid"), "");
+  });
+
+  it("沒有常模可對照的指標整排都不上色", () => {
+    const html = trendSectionTable(SUMMARY_REPORT.sections[0], PERIODS, true);
+    const row = html.split("<tr>").find((r) => r.includes("離乳仔豬數"));
+    assert.ok(!row.includes("trend-good"));
+    assert.ok(!row.includes("trend-poor"));
+  });
+
+  it("比不出來(null)跟普通(mid)一樣不上色,但都不會誤標成好或壞", () => {
+    assert.equal(tierClass(null), "");
+    assert.equal(tierClass(undefined), "");
+  });
+
+  it("圖例講清楚顏色在跟誰比、哪一年的資料", () => {
+    const html = trendReportGrid(SUMMARY_REPORT);
+    assert.match(html, /2025 年豬隻生產指標年報/);
+    assert.match(html, /110 場/);
+    assert.match(html, /前 25%/);
+  });
+
+  it("沒有常模來源時不硬畫一段沒有內容的圖例", () => {
+    assert.equal(trendLegend(null), "");
   });
 });

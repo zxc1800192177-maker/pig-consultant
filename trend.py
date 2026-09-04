@@ -29,6 +29,7 @@ import collections
 from datetime import date, timedelta
 from typing import Dict, Iterable, List, NamedTuple, Optional
 
+from core import benchmark, grading
 from schedule import (
     ABORT, CULL, DEATH, EXIT_EVENTS, FARROW, MATE, PIGLET_LOSS, PREG_CHECK,
     WEAN, settings_with_defaults, _by_sow,
@@ -63,17 +64,35 @@ class Period(NamedTuple):
     end: date
 
 
+# 右側「總計 / 平均」兩欄怎麼算 —— 對照 PigCHAMP 原版報告的同兩欄。
+#
+# 關鍵是**比率不可以取各期的算術平均**。三月配了 200 次、八月配了 20 次,
+# 把兩個月的受胎率直接平均,等於讓那 20 次跟 200 次一樣重;算出來的不是
+# 「這段期間的受胎率」,而是「月受胎率的平均」,兩者可以差好幾個百分點。
+# 所以比率型指標的平均是把整段期間當成一期重算(POOLED),分子分母各自
+# 累加後才相除。
+SUM = "sum"            # 總計 = 整段重算(等於各期相加);平均 = 總計 ÷ 期數
+POOLED = "pooled"      # 總計 = 無(相加沒有意義);平均 = 整段重算
+DISTINCT = "distinct"  # 總計 = 整段的相異個數;平均 = 各期的算術平均
+MEAN = "mean"          # 總計 = 無;平均 = 各期的算術平均(期末快照類)
+
+
 class Metric(NamedTuple):
     """一個指標。
 
     `better` 說明哪個方向算進步 —— 「死胎率下降」跟「活仔數下降」是完全
     相反的兩件事,畫面上要標對顏色就得知道這件事,不能讓前端自己猜。
+
+    `agg` 說明右側兩欄怎麼彙總,預設 POOLED(比率型)。數量型要明寫
+    SUM,漏標的話只是少一個總計,不會算出錯的數字 —— 這個預設值是刻意
+    往「寧可少給」的方向倒。
     """
     key: str
     label: str
     unit: str
     digits: int
     better: Optional[str]      # "high" / "low" / None(純數量,無所謂好壞)
+    agg: str = POOLED
 
 
 class Section(NamedTuple):
@@ -86,28 +105,29 @@ HIGH, LOW = "high", "low"
 
 SECTIONS: List[Section] = [
     Section("breeding", "配種", [
-        Metric("services", "配種筆數", "筆", 0, None),
-        Metric("heats", "配種頭次", "次", 0, None),
+        Metric("services", "配種筆數", "筆", 0, None, SUM),
+        Metric("heats", "配種頭次", "次", 0, None, SUM),
         Metric("services_per_heat", "每次發情配種次數", "次", 2, None),
-        Metric("first_services", "初配頭數", "頭", 0, None),
-        Metric("gilt_first_services", "新女豬初配", "頭", 0, None),
+        Metric("first_services", "初配頭數", "頭", 0, None, SUM),
+        Metric("gilt_first_services", "新女豬初配", "頭", 0, None, SUM),
         Metric("wean_to_service_days", "離乳到配種間隔", "天", 1, LOW),
         Metric("serviced_within_7d_pct", "離乳後 7 天內配種", "%", 1, HIGH),
-        Metric("repeat_heats", "重發情配種", "次", 0, LOW),
+        Metric("repeat_heats", "重發情配種", "次", 0, LOW, SUM),
         Metric("repeat_pct", "重發情比率", "%", 1, LOW),
-        Metric("boars_used", "使用公豬數", "頭", 0, None),
+        # 同一頭公豬會跨期重複使用,相異個數不可相加,平均也只能取各期平均。
+        Metric("boars_used", "使用公豬數", "頭", 0, None, DISTINCT),
         Metric("conception_rate", "受胎率", "%", 1, HIGH),
-        Metric("judged_heats", "受胎率可判定次數", "次", 0, None),
+        Metric("judged_heats", "受胎率可判定次數", "次", 0, None, SUM),
         Metric("avg_service_parity", "平均配種胎次", "胎", 1, None),
     ]),
     Section("farrowing", "分娩", [
-        Metric("litters", "分娩窩數", "窩", 0, None),
+        Metric("litters", "分娩窩數", "窩", 0, None, SUM),
         Metric("farrowing_rate", "分娩率", "%", 1, HIGH),
-        Metric("assisted", "助產分娩", "窩", 0, LOW),
+        Metric("assisted", "助產分娩", "窩", 0, LOW, SUM),
         Metric("small_litters_pct", "活仔少於 7 頭的窩", "%", 1, LOW),
-        Metric("total_born", "總產仔數", "隻", 0, None),
+        Metric("total_born", "總產仔數", "隻", 0, None, SUM),
         Metric("born_per_litter", "窩均總仔數", "隻", 1, HIGH),
-        Metric("born_alive", "活仔數", "隻", 0, None),
+        Metric("born_alive", "活仔數", "隻", 0, None, SUM),
         Metric("alive_per_litter", "窩均活仔數", "隻", 1, HIGH),
         Metric("stillborn_pct", "死胎率", "%", 1, LOW),
         Metric("stillborn_per_litter", "窩均死胎", "隻", 1, LOW),
@@ -117,18 +137,18 @@ SECTIONS: List[Section] = [
         Metric("avg_farrow_parity", "平均分娩胎次", "胎", 1, None),
     ]),
     Section("piglet_loss", "仔豬死亡", [
-        Metric("piglet_deaths", "仔豬死亡(逐筆記錄)", "隻", 0, LOW),
+        Metric("piglet_deaths", "仔豬死亡(逐筆記錄)", "隻", 0, LOW, SUM),
         Metric("piglet_death_pct", "記錄到的死亡占活仔數", "%", 1, LOW),
         Metric("avg_death_age", "死亡平均日齡", "天", 1, None),
-        Metric("deaths_under_2d", "未滿 2 日齡", "隻", 0, LOW),
+        Metric("deaths_under_2d", "未滿 2 日齡", "隻", 0, LOW, SUM),
         Metric("deaths_under_2d_pct", "未滿 2 日齡占死亡數", "%", 1, None),
-        Metric("deaths_2_8d", "2–8 日齡", "隻", 0, LOW),
-        Metric("deaths_over_8d", "超過 8 日齡", "隻", 0, LOW),
+        Metric("deaths_2_8d", "2–8 日齡", "隻", 0, LOW, SUM),
+        Metric("deaths_over_8d", "超過 8 日齡", "隻", 0, LOW, SUM),
         Metric("crushed_pct", "母豬壓死占死亡數", "%", 1, LOW),
     ]),
     Section("weaning", "離乳", [
-        Metric("sows_weaned", "離乳母豬數", "頭", 0, None),
-        Metric("piglets_weaned", "離乳仔豬數", "隻", 0, None),
+        Metric("sows_weaned", "離乳母豬數", "頭", 0, None, SUM),
+        Metric("piglets_weaned", "離乳仔豬數", "隻", 0, None, SUM),
         Metric("weaned_per_litter", "窩均離乳數", "隻", 1, HIGH),
         Metric("preweaning_mortality", "離乳前死亡率", "%", 1, LOW),
         Metric("lactation_days", "哺乳天數", "天", 1, None),
@@ -138,21 +158,61 @@ SECTIONS: List[Section] = [
     ]),
     Section("herd", "在養與異動", [
         Metric("avg_herd", "平均在養母豬", "頭", 0, None),
-        Metric("ending_herd", "期末在養母豬", "頭", 0, None),
+        # 期末在養是**某一天的存量**,不是期間內累加出來的量:各期相加會
+        # 得到一個沒有意義的數字,所以只給各期的算術平均、不給總計。
+        Metric("ending_herd", "期末在養母豬", "頭", 0, None, MEAN),
         Metric("avg_parity", "平均胎次", "胎", 1, None),
-        Metric("gilt_entries", "新女豬入群", "頭", 0, None),
+        Metric("gilt_entries", "新女豬入群", "頭", 0, None, SUM),
         Metric("replacement_rate", "更新率(年化)", "%", 1, None),
-        Metric("culls", "淘汰", "頭", 0, None),
+        Metric("culls", "淘汰", "頭", 0, None, SUM),
         Metric("cull_rate", "淘汰率(年化)", "%", 1, LOW),
         Metric("avg_cull_parity", "平均淘汰胎次", "胎", 1, None),
-        Metric("sow_deaths", "母豬死亡", "頭", 0, LOW),
+        Metric("sow_deaths", "母豬死亡", "頭", 0, LOW, SUM),
         Metric("mortality_rate", "母豬死亡率(年化)", "%", 1, LOW),
-        Metric("abortions", "流產", "次", 0, LOW),
+        Metric("abortions", "流產", "次", 0, LOW, SUM),
         Metric("npd", "非生產天數/母豬/年", "天", 1, LOW),
     ]),
 ]
 
 METRICS: Dict[str, Metric] = {m.key: m for s in SECTIONS for m in s.metrics}
+
+
+# ── 全國常模對照 ──────────────────────────────────────────────
+#
+# 逐格標色的基準是**全國常模**(已確認的設計決定),對照 PigCHAMP 原版
+# 報告右側的「目標值」欄與它的紅綠標色。常模的唯一來源是
+# data/benchmark_2025.json,經 core/benchmark.py 讀取、core/grading.py
+# 判級 —— 生產健檢用的是同一條路,不另外寫一份門檻。
+#
+# 只有**兩邊都認得、而且好壞方向一致**的指標才對照。刻意排除的:
+#
+#   懷孕天數、哺乳天數:常模把它們排了名次,但本系統的 `better` 是 None
+#   ——「懷孕 114 天」是生理事實不是成績。標了色等於憑空給一個這個專案
+#   自己都不認同的價值判斷。方向不一致就不標,由下面的測試把關。
+#
+#   使用公豬數 vs 常模的 boars_inventory:一個是期間內用過幾頭、一個是
+#   場內存欄幾頭,單位不同,不是同一件事。
+NORM_KEYS: Dict[str, str] = {
+    "psy": "psy",
+    "npd": "npd",
+    "farrowing_rate": "farrowing_rate",
+    "repeat_pct": "repeat_service_rate",
+    "wean_to_service_days": "wean_to_service",
+    "born_per_litter": "total_born_per_litter",
+    "alive_per_litter": "live_born_per_litter",
+    "preweaning_mortality": "preweaning_mortality",
+    "weaned_per_litter": "weaned_per_litter",
+}
+
+# A~F 五級收成三級。**是把五級變粗,不是由三級反推五級** —— 憲法第三條
+# 第 5 款禁的是後者(拿三級去猜使用者沒看過的五級),把已知的細分合併
+# 成粗分不在此列。
+#
+# 切在四分位而不是中位數:PigCHAMP 原版切中位數,於是每一格非紅即綠。
+# 這份報告有 55 個指標 × 最多 12 期,滿頁紅綠等於沒有重點。切四分位的話
+# 只有「全國前 25%」與「全國後 25%」上色,中間 50% 留白。
+TIER_BY_GRADE = {"A": "good", "B": "good", "C": "mid",
+                 "D": "mid", "E": "poor", "F": "poor"}
 
 
 # ── 期間切分 ──────────────────────────────────────────────────
@@ -345,12 +405,13 @@ def _conceived(heat: dict, rows: List[dict], cfg: dict,
     反過來,受胎的證據是她後來真的分娩了,或是流產(流產代表**有**受胎,
     只是沒生下來 —— 算進受胎率,不算進分娩率)。
 
-    三種證據都沒有就回 None:她可能在還沒看出結果之前就被淘汰了。把這種
-    情形當成受胎會虛報成績,當成陰性會冤枉她,兩個都不誠實。
+    她在還沒看出結果之前就離群(死亡/淘汰)的話回 None:把這種情形當成
+    受胎會虛報成績,當成陰性會冤枉她,兩個都不誠實。
     """
     start = heat["start"]
     gest = cfg["gestation_days"]
 
+    left = None
     for e in rows:
         when = e["event_date"]
         if when < start:
@@ -363,16 +424,31 @@ def _conceived(heat: dict, rows: List[dict], cfg: dict,
             return True
         if kind == ABORT and when <= start + timedelta(days=gest + 16):
             return True
+        if kind in EXIT_EVENTS and (left is None or when < left):
+            left = when
 
     nxt = heat.get("next")
     if nxt is not None and nxt > heat["end"]:
         # 沒分娩就又發情了 —— 上面那一圈已經確認這段期間沒有分娩記錄。
         return False
 
-    # 判斷期還沒過完:太新的配種還看不出重發情,算進去會讓最近幾期永遠 100%。
-    if start + timedelta(days=CONCEPTION_JUDGE_DAYS) > horizon:
+    # 到這裡代表:沒有驗孕陰性、沒有重發情、也還沒分娩。
+    #
+    # **沒登記就代表有懷孕**(使用者說明的第一條規則)。這一段以前漏掉了,
+    # 只有「後來真的分娩」才算受胎 —— 後果是最近三、四個月的受胎率會崩到
+    # 接近 0%:那段期間她還沒到預產期,分娩這個**正面**證據還沒機會出現,
+    # 而重發情、驗孕陰性這些**負面**證據早在 21–45 天就看得到了。判得出來
+    # 的全是失敗的,判得出成功的都還沒到期。實測 2026/05 因此變成 4.2%
+    # (24 次判定裡只有 1 次算受胎),而同期歷史水準是七成多。
+    settled = start + timedelta(days=max(CONCEPTION_JUDGE_DAYS,
+                                         NEGATIVE_CHECK_WINDOW))
+    if settled > horizon:
+        # 反證都還沒有機會出現,現在判定只會是偏的 —— 不判。
         return None
-    return None
+    if left is not None and left < settled:
+        # 她在看得出結果之前就離群了,兩種判法都不誠實。
+        return None
+    return True
 
 
 def _avg(values):
@@ -640,6 +716,7 @@ def trend_report(sows: Iterable[dict], events: Iterable[dict],
     """
     ctx = _build_ctx(sows, events, settings)
     values = [_period_values(ctx, p.start, p.end) for p in spans]
+    summary = _summary(ctx, spans, values)
 
     sections = []
     for section in SECTIONS:
@@ -649,10 +726,18 @@ def trend_report(sows: Iterable[dict], events: Iterable[dict],
             # 整排都沒有資料的指標不出現。印一列空格會讓人以為自己漏記了。
             if all(x is None for x in series):
                 continue
+            norm = _norm(m.key)
+            totals = (summary or {}).get(m.key) or {"total": None, "avg": None}
             rows.append({
                 "key": m.key, "label": m.label, "unit": m.unit,
                 "digits": m.digits, "better": m.better, "values": series,
                 "change": _change(series, m.better),
+                "total": totals["total"], "avg": totals["avg"],
+                # 逐格對照全國常模的級距。沒有常模可對照的指標整排都是
+                # None,前端照樣畫、只是不上色。
+                "norm": norm,
+                "tiers": [_tier(x, norm) for x in series],
+                "avgTier": _tier(totals["avg"], norm),
             })
         if rows:
             sections.append({"key": section.key, "label": section.label,
@@ -662,7 +747,82 @@ def trend_report(sows: Iterable[dict], events: Iterable[dict],
         "periods": [{"key": p.key, "label": p.label,
                      "start": p.start, "end": p.end} for p in spans],
         "sections": sections,
+        # 有沒有右側兩欄由後端決定,前端不必自己判斷期間連不連續。
+        "hasSummary": summary is not None,
+        "normSource": {"name": benchmark.BENCHMARK["source"]["name"],
+                       "year": benchmark.BENCHMARK["source"]["year"],
+                       "farms": benchmark.BENCHMARK["source"]["farms"]},
     }
+
+
+def _norm(metric_key: str) -> Optional[dict]:
+    """這個指標對照得到的全國常模,對照不到就回 None。"""
+    norm_key = NORM_KEYS.get(metric_key)
+    if norm_key is None:
+        return None
+    meta = benchmark.get_metric(norm_key)
+    cuts = meta["percentiles"]
+    return {
+        "key": norm_key,
+        "name": meta["name"],
+        # 中位數(第 50 百分位)是常模五個切點的正中間那個,拿來當畫面上
+        # 顯示的「全國中位數」。上色用的是完整的五個切點,不是只用它。
+        "median": cuts[len(cuts) // 2],
+        "percentiles": list(cuts),
+        "higherBetter": grading.is_higher_better(cuts),
+    }
+
+
+def _tier(value: Optional[float], norm: Optional[dict]) -> Optional[str]:
+    """一格數字落在全國常模的哪一級:good / mid / poor。
+
+    沒有數字、或這個指標沒有常模可對照時回 None —— 不是 "mid"。
+    「比不出來」跟「比得出來但普通」在畫面上必須是兩種樣子(憲法第三條)。
+    """
+    if value is None or norm is None:
+        return None
+    return TIER_BY_GRADE[grading.grade(value, norm["percentiles"])]
+
+
+def _contiguous(spans: List[Period]) -> bool:
+    """這些期間是不是一段接一段、中間沒有空隙。"""
+    return all(nxt.start == cur.end + timedelta(days=1)
+               for cur, nxt in zip(spans, spans[1:]))
+
+
+def _summary(ctx: _Ctx, spans: List[Period],
+             values: List[Dict[str, Optional[float]]]) -> Optional[Dict[str, dict]]:
+    """右側的「總計 / 平均」兩欄。
+
+    比率型指標是**把整段期間當成一期重新算一次**,不是把各期的比率平均
+    (見 SUM/POOLED 的說明)。代價是多跑一次 `_period_values`,換來的是
+    「整年受胎率」這種一看就會被拿去對外講的數字不會算錯。
+
+    期間不連續時整個不給 —— 2023 跟 2025 並排比較時,「整段重算」會把
+    中間那個沒有被選到的 2024 也算進去,那不是使用者要的任何一個數字。
+    """
+    if not spans or not _contiguous(spans):
+        return None
+
+    whole = _period_values(ctx, spans[0].start, spans[-1].end)
+    out: Dict[str, dict] = {}
+    for key, metric in METRICS.items():
+        series = [v.get(key) for v in values]
+        seen = [x for x in series if x is not None]
+        span_value = whole.get(key)
+
+        if metric.agg == SUM:
+            total = span_value
+            avg = (total / len(spans)) if total is not None else None
+        elif metric.agg == DISTINCT:
+            total, avg = span_value, _avg(seen)
+        elif metric.agg == MEAN:
+            total, avg = None, _avg(seen)
+        else:
+            total, avg = None, span_value
+
+        out[key] = {"total": total, "avg": avg}
+    return out
 
 
 def _change(series: List[Optional[float]], better: Optional[str]) -> Optional[dict]:
