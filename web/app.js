@@ -2496,6 +2496,7 @@ async function submitNewAnimalRows(spec, when) {
       earTag: job.detail.earTag, breed: job.detail.breed,
       birthDate: job.detail.birthDate, entryDate: when,
       sireTag: job.detail.sire_tag, damTag: job.detail.dam_tag,
+      source: job.detail.source,
     }));
     return { tag: job.tag, ok, error: data?.error };
   }));

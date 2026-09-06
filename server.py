@@ -216,6 +216,16 @@ def to_json_bytes(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, default=_default).encode("utf-8")
 
 
+# 進場來源。前端送的是代碼,不是中文字 —— 中文字直接當值存的話,日後改
+# 措辭就要連同資料庫裡的舊資料一起改。認不得的值一律當自繁,不讓一個
+# 打錯的字串進到資料庫裡變成第三種來源。
+ENTRY_SOURCES = ("home", "purchased")
+
+
+def _source(value) -> str:
+    return value if value in ENTRY_SOURCES else "home"
+
+
 class Application:
     """路由與請求處理。不綁定 HTTP 傳輸,方便測試。"""
 
@@ -775,6 +785,9 @@ class Application:
             # 耳號還沒確認的(耳號看不清楚時用日期先記著的那些)。畫面要
             # 分得出來,才能列出待確認清單讓使用者補登真正的耳號。
             "isUnknown": bool(row.get("is_unknown")),
+            # 進場來源(自繁/購入)。要進備份,不然還原之後「其中自繁」
+            # 那一列會整片變成自繁 —— 匯出漏一個欄位,備份就不是備份。
+            "source": row.get("source") or "home",
         }
 
     @staticmethod
@@ -823,6 +836,7 @@ class Application:
                 sire_tag=_text(payload.get("sireTag"), config.MAX_EAR_TAG_CHARS),
                 dam_tag=_text(payload.get("damTag"), config.MAX_EAR_TAG_CHARS),
                 created_by=user.id,
+                source=_source(payload.get("source")),
             )
         except ValueError as e:
             return 409, {"error": str(e)}
@@ -1670,6 +1684,7 @@ class Application:
             "sireTag": row.get("sire_tag") or "",
             "damTag": row.get("dam_tag") or "",
             "entryDate": _iso(row.get("entry_date")),
+            "source": row.get("source") or "home",
         }
 
     @staticmethod
@@ -1721,6 +1736,7 @@ class Application:
             sire_tag=_text(payload.get("sireTag"), config.MAX_EAR_TAG_CHARS),
             dam_tag=_text(payload.get("damTag"), config.MAX_EAR_TAG_CHARS),
             created_by=user.id,
+            source=_source(payload.get("source")),
         )
         return 200, {"id": boar_id, "earTag": tag}
 

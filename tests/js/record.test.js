@@ -246,7 +246,7 @@ describe("種豬進場的父母耳號", () => {
 
   it("兩個都填會存進 detail", () => {
     const { detail, problems } = buildDetail("GA", {
-      earTag: "2580", sire_tag: "L鄭", dam_tag: "2416",
+      earTag: "2580", source: "home", sire_tag: "L鄭", dam_tag: "2416",
     });
     assert.deepEqual(problems, []);
     assert.equal(detail.sire_tag, "L鄭");
@@ -254,7 +254,8 @@ describe("種豬進場的父母耳號", () => {
   });
 
   it("留空不報錯 —— 不是每頭豬都知道父母耳號", () => {
-    const { problems } = buildDetail("GA", { earTag: "2580" });
+    // 來源是必填,所以要給 —— 這條測的是父母耳號可以留空,不是來源。
+    const { problems } = buildDetail("GA", { earTag: "2580", source: "home" });
     assert.deepEqual(problems, []);
   });
 
@@ -766,5 +767,36 @@ describe("一次記多頭:例外事件、場務、公豬", () => {
   it("肉豬死亡沒有耳號,列裡不該有動物選擇器", () => {
     assert.equal(usesPerSowRows("MKD"), true);
     assert.equal(targetsNothing("MKD"), true);
+  });
+});
+
+
+describe("種豬進場的來源", () => {
+  // 自繁與購入**都算**進場與更新率,但報表另有一列「其中自繁」
+  // (使用者確認)。必填,否則那一列失去意義 —— 整批只要點一次。
+  it("自繁與購入兩個選項都在", () => {
+    const source = formFor("GA").fields.find((f) => f.key === "source");
+    assert.deepEqual(source.options.map((o) => o.label), ["自繁", "購入"]);
+  });
+
+  it("存的是代碼不是中文字", () => {
+    // 中文字直接當值存的話,日後改措辭要連同資料庫裡的舊資料一起改。
+    const source = formFor("GA").fields.find((f) => f.key === "source");
+    assert.deepEqual(source.options.map((o) => o.value), ["home", "purchased"]);
+  });
+
+  it("整批共用一個值 —— 一批進場通常同一個來源", () => {
+    assert.equal(formFor("GA").fields.find((f) => f.key === "source").shared, true);
+  });
+
+  it("沒選就報錯,不預設成自繁", () => {
+    const { problems } = buildDetail("GA", { earTag: "2580" });
+    assert.deepEqual(problems, ["請填寫來源"]);
+  });
+
+  it("選了就存進 detail", () => {
+    const { detail, problems } = buildDetail("GA", { earTag: "2580", source: "purchased" });
+    assert.deepEqual(problems, []);
+    assert.equal(detail.source, "purchased");
   });
 });

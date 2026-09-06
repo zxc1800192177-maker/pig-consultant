@@ -176,6 +176,12 @@ ALTER TABLE boars ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(i
 -- is_unknown 只用來標記「身分還沒確認」,好列出待確認清單;之後讀得到耳號
 -- 時把她的事件併回真正那頭母豬(見 reassign_sow_event)。
 ALTER TABLE sows ADD COLUMN IF NOT EXISTS is_unknown BOOLEAN NOT NULL DEFAULT false;
+
+-- 進場來源:自繁(home)或購入(purchased)。預設 home —— 這個欄位加進來
+-- 之前的母豬都沒有記錄來源,而使用者確認過這個場過去的進場絕大多數是
+-- 自繁,補成 home 歷史數字才不會因為新增欄位而變動。
+ALTER TABLE sows ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'home';
+ALTER TABLE boars ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'home';
 CREATE INDEX IF NOT EXISTS sows_unknown_idx ON sows (farm_id) WHERE is_unknown;
 
 -- detail 用 JSONB:八種事件各自需要的欄位差很多(分娩要活產/死產/木乃伊,
@@ -417,7 +423,7 @@ class Store:
     # --- 母豬 ---
     def add_sow(self, farm_id, ear_tag, entry_date=None, birth_date=None,
                 breed="", sire_tag="", dam_tag="", parity=0, created_by=None,
-                is_unknown=False) -> int:
+                is_unknown=False, source="home") -> int:
         """`is_unknown` 只給「不明母豬」用,一個牧場最多一頭,由
         get_or_create_unknown_sow() 建立,不該由一般的新增流程傳入。
         """
@@ -465,7 +471,7 @@ class Store:
 
     # --- 公豬 ---
     def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
-                 sire_tag="", dam_tag="", created_by=None) -> int:
+                 sire_tag="", dam_tag="", created_by=None, source="home") -> int:
         raise NotImplementedError
 
     def list_boars(self, farm_id: int, status: Optional[str] = None) -> List[dict]:
@@ -809,7 +815,7 @@ class InMemoryStore(Store):
 
     def add_sow(self, farm_id, ear_tag, entry_date=None, birth_date=None,
                 breed="", sire_tag="", dam_tag="", parity=0, created_by=None,
-                is_unknown=False) -> int:
+                is_unknown=False, source="home") -> int:
         dup = [s for s in self._owned(self.sows, farm_id, ear_tag=ear_tag)
                if s["entry_date"] == entry_date]
         if dup:
@@ -821,6 +827,7 @@ class InMemoryStore(Store):
             "sire_tag": sire_tag, "dam_tag": dam_tag, "parity": parity,
             "status": "active", "pen_id": None, "photo_url": "",
             "created_by": created_by, "is_unknown": is_unknown,
+            "source": source,
         })
         return sow_id
 
@@ -886,13 +893,13 @@ class InMemoryStore(Store):
         return False
 
     def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
-                 sire_tag="", dam_tag="", created_by=None) -> int:
+                 sire_tag="", dam_tag="", created_by=None, source="home") -> int:
         boar_id = self._new_id("boar")
         self.boars.append({
             "id": boar_id, "farm_id": farm_id, "ear_tag": ear_tag,
             "entry_date": entry_date, "breed": breed,
             "sire_tag": sire_tag, "dam_tag": dam_tag, "status": "active",
-            "created_by": created_by,
+            "created_by": created_by, "source": source,
         })
         return boar_id
 
@@ -1497,7 +1504,8 @@ class PostgresStore(Store):
     # B 牧場資料的漏洞(憲法第十一條),沒有例外。
 
     SOW_COLS = ("id, farm_id, ear_tag, entry_date, birth_date, breed, sire_tag,"
-                " dam_tag, parity, status, pen_id, photo_url, created_by, is_unknown")
+                " dam_tag, parity, status, pen_id, photo_url, created_by, is_unknown,"
+                " source")
     EVENT_COLS = ("id, farm_id, sow_id, event_type, event_date, detail,"
                   " seq, recorded_by, excluded")
 
@@ -1559,14 +1567,15 @@ class PostgresStore(Store):
 
     def add_sow(self, farm_id, ear_tag, entry_date=None, birth_date=None,
                 breed="", sire_tag="", dam_tag="", parity=0, created_by=None,
-                is_unknown=False) -> int:
+                is_unknown=False, source="home") -> int:
         with self._connect() as conn:
             sow_id = conn.execute(
                 "INSERT INTO sows (farm_id, ear_tag, entry_date, birth_date, breed,"
-                " sire_tag, dam_tag, parity, created_by, is_unknown)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                " sire_tag, dam_tag, parity, created_by, is_unknown, source)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (farm_id, ear_tag, entry_date, birth_date, breed,
-                 sire_tag, dam_tag, parity, created_by, is_unknown)).fetchone()[0]
+                 sire_tag, dam_tag, parity, created_by, is_unknown,
+                 source)).fetchone()[0]
         self._bump_sow_version(farm_id)
         return sow_id
 
@@ -1711,16 +1720,16 @@ class PostgresStore(Store):
         return ok
 
     def add_boar(self, farm_id, ear_tag, entry_date=None, breed="",
-                 sire_tag="", dam_tag="", created_by=None) -> int:
+                 sire_tag="", dam_tag="", created_by=None, source="home") -> int:
         with self._connect() as conn:
             return conn.execute(
                 "INSERT INTO boars (farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag,"
-                " created_by) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                " created_by, source) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag,
-                 created_by)).fetchone()[0]
+                 created_by, source)).fetchone()[0]
 
     BOAR_COLS = ("id, farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag, status,"
-                 " created_by")
+                 " created_by, source")
 
     def list_boars(self, farm_id, status=None):
         sql = f"SELECT {self.BOAR_COLS} FROM boars WHERE farm_id = %s"

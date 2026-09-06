@@ -298,6 +298,70 @@ class TestChange:
         assert trend.METRICS["stillborn_pct"].better == trend.LOW
 
 
+class TestHerdEntries:
+    """新女豬入群(以及吃同一個數字的更新率)。
+
+    **這是一個修過的真實 bug。** 這個系統裡「進場」有兩種表示法:PigCHAMP
+    匯進來的是一筆 GA 事件,在 app 裡按「種豬進場」建的豬則只寫
+    sows.entry_date、不產生事件。原本只數 GA,結果 app 記的進場一律算不到
+    —— 實測這個場 2026/08 有 27 頭、2026/09 有 19 頭進場,報表上全是 0,
+    更新率也跟著歸零。使用者的原話是「種豬進場就是新女豬入群」。
+    """
+
+    def test_a_sow_entered_in_the_period_is_counted(self):
+        """就算她沒有任何 GA 事件 —— app 建的豬本來就沒有。"""
+        s = sow(1, entry="2026-03-10")
+        got = values([s], [], trend.periods(d("2026-03-01"), d("2026-03-31"), "month"))
+        assert got["gilt_entries"] == [1]
+
+    def test_a_sow_entered_outside_the_period_is_not(self):
+        s = sow(1, entry="2026-02-10")
+        got = values([s], [], trend.periods(d("2026-03-01"), d("2026-03-31"), "month"))
+        assert got.get("gilt_entries", [None]) == [None]
+
+    def test_a_sow_with_no_entry_date_is_not_counted_from_her_first_event(self):
+        """歷史資料裡有 348 頭沒有進場記錄。判斷「在不在場」時會退而用她
+        最早的一筆事件當進場日,但那是推論不是記錄 —— 拿來當進場數會把
+        她第一次配種的月份算成她進場的月份。"""
+        s = {"id": 1, "ear_tag": "1", "status": "active", "entry_date": None}
+        events = [ev(1, "MT", d("2026-03-05"))]
+        got = values([s], events, trend.periods(d("2026-03-01"), d("2026-03-31"), "month"))
+        assert got.get("gilt_entries", [None]) == [None]
+
+    def test_purchased_and_home_bred_both_count_as_an_entry(self):
+        """更新率講的是整個群被換掉的速度,跟那頭豬從哪裡來無關 ——
+        全國常模也是這樣算的,分母不一致就沒得比(使用者確認)。"""
+        sows = [dict(sow(1, entry="2026-03-10"), source="home"),
+                dict(sow(2, entry="2026-03-12"), source="purchased")]
+        got = values(sows, [], trend.periods(d("2026-03-01"), d("2026-03-31"), "month"))
+        assert got["gilt_entries"] == [2]
+        assert got["home_bred_entries"] == [1]
+
+    def test_a_sow_with_no_source_recorded_counts_as_home_bred(self):
+        """這個欄位加進來之前的母豬都沒有來源。補成自繁,歷史數字才不會
+        因為新增一個欄位而變動(使用者確認)。"""
+        got = values([sow(1, entry="2026-03-10")], [],
+                     trend.periods(d("2026-03-01"), d("2026-03-31"), "month"))
+        assert got["gilt_entries"] == [1]
+        assert got["home_bred_entries"] == [1]
+
+    def test_an_all_purchased_batch_shows_zero_not_a_dash(self):
+        """有進場但一頭自繁都沒有,0 是答案不是缺漏 —— 印「—」會讓人以為
+        這一項沒記錄(憲法第三條)。"""
+        sows = [dict(sow(1, entry="2026-03-10"), source="purchased")]
+        got = values(sows, [], trend.periods(d("2026-03-01"), d("2026-03-31"), "month"))
+        assert got["gilt_entries"] == [1]
+        assert got["home_bred_entries"] == [0]
+
+    def test_the_replacement_rate_uses_the_same_count(self):
+        """更新率跟進場數是同一個分子。只修其中一個,兩個數字會互相矛盾。"""
+        sows = [sow(1, entry="2026-03-10"), sow(2, entry="2020-01-01")]
+        got = values(sows, [], trend.periods(d("2026-03-01"), d("2026-03-31"), "month"))
+        assert got["gilt_entries"] == [1]
+        assert got["replacement_rate"][0] is not None
+        assert got["replacement_rate"][0] > 0
+
+
 class TestComparingArbitraryPeriods:
     def test_periods_do_not_have_to_be_contiguous(self):
         """「2024 全年 vs 2025 全年 vs 今年至今」跟「連續 12 個月」是同一個

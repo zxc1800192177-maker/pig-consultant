@@ -213,6 +213,16 @@ export const RECORD_FORMS = {
     fields: [
       { key: "earTag", label: "耳號", type: "text", required: true },
       // shared:整批共用一個值,畫在共用區而不是每一列各一個。
+      //
+      // 來源跟品種一樣整批共用(一批進場通常同一個來源)。存的是
+      // home/purchased,畫面上顯示自繁/購入 —— 中文字直接當值存的話,
+      // 日後改措辭就要連同資料庫裡的舊資料一起改。
+      //
+      // 必填:兩種都算進「新女豬入群」與更新率,但報表上另有一列「其中
+      // 自繁」。沒填的話那一列就失去意義,而整批只要點一次,成本很低。
+      { key: "source", label: "來源", type: "choice", shared: true, required: true,
+        options: [{ value: "home", label: "自繁" },
+                  { value: "purchased", label: "購入" }] },
       { key: "breed", label: "品種", type: "text", shared: true },
       { key: "birthDate", label: "出生日期", type: "date" },
       { key: "sire_tag", label: "父系耳號", type: "text" },

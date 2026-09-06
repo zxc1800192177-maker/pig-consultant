@@ -163,6 +163,11 @@ SECTIONS: List[Section] = [
         Metric("ending_herd", "期末在養母豬", "頭", 0, None, MEAN),
         Metric("avg_parity", "平均胎次", "胎", 1, None),
         Metric("gilt_entries", "新女豬入群", "頭", 0, None, SUM),
+        # 自繁與購入**都算**進場與更新率(使用者確認)—— 更新率講的是整個
+        # 群被換掉的速度,跟那頭豬從哪裡來無關,全國常模也是這樣算的,
+        # 分母不一致就沒得比。但兩者的成本與風險差很多,所以另外列一行
+        # 讓牧場主看得到比例。
+        Metric("home_bred_entries", "其中自繁", "頭", 0, None, SUM),
         Metric("replacement_rate", "更新率(年化)", "%", 1, None),
         Metric("culls", "淘汰", "頭", 0, None, SUM),
         Metric("cull_rate", "淘汰率(年化)", "%", 1, LOW),
@@ -679,14 +684,39 @@ def _period_values(ctx: _Ctx, start: date, end: date) -> Dict[str, Optional[floa
                             for s in ctx.sows
                             if _in_herd(ctx, s["id"], end)])
 
-    entries = within("GA")
+    # 進場數要看母豬的**進場日欄位**,不是 GA 事件。
+    #
+    # 這個系統裡「進場」有兩種表示法:PigCHAMP 匯進來的是一筆 GA 事件,
+    # 而在 app 裡按「種豬進場」建的豬只寫 sows.entry_date、不產生事件
+    # (紀錄頁那份「今日已記錄」是從 entry_date 合成一列給人看的,所以
+    # 使用者記完看得到,不會發現有落差)。只數 GA 的話,app 記的進場
+    # 一律算不到 —— 實測這個場 2026/08 有 27 頭、2026/09 有 19 頭進場,
+    # 用 GA 數全部是 0,連帶讓更新率也一起歸零。
+    #
+    # 改用 entry_date 兩種來源都涵蓋得到:匯入時 importer 就是拿 GA 的
+    # 日期去填 entry_date,實測 1,188 頭同時有兩者的母豬,日期 100% 一致。
+    #
+    # 這裡刻意直接讀 sow 的 entry_date,不用 ctx.span 的進場日 —— 後者在
+    # 沒有進場記錄時會退而用「她最早的一筆事件」當進場日(那是為了判斷
+    # 在不在場),拿來當進場數會把 348 頭沒有進場記錄的老母豬,按她們
+    # 第一次配種的日期算成當期新進場。
+    in_period = [s for s in ctx.sows
+                 if s.get("entry_date") and start <= s["entry_date"] <= end]
+    entered = len(in_period)
+    # 來源沒記錄的當自繁(使用者確認)—— 這個欄位加進來之前的母豬都沒有
+    # 來源,而這個場過去的進場絕大多數是自繁,補成自繁歷史數字才不會因為
+    # 新增一個欄位而變動。資料庫的預設值也是 home,兩邊講同一件事。
+    home_bred = sum(1 for s in in_period if (s.get("source") or "home") == "home")
     culls = within(CULL)
     deaths = within(DEATH)
-    v["gilt_entries"] = len(entries) or None
+    v["gilt_entries"] = entered or None
+    # 這一期完全沒有進場就整列不出現(None),而不是印 0 —— 但只要有進場,
+    # 「其中自繁 0 頭」就是真的 0(整批都是買的),那是答案不是缺漏。
+    v["home_bred_entries"] = home_bred if entered else None
     v["culls"] = len(culls) or None
     v["sow_deaths"] = len(deaths) or None
     v["abortions"] = len(within(ABORT)) or None
-    v["replacement_rate"] = _pct(len(entries), herd) * annualize if herd else None
+    v["replacement_rate"] = _pct(entered, herd) * annualize if herd else None
     v["cull_rate"] = _pct(len(culls), herd) * annualize if herd else None
     v["mortality_rate"] = _pct(len(deaths), herd) * annualize if herd else None
     v["avg_cull_parity"] = _avg([_parity_at(ctx, e["sow_id"], e["event_date"]) for e in culls])

@@ -666,6 +666,9 @@ def _write_backup(store, farm_id, result: BackupResult, recorded_by=None) -> dic
                 dam_tag=s.get("damTag") or "",
                 created_by=recorded_by,
                 is_unknown=bool(s.get("isUnknown")),
+                # 舊的備份沒有這個欄位,還原時退回自繁 —— 跟資料庫的
+                # 預設值、跟趨勢報告對「沒記錄來源」的處理是同一個約定。
+                source=s.get("source") or "home",
             )
             sows_added += 1
         store.update_sow(farm_id, sow_id,
@@ -687,7 +690,8 @@ def _write_backup(store, farm_id, result: BackupResult, recorded_by=None) -> dic
             boar_id = store.add_boar(
                 farm_id, tag, entry_date=_parse_iso(b.get("entryDate")),
                 breed=b.get("breed") or "", sire_tag=b.get("sireTag") or "",
-                dam_tag=b.get("damTag") or "", created_by=recorded_by)
+                dam_tag=b.get("damTag") or "", created_by=recorded_by,
+                source=b.get("source") or "home")
             boars_added += 1
         if b.get("status") and b["status"] != "active":
             store.update_boar(farm_id, boar_id, status=b["status"])
