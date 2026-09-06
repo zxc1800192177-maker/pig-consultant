@@ -374,6 +374,22 @@ class TestLazyAnalysisCards:
         collapse = body.split("if (lazyLoaded.has(cardId)) {")[1].split("}")[0]
         assert "load()" not in collapse, "切換收合時又去要了一次資料"
 
+    def test_there_is_a_way_to_recompute_with_the_latest_records(self):
+        """記一筆事件之後,app 只重讀母豬、近期記錄、工作與提醒 —— 值得檢視、
+        月報、趨勢這三份不會跟著更新(使用者回報:「值得檢視不會因為我增加
+        紀錄而更新」)。每記一筆就全部重算太貴,所以給一顆按鈕。
+
+        這顆按鈕**必須真的去要資料**。只重畫的話畫面看起來有反應、數字卻
+        還是舊的,比沒有這顆按鈕更糟 —— 使用者會以為自己看到的是最新的。
+        """
+        js = self._app_js()
+        body = js.split("async function refreshLazyCard(")[1].split(self.FN_END)[0]
+        assert "spec.load()" in body, "重算按鈕沒有重新取資料"
+        for card in ("reviewCard", "dataProblemCard", "monthReportCard", "trendCard"):
+            assert f'data-lazy-refresh="{card}"' in (WEB_DIR / "index.html").read_text("utf-8"), (
+                f"{card} 少了重算按鈕"
+            )
+
     def test_the_heavy_reloads_are_not_in_the_eager_chain(self):
         """在開頁的 Promise.all 裡就等於沒有懶載入。"""
         chain = self._apply_account_body().split("await Promise.all([")[1].split("]);")[0]

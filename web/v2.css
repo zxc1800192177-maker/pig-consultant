@@ -660,3 +660,18 @@ body { padding-bottom: 96px; }
   border-style: solid; background: none; color: var(--ink-soft);
   font-size: 13.5px; font-weight: 500;
 }
+
+/* 未載入時只有一顆按鈕,佔滿整列;載好之後「重新分析」出現在旁邊,
+   兩顆平分。用 flex 而不是各自設寬度,收合鈕不必知道旁邊有沒有人。 */
+.lazy-ctl { display: flex; gap: 8px; }
+.lazy-ctl > * { flex: 1; }
+/* 重新分析:跟收合鈕一樣安靜,但用強調色 —— 它是這裡唯一會真的去要
+   資料的動作,跟「只是把東西藏起來」不是同一類。 */
+.lazy-refresh {
+  min-height: 44px; margin-top: 12px; padding: 10px 18px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: none; color: var(--accent);
+  font-family: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.lazy-refresh:active:not(:disabled) { transform: scale(.99); }
+.lazy-refresh:disabled { color: var(--ink-faint); cursor: default; }

@@ -269,7 +269,11 @@
         </div>
         <span class="cnt" id="reviewCount"></span>
       </div>
-      <button type="button" class="lazy-open" data-lazy="reviewCard">載入值得檢視</button>
+      <div class="lazy-ctl">
+        <button type="button" class="lazy-open" data-lazy="reviewCard">載入值得檢視</button>
+        <button type="button" class="lazy-refresh is-hidden"
+                data-lazy-refresh="reviewCard">重新分析</button>
+      </div>
       <div class="lazy-body is-hidden" id="reviewBody">
         <!-- 但書由後端提供(core/labels.review_caveat),前端不自己維護一份措辭。
              這段不可以拿掉:少了它,這份名單讀起來就是淘汰建議。 -->
@@ -292,7 +296,11 @@
         </div>
         <span class="cnt" id="dataProblemCount"></span>
       </div>
-      <button type="button" class="lazy-open" data-lazy="dataProblemCard">檢查記錄</button>
+      <div class="lazy-ctl">
+        <button type="button" class="lazy-open" data-lazy="dataProblemCard">檢查記錄</button>
+        <button type="button" class="lazy-refresh is-hidden"
+                data-lazy-refresh="dataProblemCard">重新檢查</button>
+      </div>
       <div class="lazy-body is-hidden" id="dataProblemBody">
         <div id="dataProblemList"></div>
         <!-- 修正表單:按了某一列的「修正這筆」才展開 -->
@@ -307,7 +315,11 @@
           <p class="hint">依記錄事件即時計算,即使記錄事後補登也一定是最新的</p>
         </div>
       </div>
-      <button type="button" class="lazy-open" data-lazy="monthReportCard">載入生產月報</button>
+      <div class="lazy-ctl">
+        <button type="button" class="lazy-open" data-lazy="monthReportCard">載入生產月報</button>
+        <button type="button" class="lazy-refresh is-hidden"
+                data-lazy-refresh="monthReportCard">重新計算</button>
+      </div>
       <div class="lazy-body is-hidden" id="monthReportBody">
       <div class="weekbar">
         <span id="mrPrev">‹</span>
@@ -340,7 +352,11 @@
           <p class="hint">同一組指標切成多期並列,看得出走向而不只是單期數字</p>
         </div>
       </div>
-      <button type="button" class="lazy-open" data-lazy="trendCard">載入趨勢分析</button>
+      <div class="lazy-ctl">
+        <button type="button" class="lazy-open" data-lazy="trendCard">載入趨勢分析</button>
+        <button type="button" class="lazy-refresh is-hidden"
+                data-lazy-refresh="trendCard">重新計算</button>
+      </div>
       <div class="lazy-body is-hidden" id="trendBody">
       <div class="seg grain" id="trendGrainToggle">
         <button type="button" class="seg-b" data-trend-grain="week">週</button>

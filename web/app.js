@@ -102,10 +102,14 @@ const LOGGED_OUT = { loggedIn: false, username: null, isGuest: false,
 //
 // 所以改成一張卡一顆大按鈕,按了才去要資料(使用者要求)。
 const LAZY_CARDS = {
-  reviewCard: { body: "reviewBody", label: "載入值得檢視", load: () => reloadReview() },
-  dataProblemCard: { body: "dataProblemBody", label: "檢查記錄", load: () => reloadDataProblems() },
-  monthReportCard: { body: "monthReportBody", label: "載入生產月報", load: () => reloadMonthReport() },
-  trendCard: { body: "trendBody", label: "載入趨勢分析", load: () => reloadTrend() },
+  reviewCard: { body: "reviewBody", label: "載入值得檢視",
+                refresh: "重新分析", load: () => reloadReview() },
+  dataProblemCard: { body: "dataProblemBody", label: "檢查記錄",
+                     refresh: "重新檢查", load: () => reloadDataProblems() },
+  monthReportCard: { body: "monthReportBody", label: "載入生產月報",
+                     refresh: "重新計算", load: () => reloadMonthReport() },
+  trendCard: { body: "trendBody", label: "載入趨勢分析",
+               refresh: "重新計算", load: () => reloadTrend() },
 };
 
 // 哪幾張已經載過。**換帳號時一定要清掉**(見 resetLazyCards)。
@@ -145,6 +149,38 @@ function paintLazyButton(cardId) {
   btn.textContent = !loaded ? spec.label : (collapsed ? "展開" : "收起來");
   btn.classList.toggle("is-loaded", loaded);
   $(spec.body)?.classList.toggle("is-hidden", !loaded || collapsed);
+
+  // 「重新分析」只有載過之後才有意義 —— 還沒載過的時候按「載入」本來
+  // 就是拿最新資料。
+  const fresh = document.querySelector(`[data-lazy-refresh="${cardId}"]`);
+  if (fresh) {
+    fresh.classList.toggle("is-hidden", !loaded);
+    fresh.disabled = false;
+    fresh.textContent = spec.refresh;
+  }
+}
+
+/** 用最新的資料重算這張卡。
+ *
+ * 記錄一筆事件之後,app 只會重讀母豬、近期記錄、工作與提醒 —— 值得檢視、
+ * 月報、趨勢這三份**從來不會**跟著更新(使用者回報:「值得檢視不會因為
+ * 我增加紀錄而更新」)。它們要掃過整場的事件才算得出來,每記一筆就全部
+ * 重算太貴,所以不自動跟,改成給一顆按鈕由使用者決定什麼時候重算。
+ */
+async function refreshLazyCard(cardId) {
+  const spec = LAZY_CARDS[cardId];
+  const fresh = document.querySelector(`[data-lazy-refresh="${cardId}"]`);
+  if (!spec || !fresh || !lazyLoaded.has(cardId)) return;
+
+  fresh.disabled = true;
+  fresh.textContent = "重算中…";
+  try {
+    await spec.load();
+  } finally {
+    // 收合狀態下按重算就順便展開 —— 會按這顆的人是想看新的數字。
+    lazyCollapsed.delete(cardId);
+    paintLazyButton(cardId);
+  }
 }
 
 /** 按下那顆按鈕。沒載過就去載,載過就切換收合。
@@ -1679,7 +1715,9 @@ document.addEventListener("click", (e) => {
   if (e.target.id === "trendDownload") return downloadTrendCsv();
   if (e.target.id === "trendPrint") return downloadTrendPdf();
 
-  // 分析頁四張卡的「載入 / 收起來 / 展開」大按鈕
+  // 分析頁四張卡的兩顆按鈕:重算,以及載入/收合。
+  const fresh = e.target.closest?.("[data-lazy-refresh]");
+  if (fresh) return refreshLazyCard(fresh.dataset.lazyRefresh);
   const lazy = e.target.closest?.("[data-lazy]");
   if (lazy) return toggleLazyCard(lazy.dataset.lazy);
 });
