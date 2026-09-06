@@ -53,12 +53,13 @@ class TestPeriods:
         assert all(p.start.weekday() == 3 for p in spans)
 
     def test_months_quarters_years(self):
+        # 最後一格沒走完時標題會帶上涵蓋幾天(見 TestIncompletePeriod)。
         assert [p.label for p in trend.periods(d("2026-01-15"), d("2026-03-02"), "month")] \
-            == ["2026/01", "2026/02", "2026/03"]
+            == ["2026/01", "2026/02", "2026/03(2天)"]
         assert [p.label for p in trend.periods(d("2026-01-01"), d("2026-07-01"), "quarter")] \
-            == ["2026 Q1", "2026 Q2", "2026 Q3"]
+            == ["2026 Q1", "2026 Q2", "2026 Q3(1天)"]
         assert [p.label for p in trend.periods(d("2024-06-01"), d("2026-02-01"), "year")] \
-            == ["2024 年", "2025 年", "2026 年"]
+            == ["2024 年", "2025 年", "2026 年(32天)"]
 
     def test_the_last_period_stops_at_the_end_date(self):
         """今年那一格不可以算成整年。
@@ -74,6 +75,47 @@ class TestPeriods:
     def test_an_unknown_grain_is_refused(self):
         with pytest.raises(ValueError, match="期別"):
             trend.periods(d("2026-01-01"), d("2026-02-01"), "fortnight")
+
+
+class TestIncompletePeriod:
+    """沒走完的期間不給年化的數字。
+
+    九月的月報在 9/6 只涵蓋六天,而年化是把數字乘上 365.25/6 = 60.9 倍。
+    實測這個場 2026/09 前六天進了 19 頭新女豬、在養 474 頭 —— 年化之後
+    更新率變成 244%(「一年換掉整群 2.4 次」),非生產天數 365 天(理論
+    最大值)。算術沒錯,但六天不是一個速度、是一個瞬間。
+    """
+
+    def test_the_unfinished_period_is_marked(self):
+        spans = trend.periods(d("2026-09-01"), d("2026-09-06"), "month")
+        assert spans[-1].complete is False
+        assert spans[-1].label == "2026/09(6天)"
+
+    def test_a_finished_period_is_not_marked(self):
+        spans = trend.periods(d("2026-08-01"), d("2026-08-31"), "month")
+        assert spans[-1].complete is True
+        assert spans[-1].label == "2026/08"
+
+    def test_annualised_metrics_are_withheld(self):
+        """六天進 1 頭年化成 60 頭,那是雜訊不是速度。"""
+        sows = [sow(1, entry="2026-09-02"), sow(2, entry="2020-01-01")]
+        spans = trend.periods(d("2026-09-01"), d("2026-09-06"), "month")
+        got = values(sows, [], spans)
+        assert got.get("replacement_rate", [None]) == [None]
+        assert got.get("npd", [None]) == [None]
+
+    def test_the_plain_counts_still_show(self):
+        """擋掉的只有年化的比率。「這六天進了幾頭」本身是事實,照顯示。"""
+        sows = [sow(1, entry="2026-09-02"), sow(2, entry="2020-01-01")]
+        spans = trend.periods(d("2026-09-01"), d("2026-09-06"), "month")
+        got = values(sows, [], spans)
+        assert got["gilt_entries"] == [1]
+
+    def test_a_finished_period_keeps_its_annualised_numbers(self):
+        sows = [sow(1, entry="2026-08-02"), sow(2, entry="2020-01-01")]
+        spans = trend.periods(d("2026-08-01"), d("2026-08-31"), "month")
+        got = values(sows, [], spans)
+        assert got["replacement_rate"][0] is not None
 
 
 class TestHeatsNotServices:
@@ -360,6 +402,81 @@ class TestHerdEntries:
         assert got["gilt_entries"] == [1]
         assert got["replacement_rate"][0] is not None
         assert got["replacement_rate"][0] > 0
+
+
+class TestNonProductiveDays:
+    """非生產天數 = 既沒懷孕也沒哺乳的天數。
+
+    **這是一個修過的真實 bug。** 原本的算法是「這一期分娩幾窩,每窩就記
+    114 天生產日」—— 但 8 月 3 日分娩的母豬是 4 到 7 月在懷孕,那 114 天
+    卻全被記進 8 月。以年為單位多記少記會互相抵銷,以月為單位不會:實測
+    這個場 2026/07 分娩 89 窩算出 52 天、2026/08 分娩 50 窩算出 180 天,
+    而那兩個月的豬群幾乎是同一批,變的只是「這個月生了幾窩」。
+
+    改成把每一段懷孕/哺乳跟這一期取交集之後,同樣那幾個月變成
+    81 天與 101 天,不再有 3.5 倍的跳動。
+    """
+
+    # 撐開資料範圍用的那頭母豬要**當期還沒進場**,否則她整期閒著會被
+    # 算進分母,期望值就不是「那一頭的天數」而是兩頭的平均(第一次寫
+    # 這幾條測試時就是這樣被自己騙過去的)。
+    LATER = "2026-07-01"
+
+    def _npd(self, sows, events, start, end, settings=None):
+        spans = trend.periods(d(start), d(end), "month")
+        return values(sows, events, spans, settings)["npd"]
+
+    def test_pregnancy_lands_in_the_months_it_happened(self):
+        """三月配種、七月分娩 —— 四月她在懷孕,四月就該有生產天數。
+
+        舊算法會把整個懷孕期記在七月,四月因此變成整月非生產。
+        """
+        events = [ev(1, "MT", d("2026-03-05")),
+                  ev(1, "FW", d("2026-06-27"), born_alive=12),
+                  ev(1, "WN", d("2026-07-19"), weaned=11)]
+        # 四月整月她都在懷孕 → 非生產天數應該是 0
+        assert self._npd([sow(1)], events, "2026-04-01", "2026-04-30") == [0.0]
+
+    def test_a_mating_that_never_conceived_earns_no_credit(self):
+        """配了沒中、等著重發情的那段日子,正是這個指標要抓的浪費。
+
+        算成懷孕的話,實測這個場 2024 年會從 46 天掉到 27 天 —— 比全國
+        前 10%(39.9 天)還好看。
+        """
+        # 三月配種,四月又配(重發情)→ 第一次沒受胎
+        events = [ev(1, "MT", d("2026-03-05")), ev(1, "MT", d("2026-04-01")),
+                  ev(2, "MT", d("2026-08-01"))]     # 撐開資料範圍
+        npd = self._npd([sow(1), sow(2, entry=self.LATER)], events,
+                        "2026-03-01", "2026-03-31")
+        # 她三月整月都不在生產狀態
+        assert npd[0] is not None and round(npd[0]) == 365
+
+    def test_lactation_counts_as_productive(self):
+        events = [ev(1, "MT", d("2026-01-01")),
+                  ev(1, "FW", d("2026-04-25"), born_alive=12),
+                  ev(1, "WN", d("2026-05-31"), weaned=11),
+                  ev(2, "MT", d("2026-08-01"))]
+        # 五月整月都在哺乳
+        assert self._npd([sow(1), sow(2, entry=self.LATER)], events,
+                         "2026-05-01", "2026-05-31")[0] == 0.0
+
+    def test_the_farrowing_day_is_not_counted_twice(self):
+        """懷孕接哺乳共用分娩那一天。兩段直接相加會讓生產天數超過期間
+        長度,非生產天數就變成負的。"""
+        events = [ev(1, "MT", d("2026-01-01")),
+                  ev(1, "FW", d("2026-04-25"), born_alive=12),
+                  ev(1, "WN", d("2026-05-17"), weaned=11),
+                  ev(2, "MT", d("2026-08-01"))]
+        npd = self._npd([sow(1), sow(2, entry=self.LATER)], events,
+                        "2026-04-01", "2026-04-30")
+        assert npd[0] is not None and npd[0] >= 0, "生產天數被重複計算成負的非生產天數"
+
+    def test_a_sow_doing_nothing_is_all_non_productive(self):
+        """在場但沒配種沒分娩 —— 整段都是非生產,年化就是一整年。"""
+        events = [ev(2, "MT", d("2026-08-01"))]
+        npd = self._npd([sow(1), sow(2, entry=self.LATER)], events,
+                        "2026-03-01", "2026-03-31")
+        assert npd[0] is not None and round(npd[0]) == 365
 
 
 class TestComparingArbitraryPeriods:

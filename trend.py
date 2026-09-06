@@ -62,6 +62,11 @@ class Period(NamedTuple):
     label: str          # 畫面上的字,例如 "08/27–09/02"
     start: date
     end: date
+    # 這一格有沒有走完。最後一格常常沒有 —— 九月的月報在 9/6 只涵蓋
+    # 六天。年化的指標(更新率、淘汰率、母豬死亡率、PSY、非生產天數)
+    # 會把六天乘上 60.9 倍,一個進豬比較密集的星期就會算出「一年換掉
+    # 整群 2.4 次」。所以沒走完的期間不給年化的數字(見 ANNUALISED)。
+    complete: bool = True
 
 
 # 右側「總計 / 平均」兩欄怎麼算 —— 對照 PigCHAMP 原版報告的同兩欄。
@@ -181,6 +186,13 @@ SECTIONS: List[Section] = [
 
 METRICS: Dict[str, Metric] = {m.key: m for s in SECTIONS for m in s.metrics}
 
+# 換算成「照這個速度跑一整年會是多少」的指標。期間沒走完就不給數字 ——
+# 九月的月報在 9/6 只有六天,乘上 60.9 倍之後,一個進豬比較密集的星期
+# 會變成「一年換掉整群 2.4 次」(實測 244%)。算術沒錯,但六天不是一個
+# 速度、是一個瞬間,印出來只會被當成真的。
+ANNUALISED = frozenset({"replacement_rate", "cull_rate", "mortality_rate",
+                        "psy", "npd"})
+
 
 # ── 全國常模對照 ──────────────────────────────────────────────
 #
@@ -257,7 +269,14 @@ def periods(start: date, end: date, grain: str,
         # 一樣、數字才比得起來。夾了的話「從 8/31 開始的週報」第一欄只涵蓋
         # 一天,分娩窩數看起來是別欄的七分之一。PigCHAMP 那份報告也是從
         # 週界起算的(標題寫 01/03 到 01/01,第一欄就是 01/03–01/09)。
-        out.append(Period(key, label, lo, min(hi, end)))
+        complete = hi <= end
+        stop = min(hi, end)
+        # 沒走完的那一格在標題上直接寫出涵蓋幾天。畫面、PDF、CSV 三個
+        # 地方都吃同一個 label,標在這裡一次到位 —— 讀報表的人才不會把
+        # 「六天」當成「一個月」來跟旁邊幾欄比較。
+        if not complete:
+            label = f"{label}({(stop - lo).days + 1}天)"
+        out.append(Period(key, label, lo, stop, complete))
 
     if grain == WEEK:
         cur = _week_start(start, cfg["week_start_day"])
@@ -349,6 +368,9 @@ class _Ctx(NamedTuple):
     # 資料的最後一天。受胎率要據此排除「還太新、看不出重發情」的那幾次
     # 配種 —— 少了它,最近一期永遠會是 100%。
     horizon: date
+    # 全場「在生產」的期間清單 [(起, 迄)],懷孕與哺乳都算。非生產天數
+    # 拿它跟報告期間取交集(見 _productive_spans 與 _overlap_days)。
+    productive: List[tuple]
 
 
 def _build_ctx(sows, events, settings) -> _Ctx:
@@ -394,7 +416,124 @@ def _build_ctx(sows, events, settings) -> _Ctx:
         exits = [e["event_date"] for e in rows if e["event_type"] in EXIT_EVENTS]
         span[row["id"]] = (entry, min(exits) if exits else None)
 
-    return _Ctx(sows, by_sow, by_type, heats, cfg, farrows, span, horizon)
+    # 受胎判定算一次就好,存在發情記錄上 —— 非生產天數(要知道哪幾次
+    # 配種真的懷了)與受胎率(每一期的分子分母)都要用到,而它對同一次
+    # 發情的答案不會因為看哪一期而不同。
+    #
+    # 這是為了不把同一件事算兩次,**不是**效能修正:實測快取前後,月期別
+    # 都是 0.9 秒、年期別都是 3.5 秒,瓶頸不在這裡。
+    for h in heats:
+        h["conceived"] = _conceived(h, by_sow.get(h["sow_id"], []), cfg, horizon)
+
+    productive = _productive_spans(by_sow, heats, cfg, horizon, span)
+    return _Ctx(sows, by_sow, by_type, heats, cfg, farrows, span, horizon,
+                productive)
+
+
+def _overlap_days(a_start: date, a_end: date,
+                  b_start: date, b_end: date) -> int:
+    """兩段日期重疊幾天(含頭含尾)。沒重疊回 0。"""
+    lo = max(a_start, b_start)
+    hi = min(a_end, b_end)
+    return (hi - lo).days + 1 if hi >= lo else 0
+
+
+def _productive_spans(by_sow, heats, cfg, horizon, span) -> List[tuple]:
+    """全場每一段「在生產」的期間:懷孕與哺乳。
+
+    **逐段記在它真正發生的日子上**,這是重點。原本的算法是「這一期分娩
+    幾窩,每窩就記 114 天生產日」—— 但 8 月 3 日分娩的母豬,是 4 到 7 月
+    在懷孕,那 114 天卻全被記進 8 月。以年為單位多記少記會互相抵銷,以月
+    為單位就不會:實測這個場 2026/07 分娩 89 窩、非生產天數算出 52 天,
+    2026/08 分娩 50 窩、算出 180 天,而那兩個月的豬群幾乎是同一批,變的
+    只是「這個月生了幾窩」。
+
+    懷孕從**發情那天**起算,到最早發生的下列事件為止:分娩、流產、驗孕
+    陰性、重發情(表示這次沒受胎)、離群,或滿一個懷孕期。這樣沒受胎的
+    那次只會被記到重發情那天,不會白算 114 天。
+
+    有分娩卻找不到對應配種的(匯入的歷史資料常缺配種),用預產期往回推
+    一個懷孕期 —— 總比整段不算好。
+    """
+    gest = cfg["gestation_days"]
+    lact_cap = timedelta(days=cfg["lactation_days"] * 3)
+    by_heat: Dict[int, List[dict]] = {}
+    for h in heats:
+        by_heat.setdefault(h["sow_id"], []).append(h)
+
+    out: List[tuple] = []
+    for sow_id, rows in by_sow.items():
+        mine: List[tuple] = []
+        farrows, weanings, negatives, aborts = [], [], [], []
+        for e in rows:
+            kind, when = e["event_type"], e["event_date"]
+            if kind == FARROW:
+                farrows.append(when)
+            elif kind == WEAN:
+                weanings.append(when)
+            elif kind == ABORT:
+                aborts.append(when)
+            elif (kind == PREG_CHECK
+                  and (e.get("detail") or {}).get("positive") is False):
+                negatives.append(when)
+        farrows.sort()
+        weanings.sort()
+        gone = span.get(sow_id, (None, None))[1]
+
+        # ── 懷孕 ──
+        #
+        # **沒受胎的那幾次配種一天都不算。** 她從來沒有懷孕過,配了卻沒
+        # 中、等著重發情的那段日子,正是非生產天數要抓的浪費 —— 算成生產
+        # 等於把這個指標最該指出的東西藏起來。實測這個場 2024 年 1,201 次
+        # 發情裡有 312 次沒有導向分娩,把它們算成懷孕會讓非生產天數從
+        # 約 44 天掉到 27 天,比全國前 10% 還好看。
+        #
+        # 判受胎沿用 _conceived(),不另外寫一套 —— 那裡已經處理了這個場
+        # 「只登記驗孕陰性」的記錄慣例。判不出來的(太新)當作懷孕:她
+        # 現在多半真的懷著,而且沒走完的期間本來就不給非生產天數。
+        matched = set()
+        for h in by_heat.get(sow_id, []):
+            start = h["start"]
+            if h.get("conceived") is False:
+                continue
+            stops = [start + timedelta(days=gest), horizon]
+            if gone:
+                stops.append(gone)
+            born = [d for d in farrows
+                    if start < d <= start + timedelta(days=gest + 20)]
+            if born:
+                stops.append(born[0])
+                matched.add(born[0])
+            stops += [d for d in aborts if d > start]
+            stop = min(stops)
+            if stop > start:
+                mine.append((start, stop))
+
+        for d in farrows:
+            if d not in matched:
+                mine.append((d - timedelta(days=gest - 1), d))
+
+        # ── 哺乳 ──
+        for d in farrows:
+            after = [w for w in weanings if w >= d]
+            stop = after[0] if after else min(horizon, d + lact_cap)
+            if gone:
+                stop = min(stop, gone)
+            if stop > d:
+                mine.append((d, stop))
+
+        # **同一頭母豬的區間要先合併。** 懷孕接哺乳會共用分娩那一天、
+        # 重發情前後兩段也可能相接,直接把長度相加會把同一天算兩次 ——
+        # 生產天數被灌水,非生產天數就憑空變好看。實測不合併的話 2024 年
+        # 算出 24 天/母豬/年,比全國前 10%(39.9 天)還好;而由「877 窩
+        # ÷ 平均在養 381 頭 = 年產 2.30 胎」推得的理論值約 52 天。
+        for a, b in sorted(mine):
+            if out and out[-1][2] == sow_id and a <= out[-1][1]:
+                last = out[-1]
+                out[-1] = (last[0], max(last[1], b), sow_id)
+            else:
+                out.append((a, b, sow_id))
+    return [(a, b) for a, b, _ in out]
 
 
 def _conceived(heat: dict, rows: List[dict], cfg: dict,
@@ -477,7 +616,8 @@ def _in_herd(ctx: "_Ctx", sow_id: int, on: date) -> bool:
     return gone is None or gone > on
 
 
-def _period_values(ctx: _Ctx, start: date, end: date) -> Dict[str, Optional[float]]:
+def _period_values(ctx: _Ctx, start: date, end: date,
+                   complete: bool = True) -> Dict[str, Optional[float]]:
     """一個期間的所有指標。
 
     每一項都各自看有沒有底層記錄,**沒有就是 None,不補 0**。0 跟「沒記」
@@ -551,7 +691,7 @@ def _period_values(ctx: _Ctx, start: date, end: date) -> Dict[str, Optional[floa
     # 受胎率:**不是**「陽性/驗孕總數」。這個場只登記驗孕陰性,陽性沒進
     # 系統,那樣算會得到 0%(見 _conceived 的說明)。改成逐次發情判定,
     # 判不出來的那幾次不進分母。
-    judged = [(h, _conceived(h, ctx.by_sow.get(h["sow_id"], []), cfg, ctx.horizon))
+    judged = [(h, h.get("conceived"))
               for h in heats_now]
     decided = [ok for _, ok in judged if ok is not None]
     v["conception_rate"] = _pct(sum(1 for ok in decided if ok), len(decided))
@@ -724,15 +864,20 @@ def _period_values(ctx: _Ctx, start: date, end: date) -> Dict[str, Optional[floa
     v["psy"] = (sum(weaned) / herd * annualize) if herd and weaned else None
 
     # 非生產天數:在群天數扣掉懷孕與哺乳的天數,年化到每頭母豬。
-    # 這個場的 105.6 天遠高於全國中位 62 —— 每一天都是純成本,所以它
-    # 值得單獨一列,而不是埋在別的指標裡。
-    productive = 0
-    for e in fw:
-        productive += cfg["gestation_days"]
-    for span in lact:
-        productive += span
+    # 這個場的數字遠高於全國中位 60.7 —— 每一天都是純成本,所以它值得
+    # 單獨一列,而不是埋在別的指標裡。
+    #
+    # 生產天數是把每一段懷孕/哺乳跟這個期間**取交集**算出來的,不是拿
+    # 「這期分娩幾窩 × 114 天」回推 —— 理由見 _productive_spans。
+    productive = sum(_overlap_days(a, b, start, end) for a, b in ctx.productive)
     sow_days = herd * days
     v["npd"] = ((sow_days - productive) / herd * annualize) if herd else None
+
+    # 期間沒走完就不給年化的數字。抹在最後而不是每一項各判一次 ——
+    # 少判一項就是一個會被當真的假數字,集中在這裡漏不掉。
+    if not complete:
+        for key in ANNUALISED:
+            v[key] = None
     return v
 
 
@@ -745,7 +890,7 @@ def trend_report(sows: Iterable[dict], events: Iterable[dict],
     這兩種需求的差別只是傳進來的清單長什麼樣,不必是兩個功能。
     """
     ctx = _build_ctx(sows, events, settings)
-    values = [_period_values(ctx, p.start, p.end) for p in spans]
+    values = [_period_values(ctx, p.start, p.end, p.complete) for p in spans]
     summary = _summary(ctx, spans, values)
 
     sections = []
