@@ -9,7 +9,7 @@
 """
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -1405,9 +1405,13 @@ class TestRecordPage:
         assert mated, "40 天前的補登記錄從已記錄清單裡消失了"
         assert mated[0]["date"] == long_ago
 
-    def test_a_backdated_record_is_listed_first(self, farm):
-        """補登的要排在最前面。照事件日期排的話它會沉到清單底部,使用者
-        剛記完低頭一看還是找不到 —— 那等於沒修。
+    def test_a_backdated_record_sits_at_its_own_date(self, farm):
+        """補登的紀錄一樣要出現(見上一條),但**排在它自己的日期位置**,
+        不是擠到最前面。
+
+        清單依事件日期排、最新日期在最上面 —— 使用者選的(2026-09-10)。
+        以前是補登排最前面,補登一多就把這週的紀錄擠到收合線下面,再多就擠出
+        清單上限整個不見(回報:「配種紀錄只看得到 9/3,後面就沒有了」)。
         """
         app, token, _ = farm
         sow_id = _post(app, "/api/sows", {"earTag": "1183"}, token)[1]["id"]
@@ -1420,9 +1424,10 @@ class TestRecordPage:
               {"sowId": sow_id, "type": "WN", "date": backdated, "confirm": True}, token)
 
         events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
-        assert events[0]["date"] == backdated
-        assert events[0]["backdated"] is True
-        assert not events[1]["backdated"]
+        dates = [e["date"] for e in events]
+        assert dates == sorted(dates, reverse=True), "沒有照事件日期由新到舊排"
+        assert events[-1]["date"] == backdated
+        assert events[-1]["backdated"] is True
 
     def test_records_inside_the_window_are_not_marked_backdated(self, farm):
         """在範圍內的照舊,不能每一筆都被標成補登(前端會多印一個日期)。"""
@@ -1449,6 +1454,89 @@ class TestRecordPage:
         old = [e for e in events if e.get("kind") == "sow"]
         assert len(old) == config.RECENT_JUST_RECORDED, (
             f"破例的筆數應該有上限,實際回了 {len(old)} 筆")
+
+    def test_old_imported_rows_do_not_crowd_out_this_weeks_records(self, farm):
+        """**這條擋的是一個實際回報過的 bug**:「配種紀錄只看得到 9/3,後面
+        就沒有了」。
+
+        以前「剛記的補登一定看得到」是**每一種類各取 id 最大的 60 筆**。匯入
+        進來的舊公豬、舊進場、舊事件 id 也很大,四種類加起來超過清單上限 200;
+        補登又排在最前面,200 格被塞滿之後,這週記的配種一筆都擠不進去。用這個
+        場 9/06 的備份重現,200 格裡有 172 格是匯入的舊資料。
+        """
+        app, token, farm_id = farm
+        long_ago = date.today() - timedelta(days=200)
+        old_sows = [app.store.add_sow(farm_id, f"OLD{i}", entry_date=long_ago)
+                    for i in range(120)]
+        old_boars = [app.store.add_boar(farm_id, f"B{i}", entry_date=long_ago)
+                     for i in range(120)]
+        for i, sid in enumerate(old_sows):
+            app.store.add_sow_event(farm_id, sid, "MT", long_ago, {"boar_tag": f"X{i}"})
+        for bid in old_boars:
+            app.store.add_boar_event(farm_id, bid, "SC", long_ago, {"volume": 200})
+        # 匯入發生在好幾週前 —— 把這些資料的記錄時間往回撥
+        past = datetime.now(timezone.utc) - timedelta(days=30)
+        for row in (app.store.sows + app.store.boars
+                    + app.store.sow_events + app.store.boar_events):
+            row["created_at"] = past
+
+        sow_id = _post(app, "/api/sows", {"earTag": "NEW"}, token)[1]["id"]
+        today = date.today().isoformat()
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "MT", "date": today, "confirm": True}, token)
+
+        events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
+        mated = [e for e in events
+                 if e.get("kind") == "sow" and e["type"] == "MT" and e["date"] == today]
+        assert mated, "這週記的配種被匯入的舊資料擠出清單了"
+        assert events[0]["type"] == "MT" and events[0]["date"] == today
+        assert not any(e["backdated"] for e in events), (
+            "幾週前匯入的舊資料被當成「剛記的」混進清單")
+
+    def test_the_newest_event_date_is_the_first_row(self, farm):
+        """最新日期在最上面(使用者選的)—— 最後才補一筆五天前的,也要排在
+        今天那 14 筆後面,不能因為它是最後記的就跳到第一列。同一天的,後記
+        的在前。"""
+        app, token, _ = farm
+        sow_ids = [_post(app, "/api/sows", {"earTag": f"S{i}"}, token)[1]["id"]
+                   for i in range(15)]
+        for sid in sow_ids[:14]:
+            _post(app, "/api/sow-events",
+                  {"sowId": sid, "type": "MT", "date": date.today().isoformat(),
+                   "confirm": True}, token)
+        five_days = (date.today() - timedelta(days=5)).isoformat()
+        _post(app, "/api/sow-events",
+              {"sowId": sow_ids[14], "type": "MT", "date": five_days, "confirm": True}, token)
+
+        events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
+        today = date.today().isoformat()
+        assert [e["date"] for e in events[:14]] == [today] * 14
+        assert events[0]["earTag"] == "S13", "同一天的沒有讓後記的排前面"
+        assert events[14]["date"] == five_days and events[14]["earTag"] == "S14"
+
+    def test_a_backfill_is_never_cut_off_by_a_busy_week(self, farm):
+        """一週記超過清單上限時,剛補登的那筆還是要在清單裡。
+
+        依日期排之後補登的沉在最底下;直接照上限截斷的話,最先被砍掉的正是
+        它 —— 又回到「補登完在清單上找不到」,那是這份清單最早被回報的問題。
+        """
+        app, token, _ = farm
+        sow_id = _post(app, "/api/sows", {"earTag": "BUSY"}, token)[1]["id"]
+        for i in range(config.MAX_RECENT_EVENTS + 10):
+            _post(app, "/api/sow-events",
+                  {"sowId": sow_id, "type": "MT",
+                   "date": (date.today() - timedelta(days=i % 7)).isoformat(),
+                   "detail": {"boar_tag": f"B{i}"}, "confirm": True}, token)
+        backfill = (date.today() - timedelta(days=30)).isoformat()
+        _post(app, "/api/sow-events",
+              {"sowId": sow_id, "type": "WN", "date": backfill, "confirm": True}, token)
+
+        events = app.handle_get("/api/recent-events?days=7", token)[1]["events"]
+        assert len(events) == config.MAX_RECENT_EVENTS
+        assert any(e["date"] == backfill for e in events), (
+            "一週記超過上限時,剛補登的紀錄被砍出清單了")
+        dates = [e["date"] for e in events]
+        assert dates == sorted(dates, reverse=True)
 
     def test_owner_can_undo_anything(self, farm):
         app, token, _ = farm

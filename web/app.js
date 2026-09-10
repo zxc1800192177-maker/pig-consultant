@@ -19,7 +19,8 @@ import {
 } from "./lib/v2.js";
 import {
   DEFAULT_SERVICE_ROWS, SIDE_EFFECTS, buildDetail, createsNewAnimal, formFor,
-  hasOtherOption, OTHER_REASON, recordedRow, supportsMultiService, supportsMultiSow,
+  groupRecentEvents, hasOtherOption, OTHER_REASON, recordedRow, supportsMultiService,
+  supportsMultiSow,
   targetsBoar, targetsEither, targetsNothing, usesPerSowRows,
 } from "./lib/record.js";
 import {
@@ -1743,13 +1744,15 @@ let boars = [];
 let allBoars = [];
 let pens = [];               // 移欄表單用,含即時佔用狀態
 let recordCode = null;      // 目前開著的表單是哪一種事件
-// 「已記錄」預設只顯示前幾筆,其餘收起來(使用者要求)。10 筆大約是
-// 一個畫面的高度,足夠確認「剛剛那幾筆記進去了沒」。
-const RECENT_COLLAPSED = 10;
+// 「已記錄」依事件類型分組,每組預設只顯示最新幾筆,其餘收起來(使用者
+// 要求分組)。以前是整份只顯示前 10 筆 —— 分組之後那樣會變成前 10 筆全是
+// 配種,其他組整個看不到,所以改成每組各自收合。5 筆足夠確認「剛剛那幾筆
+// 記進去了沒」,六七組都攤開也還在一兩個畫面內。
+const RECENT_GROUP_COLLAPSED = 5;
 let fixingEventId = null;   // 記錄檢查裡正在修正的那一筆
 let fixingType = "";
 let recentEvents = [];      // 最近 7 天的記錄,展開/收合共用同一份
-let recentExpanded = false;
+const recentOpenGroups = new Set();   // 展開了哪幾組(事件類型),重畫時保留
 
 let recSowTags = [];        // 配種一次記多頭時,目前已加入清單的耳號
 // 這次記錄是不是記在「耳號看不清楚」的母豬身上。用一個布林值而不是往
@@ -2667,13 +2670,17 @@ async function reloadRecent() {
   renderPendingIdentity();
 }
 
-/** 「已記錄」清單。**預設只畫前 10 筆**(使用者要求)—— 一天記三四十筆
- * 是常態,整批攤開會把紀錄頁的表單推到看不到的地方,而使用者來這一區
- * 通常只是要確認「剛剛那筆記進去了沒」,那一定在最前面。
+/** 「已記錄」清單,依事件類型分組(使用者要求:同一種類型放一起)。
+ *
+ * 組的先後照紀錄頁按鈕的排列,組內最新日期在最上面(見 lib/record.js 的
+ * groupRecentEvents)。每組預設只畫最新 RECENT_GROUP_COLLAPSED 筆,各組
+ * 各自展開 —— 一天記三四十筆是常態,整份攤開會把紀錄頁拉得很長。補登的
+ * 排在它自己的日期位置,可能要按該組的展開才看得到(見 server.py 的
+ * _recent_events)。
  *
  * 這裡是重畫而不是用 CSS 遮住多的部分(工作清單的 .tags-fold 那種做法)——
- * 那邊每一格高度一樣,固定 max-height 剛好切在整行;這裡每一列高度不一,
- * 補登的列還會多一行日期,固定高度一定會切在某一列中間。
+ * 那邊每一格高度一樣,固定 max-height 剛好切在整行;這裡每一列的摘要長短
+ * 不一,手機上會折成兩行,固定高度一定會切在某一列中間。
  */
 function renderRecentList() {
   const box = $("recDone");
@@ -2683,15 +2690,21 @@ function renderRecentList() {
     return;
   }
 
-  const shown = recentExpanded
-    ? recentEvents : recentEvents.slice(0, RECENT_COLLAPSED);
-  const rest = recentEvents.length - shown.length;
-
-  box.innerHTML = shown.map(recordedRow).join("")
-    + (recentEvents.length > RECENT_COLLAPSED
-      ? `<button class="foldbtn" id="recDoneFold">${
-          recentExpanded ? "收合 ⌃" : `展開其餘 ${rest} 筆 ›`}</button>`
-      : "");
+  box.innerHTML = groupRecentEvents(recentEvents).map((group) => {
+    const open = recentOpenGroups.has(group.type);
+    const shown = open ? group.events : group.events.slice(0, RECENT_GROUP_COLLAPSED);
+    const rest = group.events.length - shown.length;
+    const fold = group.events.length > RECENT_GROUP_COLLAPSED
+      ? `<button type="button" class="foldbtn" data-rec-group="${escapeHtml(group.type)}">${
+          open ? "收合 ⌃" : `展開其餘 ${rest} 筆 ›`}</button>`
+      : "";
+    return `
+      <div class="tgrp rgrp">
+        <div class="tgrp-h">${escapeHtml(group.label)}<span class="cnt2">${group.events.length} 筆</span></div>
+        <div class="rgrp-rows">${shown.map(recordedRow).join("")}</div>
+        ${fold}
+      </div>`;
+  }).join("");
 }
 
 /** 待確認身分:耳號看不清楚時用日期先記著的母豬。
@@ -3270,8 +3283,12 @@ document.addEventListener("click", (e) => {
   if (e.target.id === "recSowAdd") return addSowTag();
   if (e.target.id === "recAddService") return addServiceRow();
   if (e.target.id === "recAddSowRow") return addSowRow();
-  if (e.target.id === "recDoneFold") {
-    recentExpanded = !recentExpanded;
+  // 「已記錄」各組各自的展開/收合
+  const recGroup = e.target.closest?.("[data-rec-group]");
+  if (recGroup) {
+    const type = recGroup.dataset.recGroup;
+    if (recentOpenGroups.has(type)) recentOpenGroups.delete(type);
+    else recentOpenGroups.add(type);
     return renderRecentList();
   }
 

@@ -12,11 +12,13 @@ import {
   ESTRUS_STABILITY_OPTIONS,
   OTHER_REASON,
   RECORD_FORMS,
+  RECORD_ORDER,
   SIDE_EFFECTS,
   ZONE_OPTIONS,
   buildDetail,
   createsNewAnimal,
   formFor,
+  groupRecentEvents,
   hasOtherOption,
   recordSummary,
   recordedRow,
@@ -798,5 +800,90 @@ describe("種豬進場的來源", () => {
     const { detail, problems } = buildDetail("GA", { earTag: "2580", source: "purchased" });
     assert.deepEqual(problems, []);
     assert.equal(detail.source, "purchased");
+  });
+});
+
+describe("「已記錄」每一列都印事件日期", () => {
+  // 以前只有補登的列才印日期,結果畫面上唯一看得到的日期全是補登的舊
+  // 日期 —— 使用者回報「配種紀錄只看得到 9/3,後面都沒有」,其實 9/10
+  // 的就在清單裡,只是沒寫日期。光看位置也分不出一天在哪裡結束。
+  it("範圍內的列也要寫日期,不能只寫公豬", () => {
+    const html = recordedRow({
+      id: 1, kind: "sow", sowId: 1, type: "MT", date: "2026-09-10",
+      detail: { boar_tag: "D3" }, earTag: "062", backdated: false, canUndo: false,
+    });
+    assert.match(html, /公豬 D3 ・ 2026-09-10/);
+  });
+
+  it("補登的列照舊寫日期", () => {
+    const html = recordedRow({
+      id: 2, kind: "sow", sowId: 2, type: "MT", date: "2026-09-03",
+      detail: { boar_tag: "D3" }, earTag: "079", backdated: true, canUndo: false,
+    });
+    assert.match(html, /公豬 D3 ・ 2026-09-03/);
+  });
+
+  it("沒有其他摘要時只寫日期,不留一個孤零零的分隔點", () => {
+    const html = recordedRow({
+      id: 3, kind: "sow", sowId: 3, type: "AB", date: "2026-09-10",
+      detail: {}, earTag: "100", backdated: false, canUndo: false,
+    });
+    assert.match(html, /2026-09-10/);
+    assert.doesNotMatch(html, /・ 2026-09-10|2026-09-10 ・/);
+  });
+});
+
+describe("「已記錄」依事件類型分組", () => {
+  // 使用者要求「同一種類型放一起」。組的先後照紀錄頁按鈕,組內照伺服器
+  // 給的順序(最新日期在最上面)。
+  const row = (id, type, date, extra = {}) => ({ id, type, date, kind: "sow", detail: {}, ...extra });
+
+  it("同一種類型放在一起,組內保留原本的先後", () => {
+    const groups = groupRecentEvents([
+      row(1, "MT", "2026-09-10"), row(2, "SAL", "2026-09-06"),
+      row(3, "MT", "2026-09-09"), row(4, "SAL", "2026-09-05"),
+      row(5, "MT", "2026-09-01", { backdated: true }),
+    ]);
+    assert.deepEqual(groups.map((g) => [g.type, g.events.map((e) => e.id)]),
+      [["MT", [1, 3, 5]], ["SAL", [2, 4]]]);
+  });
+
+  it("組的先後照紀錄頁按鈕的順序,不照日期", () => {
+    const groups = groupRecentEvents([
+      row(1, "SC", "2026-09-10", { kind: "boar" }),
+      row(2, "SAL", "2026-09-10"),
+      row(3, "MT", "2026-09-01"),
+    ]);
+    assert.deepEqual(groups.map((g) => g.type), ["MT", "SAL", "SC"]);
+  });
+
+  it("母豬與公豬的種豬進場併成一組,種豬死亡也是", () => {
+    const groups = groupRecentEvents([
+      row(1, "GA", "2026-09-10", { kind: "sow-entry" }),
+      row(2, "DTH", "2026-09-09", { kind: "boar" }),
+      row(3, "GA", "2026-09-08", { kind: "boar-entry" }),
+      row(4, "DTH", "2026-09-07", { kind: "sow" }),
+    ]);
+    assert.deepEqual(groups.map((g) => [g.label, g.events.length]),
+      [["種豬進場", 2], ["種豬死亡", 2]]);
+  });
+
+  it("組名用紀錄表單上的名稱", () => {
+    assert.equal(groupRecentEvents([row(1, "MT", "2026-09-10")])[0].label, "配種");
+  });
+
+  it("認不得的類型排在最後,不會從畫面上消失", () => {
+    const groups = groupRecentEvents([row(1, "ZZ", "2026-09-10"), row(2, "MT", "2026-09-01")]);
+    assert.deepEqual(groups.map((g) => [g.type, g.label]), [["MT", "配種"], ["ZZ", "ZZ"]]);
+  });
+
+  it("每一種能記的事件都在排序表裡 —— 新增事件時忘了加會被排到最後", () => {
+    for (const code of Object.keys(RECORD_FORMS)) {
+      assert.ok(RECORD_ORDER.includes(code), `${code} 不在 RECORD_ORDER 裡`);
+    }
+  });
+
+  it("空清單回空陣列", () => {
+    assert.deepEqual(groupRecentEvents([]), []);
   });
 });

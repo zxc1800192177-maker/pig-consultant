@@ -418,12 +418,13 @@ export function recordedRow(event) {
   const animalId = (kind === "boar" || kind === "boar-entry") ? event.boarId
     : kind === "market-death" ? null
     : event.sowId;
-  // 補登的(日期不在清單的天數範圍內)一定要把日期寫出來。平常 extra 有
-  // 內容時就不顯示日期,但補登的列如果只寫「公豬 B9」,使用者會看不出來
-  // 這筆到底記成哪一天 —— 而他剛剛就是為了那個日期才補登的。
-  const sub = event.backdated
-    ? [extra, event.date].filter(Boolean).join(" ・ ")
-    : (extra || event.date);
+  // 每一列都寫出事件日期。
+  //
+  // 以前只有補登的才寫,平常 extra 有內容就不顯示。清單雖然依日期排,但
+  // 光看位置分不出一天在哪裡結束、下一天從哪裡開始;而且畫面上唯一印出來
+  // 的日期全是補登的舊日期 —— 實際被回報過:使用者以為「配種紀錄只記到
+  // 9/3,後面都沒有」,其實 9/10 的就在清單裡,只是沒寫日期。
+  const sub = [extra, event.date].filter(Boolean).join(" ・ ");
   return `
     <div class="done-row">
       <div class="done-b">
@@ -435,4 +436,45 @@ export function recordedRow(event) {
            ${animalId != null ? `data-animal="${animalId}"` : ""}>收回</button>`
         : ""}
     </div>`;
+}
+
+/** 「已記錄」清單分組的先後 —— 跟紀錄頁按鈕的排列一樣(繁殖事件、例外
+ * 事件、場務、公豬)。使用者在按鈕上找得到的位置,在清單裡也在同一個
+ * 地方;照日期排組的話,「配種」這組今天在第一個、明天可能跑到第三個。
+ *
+ * 寄養移出沒有自己的按鈕(從「寄養」那顆進去),排在寄養移入後面。
+ * 新增一種事件時要加進來,否則它會被排到最後 —— 有測試會提醒。
+ */
+export const RECORD_ORDER = [
+  "MT", "FW", "WN", "PD", "FON", "FOF", "GA",
+  "PL", "DTH", "MKD", "AB", "SAL",
+  "MV",
+  "SC",
+];
+
+/** 把「已記錄」清單依事件類型分組(使用者要求:同一種類型放一起)。
+ *
+ * 母豬跟公豬的「種豬進場」「種豬死亡」各自併成一組 —— 紀錄頁上它們本來
+ * 就是同一顆按鈕、同一張表單,分成兩組反而要多找一個地方。
+ *
+ * 組內保留伺服器給的順序(最新日期在最上面,同一天後記的在前),這裡不
+ * 重排。認不得的類型排在最後、依第一次出現的先後,不讓任何一筆從畫面上
+ * 消失。
+ */
+export function groupRecentEvents(events) {
+  const byType = new Map();
+  for (const event of events || []) {
+    if (!byType.has(event.type)) byType.set(event.type, []);
+    byType.get(event.type).push(event);
+  }
+  const rank = (type) => {
+    const i = RECORD_ORDER.indexOf(type);
+    return i === -1 ? RECORD_ORDER.length : i;
+  };
+  return [...byType.entries()]
+    .map(([type, list], seen) => ({ type, seen, list }))
+    .sort((a, b) => rank(a.type) - rank(b.type) || a.seen - b.seen)
+    .map(({ type, list }) => ({
+      type, label: formFor(type)?.label || type, events: list,
+    }));
 }

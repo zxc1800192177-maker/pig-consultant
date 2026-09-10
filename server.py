@@ -2117,102 +2117,147 @@ class Application:
                        or (animal.get("created_by") == user.id
                            and newest_id is not None and animal["id"] == newest_id))
 
-        def just_recorded(items):
-            """最近記進來的那幾筆的 id,不論事件日期多早。
+        def recorded_key(row):
+            """「什麼時候記進來的」—— 挑「剛記的」、以及同一天內誰排前面都用它。
 
-            補登(記錄的日期在 since 之前)本來會整個從這份清單消失 ——
-            資料有存進去,但使用者看不到,跟沒記到無法區分,實際被回報過。
-            補登的範圍不一定,放寬天數解不掉,所以改成「不管日期多早,
-            剛記的一定看得到」(使用者選的)。
-
-            id 是遞增序號,所以 id 最大的就是最新記進來的。
+            **不能用 id。** id 只是各表各自的流水號:從 PigCHAMP 匯入、或還原
+            備份寫進來的舊資料 id 一樣可以很大,而母豬事件、公豬進場…各表的
+            id 互相比較也沒有意義。沒有記錄時間的列(不該發生)排到最後,
+            不讓它丟例外。
             """
-            newest = sorted(items, key=lambda i: i["id"], reverse=True)
-            return {i["id"] for i in newest[:config.RECENT_JUST_RECORDED]}
+            at = row.get("created_at")
+            return (at is not None, at or 0, row["id"])
 
         all_sows = self.store.list_sows(farm_id, None)
-        sow_tags = {s["id"]: s["ear_tag"] for s in all_sows}
-
+        all_boars = self.store.list_boars(farm_id, None)
         sow_events = self.store.list_sow_events(farm_id)
+        boar_events = self.store.list_boar_events(farm_id)
+        deaths = self.store.list_market_deaths(farm_id)
+        sow_tags = {s["id"]: s["ear_tag"] for s in all_sows}
+        boar_tags = {b["id"]: b["ear_tag"] for b in all_boars}
+
+        # 「剛記的」:**全部種類合計**、這幾天內記進來、記錄時間最新的那幾筆,
+        # 不論事件日期多早。
+        #
+        # 補登(記錄的日期在 since 之前)本來會整個從這份清單消失 —— 資料有
+        # 存進去,但使用者看不到,跟沒記到無法區分,實際被回報過。補登的範圍
+        # 不一定,放寬天數解不掉,所以改成「不管日期多早,剛記的一定看得到」
+        # (使用者選的)。
+        #
+        # 以前這裡是**每一種類各取 id 最大的 60 筆**,兩個錯疊在一起,把使用者
+        # 9/4 以後記的配種從清單上整個抹掉(回報:「配種紀錄只看得到 9/3,
+        # 後面就沒有了」):
+        #   1. 五種類各 60 筆,補登最多可以到 300 筆,超過清單上限 200。
+        #   2. 「id 最大」不等於「剛記的」—— 匯入的舊公豬、舊進場 id 也很大。
+        #      用這個場 9/06 的備份重現,200 格裡有 172 格是這種資料。
+        # 補登又排在最前面,200 格被塞滿之後,範圍內的正常紀錄一筆都擠不進去。
+        #
+        # 記錄時間比 since 還早的一律不算「剛記的」:幾週前匯入的資料不該因為
+        # 在同一批裡剛好排最後就混進來。(記錄時間是 UTC,拿日期比會跟本地
+        # 時間差幾個鐘頭,對以天為單位的清單沒有影響。)
+        ranked = sorted(
+            [("sow", e) for e in sow_events]
+            + [("sow-entry", s) for s in all_sows if s.get("entry_date")]
+            + [("boar", e) for e in boar_events]
+            + [("boar-entry", b) for b in all_boars if b.get("entry_date")]
+            + [("market-death", d) for d in deaths],
+            key=lambda pair: recorded_key(pair[1]), reverse=True)
+        just = set()
+        for kind, row in ranked:
+            at = row.get("created_at")
+            if (len(just) >= config.RECENT_JUST_RECORDED
+                    or at is None or at.date() < since):
+                break
+            just.add((kind, row["id"]))
+
+        def wanted(kind, row, day):
+            return day >= since or (kind, row["id"]) in just
+
         sow_newest = max(sow_events, key=lambda e: (e["event_date"], e["id"]), default=None)
         # 哪幾頭已經有事件掛著 —— 從已經撈好的全場事件裡算,不是每頭各查
         # 一次。以前是後者:一週內進場 40 頭就等於每次載入頁面多打 40 次
         # 資料庫,而這支 API 每次開頁、每記一筆都會被呼叫到。
         sows_with_events = {e["sow_id"] for e in sow_events}
-        sow_just = just_recorded(sow_events)
-        recent = [
-            {**self._event_payload(e), "kind": "sow",
-             "earTag": sow_tags.get(e["sow_id"], ""),
-             "backdated": e["event_date"] < since,
-             "canUndo": can_undo(e, sow_newest)}
-            for e in sow_events
-            if e["event_date"] >= since or e["id"] in sow_just
+        rows = [
+            ({**self._event_payload(e), "kind": "sow",
+              "earTag": sow_tags.get(e["sow_id"], ""),
+              "backdated": e["event_date"] < since,
+              "canUndo": can_undo(e, sow_newest)},
+             (e["event_date"], recorded_key(e)), ("sow", e["id"]) in just)
+            for e in sow_events if wanted("sow", e, e["event_date"])
         ]
 
         newest_sow_id = max((s["id"] for s in all_sows), default=None)
-        sow_entry_just = just_recorded([s for s in all_sows if s.get("entry_date")])
-        recent += [
-            {"id": s["id"], "sowId": s["id"], "kind": "sow-entry", "type": "GA",
-             "date": _iso(s["entry_date"]),
-             "detail": {"breed": s.get("breed") or ""},
-             "earTag": s["ear_tag"],
-             "backdated": s["entry_date"] < since,
-             "canUndo": can_undo_entry(
-                 s, newest_sow_id, s["id"] in sows_with_events)}
+        rows += [
+            ({"id": s["id"], "sowId": s["id"], "kind": "sow-entry", "type": "GA",
+              "date": _iso(s["entry_date"]),
+              "detail": {"breed": s.get("breed") or ""},
+              "earTag": s["ear_tag"],
+              "backdated": s["entry_date"] < since,
+              "canUndo": can_undo_entry(
+                  s, newest_sow_id, s["id"] in sows_with_events)},
+             (s["entry_date"], recorded_key(s)), ("sow-entry", s["id"]) in just)
             for s in all_sows
-            if s.get("entry_date")
-            and (s["entry_date"] >= since or s["id"] in sow_entry_just)
+            if s.get("entry_date") and wanted("sow-entry", s, s["entry_date"])
         ]
 
-        all_boars = self.store.list_boars(farm_id, None)
-        boar_tags = {b["id"]: b["ear_tag"] for b in all_boars}
-
-        boar_events = self.store.list_boar_events(farm_id)
         boar_newest = max(boar_events, key=lambda e: (e["event_date"], e["id"]), default=None)
         boars_with_events = {e["boar_id"] for e in boar_events}
-        boar_just = just_recorded(boar_events)
-        recent += [
-            {**self._boar_event_payload(e), "kind": "boar",
-             "earTag": boar_tags.get(e["boar_id"], ""),
-             "backdated": e["event_date"] < since,
-             "canUndo": can_undo(e, boar_newest)}
-            for e in boar_events
-            if e["event_date"] >= since or e["id"] in boar_just
+        rows += [
+            ({**self._boar_event_payload(e), "kind": "boar",
+              "earTag": boar_tags.get(e["boar_id"], ""),
+              "backdated": e["event_date"] < since,
+              "canUndo": can_undo(e, boar_newest)},
+             (e["event_date"], recorded_key(e)), ("boar", e["id"]) in just)
+            for e in boar_events if wanted("boar", e, e["event_date"])
         ]
 
         newest_boar_id = max((b["id"] for b in all_boars), default=None)
-        boar_entry_just = just_recorded([b for b in all_boars if b.get("entry_date")])
-        recent += [
-            {"id": b["id"], "boarId": b["id"], "kind": "boar-entry", "type": "GA",
-             "date": _iso(b["entry_date"]),
-             "detail": {"breed": b.get("breed") or ""},
-             "earTag": b["ear_tag"],
-             "backdated": b["entry_date"] < since,
-             "canUndo": can_undo_entry(
-                 b, newest_boar_id, b["id"] in boars_with_events)}
+        rows += [
+            ({"id": b["id"], "boarId": b["id"], "kind": "boar-entry", "type": "GA",
+              "date": _iso(b["entry_date"]),
+              "detail": {"breed": b.get("breed") or ""},
+              "earTag": b["ear_tag"],
+              "backdated": b["entry_date"] < since,
+              "canUndo": can_undo_entry(
+                  b, newest_boar_id, b["id"] in boars_with_events)},
+             (b["entry_date"], recorded_key(b)), ("boar-entry", b["id"]) in just)
             for b in all_boars
-            if b.get("entry_date")
-            and (b["entry_date"] >= since or b["id"] in boar_entry_just)
+            if b.get("entry_date") and wanted("boar-entry", b, b["entry_date"])
         ]
 
         # 肉豬死亡不掛在任何母豬或公豬身上,自成一份「最新一筆」,跟母豬
         # 事件、公豬事件的收回權限各自獨立判斷(理由同上,兩者互不影響)。
-        deaths = self.store.list_market_deaths(farm_id)
         death_newest = max(deaths, key=lambda d: (d["event_date"], d["id"]), default=None)
-        death_just = just_recorded(deaths)
-        recent += [
-            {**self._market_death_payload(d), "kind": "market-death",
-             "type": "MKD", "earTag": "",
-             "backdated": d["event_date"] < since,
-             "canUndo": can_undo(d, death_newest)}
-            for d in deaths
-            if d["event_date"] >= since or d["id"] in death_just
+        rows += [
+            ({**self._market_death_payload(d), "kind": "market-death",
+              "type": "MKD", "earTag": "",
+              "backdated": d["event_date"] < since,
+              "canUndo": can_undo(d, death_newest)},
+             (d["event_date"], recorded_key(d)), ("market-death", d["id"]) in just)
+            for d in deaths if wanted("market-death", d, d["event_date"])
         ]
 
-        # 補登的排在最前面 —— 它們的日期比較早,照日期排會沉到清單底部,
-        # 使用者剛記完低頭一看還是找不到,等於沒修。
-        recent.sort(key=lambda e: (e["backdated"], e["date"], e["id"]), reverse=True)
-        return 200, {"events": recent[:config.MAX_RECENT_EVENTS]}
+        # 依**事件日期**排,最新日期在最上面;同一天的,後記的在前。
+        #
+        # 使用者選的(2026-09-10)。另一個選項是「依記錄時間排、最後記的在
+        # 最上面」—— 剛補登的那筆會是第一列,但補登跟當天的紀錄會交錯,9/3
+        # 排在 9/10 上面。使用者要的是一眼就看出記到哪一天。
+        #
+        # 以前是「補登排最前面、再依日期」:補登一多,範圍內的正常紀錄就被
+        # 擠到收合線下面,再多就擠出上限整個不見(回報:「配種紀錄只看得到
+        # 9/3,後面就沒有了」)。
+        #
+        # **上限要先保住「剛記的」再砍。** 依日期排之後補登的沉在最底下,
+        # 直接照上限(MAX_RECENT_EVENTS)截斷的話,一週記超過上限時最先被
+        # 砍掉的正是剛補登的那幾筆 —— 又回到「補登完在清單上找不到」。所以先留下剛記的(最多
+        # RECENT_JUST_RECORDED 筆,遠小於上限),剩下的格子再從最新日期往下填。
+        pinned = [row for row in rows if row[2]]
+        others = sorted((row for row in rows if not row[2]),
+                        key=lambda row: row[1], reverse=True)
+        room = max(0, config.MAX_RECENT_EVENTS - len(pinned))
+        chosen = sorted(pinned + others[:room], key=lambda row: row[1], reverse=True)
+        return 200, {"events": [payload for payload, _, _ in chosen]}
 
 
     def _grade(self, payload: dict) -> Tuple[int, dict]:

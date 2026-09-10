@@ -22,7 +22,7 @@ import json
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import config
@@ -573,6 +573,8 @@ class InMemoryStore(Store):
         self._next_check_id = 1
         self._next_drug_id = 1
         self._next = collections.Counter()
+        # 上一次發出去的記錄時間,見 _now()。
+        self._clock_last = None
         # (sow_id, event_type, event_date) → event_id。對應 PostgresStore 的
         # sow_events_dedupe 唯一索引 —— 沒有它,匯入時的判重是 O(n²)。
         self._event_key = {}
@@ -581,6 +583,19 @@ class InMemoryStore(Store):
     def batch(self):
         """沒有連線可省,直接把自己借出去用(見 Store.batch 的說明)。"""
         yield self
+
+    def _now(self):
+        """嚴格遞增的記錄時間(created_at)。
+
+        「已記錄」清單依記錄時間排,剛記的排最上面。Windows 的時鐘解析度
+        大約 15ms,連續寫入會拿到同一個時間,順序就變成看運氣;PostgresStore
+        每一筆各自有交易時間,記憶體版得自己保證不重複。
+        """
+        now = datetime.now(timezone.utc)
+        if self._clock_last is not None and now <= self._clock_last:
+            now = self._clock_last + timedelta(microseconds=1)
+        self._clock_last = now
+        return now
 
     def _new_id(self, kind: str) -> int:
         self._next[kind] += 1
@@ -827,7 +842,7 @@ class InMemoryStore(Store):
             "sire_tag": sire_tag, "dam_tag": dam_tag, "parity": parity,
             "status": "active", "pen_id": None, "photo_url": "",
             "created_by": created_by, "is_unknown": is_unknown,
-            "source": source,
+            "source": source, "created_at": self._now(),
         })
         return sow_id
 
@@ -899,7 +914,7 @@ class InMemoryStore(Store):
             "id": boar_id, "farm_id": farm_id, "ear_tag": ear_tag,
             "entry_date": entry_date, "breed": breed,
             "sire_tag": sire_tag, "dam_tag": dam_tag, "status": "active",
-            "created_by": created_by, "source": source,
+            "created_by": created_by, "source": source, "created_at": self._now(),
         })
         return boar_id
 
@@ -940,6 +955,7 @@ class InMemoryStore(Store):
             "id": event_id, "farm_id": farm_id, "boar_id": boar_id,
             "event_type": event_type, "event_date": event_date,
             "detail": dict(detail or {}), "recorded_by": recorded_by, "excluded": False,
+            "created_at": self._now(),
         })
         return event_id
 
@@ -962,6 +978,7 @@ class InMemoryStore(Store):
         self.market_deaths.append({
             "id": death_id, "farm_id": farm_id, "event_date": event_date,
             "reason": reason, "weight_kg": weight_kg, "recorded_by": recorded_by,
+            "created_at": self._now(),
         })
         return death_id
 
@@ -991,6 +1008,7 @@ class InMemoryStore(Store):
             "event_type": event_type, "event_date": event_date,
             "detail": dict(detail or {}), "seq": seq,
             "recorded_by": recorded_by, "excluded": False,
+            "created_at": self._now(),
         })
         return event_id
 
@@ -1505,9 +1523,9 @@ class PostgresStore(Store):
 
     SOW_COLS = ("id, farm_id, ear_tag, entry_date, birth_date, breed, sire_tag,"
                 " dam_tag, parity, status, pen_id, photo_url, created_by, is_unknown,"
-                " source")
+                " source, created_at")
     EVENT_COLS = ("id, farm_id, sow_id, event_type, event_date, detail,"
-                  " seq, recorded_by, excluded")
+                  " seq, recorded_by, excluded, created_at")
 
     @staticmethod
     def _rows(cur, cols):
@@ -1729,7 +1747,7 @@ class PostgresStore(Store):
                  created_by, source)).fetchone()[0]
 
     BOAR_COLS = ("id, farm_id, ear_tag, entry_date, breed, sire_tag, dam_tag, status,"
-                 " created_by, source")
+                 " created_by, source, created_at")
 
     def list_boars(self, farm_id, status=None):
         sql = f"SELECT {self.BOAR_COLS} FROM boars WHERE farm_id = %s"
@@ -1776,7 +1794,7 @@ class PostgresStore(Store):
             return row is not None
 
     BOAR_EVENT_COLS = ("id, farm_id, boar_id, event_type, event_date, detail,"
-                       " recorded_by, excluded")
+                       " recorded_by, excluded, created_at")
 
     def add_boar_event(self, farm_id, boar_id, event_type, event_date,
                        detail=None, recorded_by=None) -> int:
@@ -1807,7 +1825,7 @@ class PostgresStore(Store):
                 (event_id, farm_id)).fetchone()
             return row is not None
 
-    MARKET_DEATH_COLS = "id, farm_id, event_date, reason, weight_kg, recorded_by"
+    MARKET_DEATH_COLS = "id, farm_id, event_date, reason, weight_kg, recorded_by, created_at"
 
     def add_market_death(self, farm_id, event_date, reason="", weight_kg=None,
                          recorded_by=None) -> int:

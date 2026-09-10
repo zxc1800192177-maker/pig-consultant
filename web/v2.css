@@ -675,3 +675,12 @@ body { padding-bottom: 96px; }
 }
 .lazy-refresh:active:not(:disabled) { transform: scale(.99); }
 .lazy-refresh:disabled { color: var(--ink-faint); cursor: default; }
+
+/* ── 「已記錄」依事件類型分組 ──
+   沿用工作清單的 .tgrp 外框與 .tgrp-h 標題:兩處都是「依類型分組、標題帶
+   筆數、可以展開其餘」,長得一樣使用者才認得出是同一種東西。
+   .done-row 在卡片裡原本貼齊左右(沒有左右內距),放進有框線的 .tgrp 會
+   貼到框上,所以只在這裡補。列包在 .rgrp-rows 裡,最後一列才吃得到
+   :last-child 去掉底線,不會跟下面展開鈕的上框線疊成兩條。 */
+.rgrp .tgrp-h { padding-bottom: 8px; border-bottom: 1px solid var(--border-light); }
+.rgrp .done-row { padding-left: 13px; padding-right: 13px; }
